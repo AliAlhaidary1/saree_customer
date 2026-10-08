@@ -1,0 +1,4 @@
+storePassword=MsneQgsXbkpkEa9SHxEj
+keyPassword=MsneQgsXbkpkEa9SHxEj
+keyAlias=upload
+storeFile=app/upload-keystore.jks

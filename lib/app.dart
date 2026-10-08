@@ -6,6 +6,7 @@ import 'core/app_controller.dart';
 import 'core/app_theme.dart';
 import 'core/json_util.dart';
 import 'features/account/account_screens.dart';
+import 'features/akhdimni/akhdimni_screens.dart';
 import 'features/assistant/assistant_screen.dart';
 import 'features/auth/auth_screens.dart';
 import 'features/cart/cart_screens.dart';
@@ -13,6 +14,7 @@ import 'features/checkout_groups/checkout_groups_screens.dart';
 import 'features/haraj/haraj_screens.dart';
 import 'features/home/home_screen.dart';
 import 'features/more/more_screens.dart';
+import 'features/notifications/notifications_screen.dart';
 import 'features/products/categories_screen.dart';
 import 'features/products/products_screens.dart';
 import 'features/roles/roles_screens.dart';
@@ -27,7 +29,14 @@ GoRouter buildRouter() {
         path: '/login',
         pageBuilder: (_, state) => AppTheme.slidePage(
           key: state.pageKey,
-          child: const LoginScreen(),
+          child: LoginScreen(next: state.uri.queryParameters['next']),
+        ),
+      ),
+      GoRoute(
+        path: '/change-password',
+        pageBuilder: (_, state) => AppTheme.slidePage(
+          key: state.pageKey,
+          child: const ChangePasswordScreen(),
         ),
       ),
       GoRoute(
@@ -90,11 +99,7 @@ GoRouter buildRouter() {
         path: '/notifications',
         pageBuilder: (_, state) => AppTheme.slidePage(
           key: state.pageKey,
-          child: SimpleListScreen(
-            title: appController.t('notification'),
-            loader: () async =>
-                (await appController.api.notifications()).dataMaps,
-          ),
+          child: const NotificationsScreen(),
         ),
       ),
       GoRoute(
@@ -105,6 +110,11 @@ GoRouter buildRouter() {
             title: appController.t('wallet'),
             loader: () async =>
                 (await appController.api.transactions(type: 'wallet')).dataMaps,
+            pageLoader: (limit, offset) async => (await appController.api
+                    .transactions(limit: limit, offset: offset, type: 'wallet'))
+                .dataMaps,
+            emptyMessage: appController.t('no_transaction'),
+            header: const WalletSettingsHeader(),
           ),
         ),
       ),
@@ -115,6 +125,10 @@ GoRouter buildRouter() {
           child: SimpleListScreen(
             title: appController.t('transactions'),
             loader: () async => (await appController.api.transactions()).dataMaps,
+            pageLoader: (limit, offset) async => (await appController.api
+                    .transactions(limit: limit, offset: offset))
+                .dataMaps,
+            emptyMessage: appController.t('no_transaction'),
           ),
         ),
       ),
@@ -230,7 +244,8 @@ GoRouter buildRouter() {
         pageBuilder: (_, state) => AppTheme.slidePage(
           key: state.pageKey,
           child: AkhdimniCreateScreen(
-            type: state.uri.queryParameters['type'] ?? 'point_to_point',
+            categoryId: state.uri.queryParameters['category_id'],
+            type: state.uri.queryParameters['type'],
           ),
         ),
       ),
@@ -287,6 +302,39 @@ GoRouter buildRouter() {
           key: state.pageKey,
           child: const AssistantScreen(),
         ),
+      ),
+      GoRoute(
+        path: '/faq',
+        pageBuilder: (_, state) => AppTheme.slidePage(
+          key: state.pageKey,
+          child: const FaqScreen(),
+        ),
+      ),
+      GoRoute(
+        path: '/policy/:type',
+        pageBuilder: (_, state) {
+          final type = state.pathParameters['type'] ?? 'Privacy_Policy';
+          const keys = {
+            'Privacy_Policy': 'privacy_policy',
+            'ReturnsAndExchangesPolicy': 'returns_and_exchanges_policy',
+            'Shipping_Policy': 'shipping_policy',
+            'Cancellation_Policy': 'cancellation_policy',
+          };
+          const titles = {
+            'Privacy_Policy': 'privacy_policy',
+            'ReturnsAndExchangesPolicy': 'recharge_and_exchange_policy',
+            'Shipping_Policy': 'shipping_policy',
+            'Cancellation_Policy': 'cancellation_policy',
+          };
+          return AppTheme.slidePage(
+            key: state.pageKey,
+            child: CmsScreen(
+              title: appController
+                  .t(titles[type] ?? 'privacy_policy'),
+              settingKey: keys[type] ?? 'privacy_policy',
+            ),
+          );
+        },
       ),
       ShellRoute(
         builder: (context, state, child) =>
@@ -367,6 +415,14 @@ class AppShell extends StatelessWidget {
           _BrandHeader(app: app, title: _brandTitle()),
           Expanded(child: child),
         ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        heroTag: 'assistant_fab',
+        mini: true,
+        backgroundColor: AppTheme.accentOrange,
+        tooltip: app.t('assistant_title'),
+        onPressed: () => context.push('/assistant'),
+        child: const Icon(Icons.smart_toy_outlined, color: Colors.white),
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
@@ -517,22 +573,8 @@ class _BrandHeader extends StatelessWidget {
                       ),
                     ),
                   ),
-                  // Notification bell with orange badge
-                  IconButton(
-                    onPressed: () => context.push('/notifications'),
-                    icon: Badge(
-                      isLabelVisible: true,
-                      backgroundColor: AppTheme.accentOrange,
-                      label: const Text(
-                        '!',
-                        style: TextStyle(fontSize: 10, color: Colors.white),
-                      ),
-                      child: const Icon(
-                        Icons.notifications_outlined,
-                        color: AppTheme.backgroundWhite,
-                      ),
-                    ),
-                  ),
+                  // Notification bell with unread count (parity with front Header)
+                  const NotificationBell(),
                   IconButton(
                     onPressed: () => context.push('/sellers'),
                     icon: const Icon(

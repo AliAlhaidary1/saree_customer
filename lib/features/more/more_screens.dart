@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:dio/dio.dart';
-
 import '../../core/app_controller.dart';
+import '../../core/business_hours.dart';
 import '../../core/city_mode.dart';
 import '../../core/device_location.dart';
 import '../../core/json_util.dart';
@@ -27,9 +25,16 @@ class SellersScreen extends StatefulWidget {
 class _SellersScreenState extends State<SellersScreen> {
   List<Map<String, dynamic>> items = [];
   bool loading = true;
+  bool loadingMore = false;
   String? selectedType;
   String sort = 'nearest';
+  String search = '';
+  int minRating = 0;
+  int total = 0;
+  int offset = 0;
+  static const _limit = 24;
   ({double latitude, double longitude}) origin = (latitude: 0, longitude: 0);
+  final _searchC = TextEditingController();
 
   @override
   void initState() {
@@ -39,10 +44,17 @@ class _SellersScreenState extends State<SellersScreen> {
   }
 
   @override
+  void dispose() {
+    _searchC.dispose();
+    super.dispose();
+  }
+
+  @override
   void didUpdateWidget(covariant SellersScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.typeId != widget.typeId) {
       selectedType = widget.typeId;
+      _load();
     }
   }
 
@@ -65,41 +77,60 @@ class _SellersScreenState extends State<SellersScreen> {
         1000;
   }
 
-  Future<void> _load() async {
+  /// Parity with front ShopBySellersPage + useShopBySellers:
+  /// GET /sellers?lat,lng,limit=24,offset,sort,search,type — total displayed.
+  Future<void> _load({bool more = false}) async {
+    if (more) {
+      if (loadingMore) return;
+      setState(() => loadingMore = true);
+    } else {
+      setState(() => loading = true);
+    }
     final device = await currentDevicePoint();
     origin = device ?? appController.browseCoords;
+    // Front falls back to rating sort when no precise address/GPS.
+    var effectiveSort = sort;
+    if (sort == 'nearest' && origin.latitude == 0 && origin.longitude == 0) {
+      effectiveSort = 'rating';
+    }
+    final nextOffset = more ? offset + _limit : 0;
     final res = await appController.api.sellers(
       latitude: origin.latitude,
       longitude: origin.longitude,
-      limit: 500,
+      limit: _limit,
+      offset: nextOffset,
+      search: search.isNotEmpty ? search : null,
+      sort: effectiveSort.isNotEmpty ? effectiveSort : null,
+      type: selectedType?.isNotEmpty == true ? selectedType : null,
+      minRating: minRating > 0 ? minRating : null,
     );
     if (!mounted) return;
-    setState(() {
-      items = res.dataMaps;
-      loading = false;
-    });
-  }
-
-  List<int> _sellerTypeIds(Map<String, dynamic> seller) {
-    final ids = seller['category_ids'];
-    if (ids is List) {
-      return ids
-          .map((e) => int.tryParse('$e') ?? 0)
-          .where((e) => e > 0)
-          .toList();
+    var rows = res.dataMaps;
+    var serverTotal = J.i(res.raw['total'] ?? res.dataMap['total']);
+    final dataNode = res.raw['data'];
+    if (rows.isEmpty && dataNode is Map) {
+      rows = J.maps(dataNode['data']);
+      serverTotal = J.i(dataNode['total'] ?? serverTotal);
     }
-    final csv = J.str(seller['categories']);
-    if (csv.isEmpty) return [];
-    return csv
-        .split(',')
-        .map((e) => int.tryParse(e.trim()) ?? 0)
-        .where((e) => e > 0)
-        .toList();
+    setState(() {
+      offset = nextOffset;
+      items = more ? [...items, ...rows] : rows;
+      total = serverTotal > 0 ? serverTotal : items.length;
+      loading = false;
+      loadingMore = false;
+    });
   }
 
   void _selectType(String? id) {
     setState(() => selectedType = id);
-    context.go(id == null || id.isEmpty ? '/sellers' : '/sellers?type=$id');
+    _load();
+  }
+
+  String _typeName(Map<String, dynamic> cat) {
+    final isAr = appController.i18n.code == 'ar';
+    final ar = J.str(cat['name_ar']);
+    final en = J.str(cat['name_en'] ?? cat['name']);
+    return isAr ? (ar.isNotEmpty ? ar : en) : (en.isNotEmpty ? en : ar);
   }
 
   @override
@@ -108,10 +139,8 @@ class _SellersScreenState extends State<SellersScreen> {
     final types = app.rootCategories.isNotEmpty
         ? app.rootCategories
         : J.maps(app.shop?['categories']);
-    final visible = items.where((seller) {
-      if (selectedType == null || selectedType!.isEmpty) return true;
-      return _sellerTypeIds(seller).contains(int.tryParse(selectedType!) ?? 0);
-    }).toList()
+    // Server already filters by type/search/sort; keep local nearest fallback sort.
+    final visible = List<Map<String, dynamic>>.from(items)
       ..sort((a, b) {
         if (sort != 'nearest') return 0;
         final da = _distanceKm(a);
@@ -157,7 +186,7 @@ class _SellersScreenState extends State<SellersScreen> {
                         final cat = types[i - 1];
                         final id = '${cat['id']}';
                         return ChoiceChip(
-                          label: Text(J.str(cat['name'])),
+                          label: Text(_typeName(cat)),
                           selected: selectedType == id,
                           onSelected: (_) =>
                               _selectType(selectedType == id ? null : id),
@@ -165,36 +194,134 @@ class _SellersScreenState extends State<SellersScreen> {
                       },
                     ),
                   ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _searchC,
+                          decoration: InputDecoration(
+                            hintText: app.t('search_stores_placeholder'),
+                            prefixIcon: const Icon(Icons.search, size: 18),
+                            isDense: true,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
+                          onSubmitted: (v) {
+                            search = v.trim();
+                            _load();
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      DropdownButton<String>(
+                        value: sort,
+                        items: [
+                          DropdownMenuItem(
+                            value: 'nearest',
+                            child: Text(app.t('sort_by_nearest')),
+                          ),
+                          DropdownMenuItem(
+                            value: 'rating',
+                            child: Text(app.t('sort_by_rating')),
+                          ),
+                          DropdownMenuItem(
+                            value: 'name',
+                            child: Text(app.t('sort_by_name')),
+                          ),
+                        ],
+                        onChanged: (v) {
+                          if (v == null) return;
+                          setState(() => sort = v);
+                          _load();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                  child: Row(
+                    children: [
+                      Text(
+                        total > 0 ? '$total • ${app.t('sellers')}' : app.t('sellers'),
+                        style: const TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                      const Spacer(),
+                      Text(app.t('min_seller_rating'),
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.grey)),
+                      ...[
+                        for (var i = 1; i <= 5; i++)
+                          InkWell(
+                            onTap: () {
+                              setState(
+                                  () => minRating = minRating == i ? 0 : i);
+                              _load();
+                            },
+                            child: Icon(
+                              i <= minRating
+                                  ? Icons.star
+                                  : Icons.star_border,
+                              size: 18,
+                              color: Colors.amber,
+                            ),
+                          ),
+                      ],
+                    ],
+                  ),
+                ),
                 Expanded(
                   child: visible.isEmpty
-                      ? EmptyState(message: app.t('no_stores_found'))
-                      : ListView.separated(
-                          padding: const EdgeInsets.all(16),
-                          itemCount: visible.length,
-                          separatorBuilder: (_, __) =>
-                              const SizedBox(height: 10),
-                          itemBuilder: (_, i) {
-                            final seller = visible[i];
-                            final distance = _distanceKm(seller);
-                            final rating = double.tryParse(
-                              '${seller['rating'] ?? seller['average_rating'] ?? 0}',
-                            );
-                            return _SellerCard(
-                              seller: seller,
-                              distance: distance,
-                              rating: rating,
-                              productCount:
-                                  '${seller['product_count'] ?? 0}',
-                              onTap: () {
-                                final slug = J.str(seller['slug']);
-                                context.push(
-                                  slug.isNotEmpty
-                                      ? '/store/$slug'
-                                      : '/seller/${seller['id']}',
+                      ? EmptyState(
+                          message: app.t('no_stores_found'),
+                          actionLabel: app.t('retry'),
+                          onAction: _load,
+                        )
+                      : RefreshIndicator(
+                          onRefresh: () => _load(),
+                          child: ListView.separated(
+                            padding: const EdgeInsets.all(16),
+                            itemCount: visible.length + (total > visible.length ? 1 : 0),
+                            separatorBuilder: (_, __) =>
+                                const SizedBox(height: 10),
+                            itemBuilder: (_, i) {
+                              if (i >= visible.length) {
+                                return OutlinedButton(
+                                  onPressed: loadingMore ? null : () => _load(more: true),
+                                  child: loadingMore
+                                      ? const SizedBox(
+                                          width: 18,
+                                          height: 18,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        )
+                                      : Text(app.t('load_more')),
                                 );
-                              },
-                            );
-                          },
+                              }
+                              final seller = visible[i];
+                              final distance = _distanceKm(seller);
+                              final rating = double.tryParse(
+                                '${seller['rating'] ?? seller['average_rating'] ?? 0}',
+                              );
+                              return _SellerCard(
+                                seller: seller,
+                                distance: distance,
+                                rating: rating,
+                                productCount:
+                                    '${seller['product_count'] ?? 0}',
+                                onTap: () {
+                                  final slug = J.str(seller['slug']);
+                                  context.push(
+                                    slug.isNotEmpty
+                                        ? '/store/$slug'
+                                        : '/seller/${seller['id']}',
+                                  );
+                                },
+                              );
+                            },
+                          ),
                         ),
                 ),
               ],
@@ -253,12 +380,33 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
     }
     final id = '${seller?['id'] ?? widget.id}';
     final sections = J.maps(seller?['sections']);
+    final cover = J.str(seller?['cover_url'] ?? seller?['cover'] ?? seller?['banner_url']);
+    final avg = double.tryParse(
+        '${seller?['average_rating'] ?? seller?['rating'] ?? ''}');
+    final ratingCount =
+        J.str(seller?['rating_count'] ?? seller?['ratings_count']);
+    final productCount = J.str(seller?['product_count']);
+    final hours = BusinessHoursSlot.from(
+        seller?['business_hours'] ?? seller?['seller_business_hours']);
+    final closedByFlag = seller?['seller_is_open'] == false ||
+        seller?['seller_is_open'] == 0 ||
+        seller?['seller_is_open'] == '0' ||
+        seller?['is_open'] == false ||
+        seller?['is_open'] == 0 ||
+        seller?['is_open'] == '0';
+    final isClosed = (hours != null && !hours.isOpen) || (hours == null && closedByFlag);
     return Scaffold(
       appBar: AppBar(
         title: Text(J.str(seller?['store_name'] ?? seller?['name'])),
       ),
       body: Column(
         children: [
+          if (cover.isNotEmpty)
+            AspectRatio(
+              aspectRatio: 16 / 6,
+              child: AppImage(cover,
+                  placeholder: appController.placeholder),
+            ),
           ListTile(
             leading: SellerAvatar(
               J.str(seller?['logo_url']),
@@ -266,10 +414,60 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
               placeholder: appController.placeholder,
             ),
             title: Text(J.str(seller?['store_name'] ?? seller?['name'])),
-            subtitle: Text(
-              J.str(seller?['store_description'] ?? seller?['description']),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (J.str(seller?['store_description'] ??
+                        seller?['description'])
+                    .isNotEmpty)
+                  Text(J.str(seller?['store_description'] ??
+                      seller?['description'])),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    if (avg != null && avg > 0) ...[
+                      const Icon(Icons.star,
+                          size: 14, color: Colors.amber),
+                      const SizedBox(width: 2),
+                      Text(
+                        avg.toStringAsFixed(1) +
+                            (ratingCount.isNotEmpty
+                                ? ' ($ratingCount)'
+                                : ''),
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    if (productCount.isNotEmpty)
+                      Text(
+                        '$productCount ${appController.t('products')}',
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.grey),
+                      ),
+                  ],
+                ),
+              ],
             ),
           ),
+          if (isClosed)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.red.shade50,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                buildSellerClosedMessage(
+                    hours,
+                    J.str(seller?['store_name'] ??
+                        seller?['name'])),
+                style: TextStyle(
+                    color: Colors.red.shade700, fontSize: 12),
+              ),
+            ),
           if (sections.isNotEmpty)
             SizedBox(
               height: 48,
@@ -278,15 +476,14 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 children: [
                   ChoiceChip(
-                    label: const Text('الكل'),
+                    label: Text(appController.t('all')),
                     selected: sectionId == null,
                     onSelected: (_) => setState(() => sectionId = null),
-                  ),
-                  ...sections.map(
+                  ),                  ...sections.map(
                     (section) => Padding(
                       padding: const EdgeInsetsDirectional.only(start: 8),
                       child: ChoiceChip(
-                        label: Text(J.str(section['name'])),
+                        label: Text(J.str(section['name_ar'] ?? section['name'])),
                         selected: sectionId == '${section['id']}',
                         onSelected: (_) => setState(() => sectionId = '${section['id']}'),
                       ),
@@ -368,9 +565,7 @@ class _OffersScreenState extends State<OffersScreen> {
                     promoCards.isNotEmpty ||
                     deliveryCards.isNotEmpty)
                   Text(
-                    app.t('active_campaigns_title') == 'active_campaigns_title'
-                        ? 'العروض الحالية'
-                        : app.t('active_campaigns_title'),
+                    app.t('active_campaigns_title'),
                     style: const TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
@@ -468,462 +663,6 @@ class _OffersScreenState extends State<OffersScreen> {
   }
 }
 
-class AkhdimniHomeScreen extends StatelessWidget {
-  const AkhdimniHomeScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('أخدمني')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          ListTile(
-            tileColor: Colors.white,
-            title: const Text('من نقطة إلى نقطة'),
-            onTap: () => context.push('/akhdimni/create?type=point_to_point'),
-          ),
-          const SizedBox(height: 8),
-          ListTile(
-            tileColor: Colors.white,
-            title: const Text('أغراض خاصة'),
-            onTap: () => context.push('/akhdimni/create?type=special_items'),
-          ),
-          ListTile(
-            title: const Text('طلباتي'),
-            onTap: () {
-              if (!appController.isLoggedIn) {
-                context.push('/login');
-                return;
-              }
-              context.push('/akhdimni/orders');
-            },
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class AkhdimniCreateScreen extends StatefulWidget {
-  const AkhdimniCreateScreen({super.key, required this.type});
-  final String type;
-
-  @override
-  State<AkhdimniCreateScreen> createState() => _AkhdimniCreateScreenState();
-}
-
-class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
-  final pickup = TextEditingController();
-  final dropoff = TextEditingController();
-  final details = TextEditingController();
-  Map<String, dynamic>? estimate;
-  bool busy = false;
-  ({double latitude, double longitude})? pickupPoint;
-  ({double latitude, double longitude})? dropoffPoint;
-  List<XFile> images = [];
-  List<Map<String, dynamic>> categories = [];
-  String? selectedCategoryId;
-  bool loadingConfig = true;
-
-  @override
-  void initState() {
-    super.initState();
-    dropoffPoint = appController.coords;
-    final address = appController.selectedAddress;
-    if (address != null) {
-      dropoff.text = J.str(address['address']);
-      final lat = double.tryParse('${address['latitude']}');
-      final lng = double.tryParse('${address['longitude']}');
-      if (lat != null && lng != null)
-        dropoffPoint = (latitude: lat, longitude: lng);
-    }
-    _loadConfig();
-  }
-
-  Future<void> _loadConfig() async {
-    final cfg = await appController.api.akhdimniConfig();
-    final cat = await appController.api.akhdimniCategories();
-    if (!mounted) return;
-    setState(() {
-      categories = cat.dataMaps.isNotEmpty ? cat.dataMaps : J.maps(cfg.dataMap['categories']);
-      loadingConfig = false;
-    });
-  }
-
-  @override
-  void dispose() {
-    pickup.dispose();
-    dropoff.dispose();
-    details.dispose();
-    super.dispose();
-  }
-
-  Map<String, dynamic> get _fields {
-    final city = appController.city;
-    final pick = pickupPoint ?? appController.coords;
-    final drop = dropoffPoint ?? appController.coords;
-    return {
-      'type': widget.type,
-      'pickup_address': pickup.text.trim(),
-      'dropoff_address': dropoff.text.trim(),
-      'details': details.text.trim(),
-      'item_description': details.text.trim(),
-      'special_items_text': details.text.trim(),
-      'city_id': city?['id'],
-      'akhdimni_category_id': selectedCategoryId,
-      'pickup_latitude': pick?.latitude,
-      'pickup_longitude': pick?.longitude,
-      'dropoff_latitude': drop?.latitude,
-      'dropoff_longitude': drop?.longitude,
-      'payment_method': 'COD',
-    };
-  }
-
-  FormData get _formData {
-    final data = FormData();
-    _fields.forEach((k, v) {
-      if (v != null && '$v'.isNotEmpty) data.fields.add(MapEntry(k, '$v'));
-    });
-    for (final img in images) {
-      data.files.add(MapEntry('images[]', MultipartFile.fromFileSync(img.path, filename: img.name)));
-    }
-    return data;
-  }
-
-  Future<void> _useMyLocation() async {
-    final app = appController;
-    final allowed = await confirmAction(
-      context,
-      title: app.t('location_disclosure_title'),
-      body: app.t('location_disclosure_body'),
-    );
-    if (!allowed || !mounted) return;
-    setState(() => busy = true);
-    final point = await currentDevicePoint();
-    if (!mounted) return;
-    setState(() {
-      busy = false;
-      if (point != null) {
-        pickupPoint = point;
-        if (pickup.text.trim().isEmpty)
-          pickup.text = appController.t('pickup_my_location');
-      }
-    });
-    if (point == null && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(appController.t('location_permission_denied'))),
-      );
-    }
-  }
-
-  Future<void> _estimate() async {
-    final app = appController;
-    if (pickup.text.trim().isEmpty || dropoff.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(app.t('enter_pickup_dropoff'))));
-      return;
-    }
-    if (widget.type == 'point_to_point' && pickupPoint == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(app.t('location_permission_denied'))),
-      );
-      return;
-    }
-    if (details.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(app.t('fill_required_fields'))));
-      return;
-    }
-    setState(() => busy = true);
-    // front uses FormData for estimate
-    final data = FormData();
-    _fields.forEach((k, v) { if (v != null && '$v'.isNotEmpty) data.fields.add(MapEntry(k, '$v')); });
-    final result = await app.api.akhdimniEstimateRaw(data);
-    if (!mounted) return;
-    setState(() {
-      busy = false;
-      estimate = result.ok ? (result.dataMap.isNotEmpty ? result.dataMap : J.map(result.raw)) : null;
-    });
-    if (!result.ok) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(result.message)));
-    }
-  }
-
-  Future<void> _place() async {
-    final app = appController;
-    if (!app.isLoggedIn) {
-      context.push('/login');
-      return;
-    }
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(app.t('confirm_order')),
-        content: Text(
-          money(
-            estimate?['total'] ??
-                estimate?['fare'] ??
-                estimate?['delivery_charge'] ??
-                estimate?['deliveryCharge'] ??
-                0,
-            app.currency,
-            app.decimals,
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text(app.t('cancel')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(app.t('confirm')),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
-    setState(() => busy = true);
-    // build FormData with images like front AkhdimniCreate.jsx
-    final data = FormData();
-    _fields.forEach((k, v) { if (v != null && '$v'.isNotEmpty) data.fields.add(MapEntry(k, '$v')); });
-    for (final img in images) {
-      // async version for place
-      data.files.add(MapEntry('images[]', await MultipartFile.fromFile(img.path, filename: img.name)));
-    }
-    final result = await app.api.akhdimniPlaceRaw(data);
-    if (!mounted) return;
-    setState(() => busy = false);
-    if (result.ok) {
-      context.go('/akhdimni/orders');
-    } else {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(result.message)));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final app = appController;
-    return Scaffold(
-      appBar: AppBar(title: const Text('طلب أخدمني')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          if (categories.isNotEmpty)
-            DropdownButtonFormField<String>(
-              initialValue: selectedCategoryId,
-              items: categories.map((c)=> DropdownMenuItem(value: '${c['id']}', child: Text(J.str(c['name_ar'] ?? c['name'])))).toList(),
-              onChanged: (v)=> setState(()=> selectedCategoryId=v),
-              decoration: const InputDecoration(labelText: 'الفئة'),
-            ),
-          TextField(
-            controller: pickup,
-            decoration: const InputDecoration(labelText: 'نقطة الاستلام'),
-          ),
-          if (widget.type == 'point_to_point')
-            TextButton.icon(
-              onPressed: busy ? null : _useMyLocation,
-              icon: const Icon(Icons.my_location),
-              label: Text(app.t('pickup_my_location')),
-            ),
-          TextField(
-            controller: dropoff,
-            decoration: const InputDecoration(labelText: 'نقطة التسليم'),
-          ),
-          TextField(
-            controller: details,
-            maxLines: 3,
-            decoration: const InputDecoration(labelText: 'التفاصيل *'),
-          ),
-          const SizedBox(height: 8),
-          TextButton.icon(
-            onPressed: () async {
-              final picked = await ImagePicker().pickMultiImage();
-              if (picked.isNotEmpty && mounted) setState(()=> images = picked);
-            },
-            icon: const Icon(Icons.image),
-            label: Text(images.isEmpty ? 'إضافة صور (اختياري)' : '${images.length} صور'),
-          ),
-          if (estimate != null) ...[
-            const SizedBox(height: 8),
-            Text(
-              money(
-                estimate?['total'] ??
-                    estimate?['fare'] ??
-                    estimate?['delivery_charge'],
-                app.currency,
-                app.decimals,
-              ),
-              style: TextStyle(
-                color: app.accentColor,
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          OutlinedButton(
-            onPressed: busy ? null : _estimate,
-            child: Text(app.t('estimate_fare')),
-          ),
-          const SizedBox(height: 8),
-          FilledButton(
-            onPressed: busy || estimate == null ? null : _place,
-            child: busy ? const BusySpinner() : Text(app.t('place_order')),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class AkhdimniOrdersScreen extends StatefulWidget {
-  const AkhdimniOrdersScreen({super.key});
-
-  @override
-  State<AkhdimniOrdersScreen> createState() => _AkhdimniOrdersScreenState();
-}
-
-class _AkhdimniOrdersScreenState extends State<AkhdimniOrdersScreen> {
-  List<Map<String, dynamic>> items = [];
-  bool loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    if (!appController.isLoggedIn) {
-      if (mounted) setState(() => loading = false);
-      return;
-    }
-    final res = await appController.api.akhdimniOrders({});
-    if (!mounted) return;
-    setState(() {
-      items = res.dataMaps;
-      loading = false;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final app = appController;
-    return Scaffold(
-      appBar: AppBar(title: const Text('طلبات أخدمني')),
-      body: !app.isLoggedIn
-          ? const LoginRequired()
-          : loading
-          ? const Center(child: CircularProgressIndicator())
-          : items.isEmpty
-          ? EmptyState(message: app.t('akhdimni_no_orders'))
-          : ListView(
-              children: items
-                  .map(
-                    (item) => ListTile(
-                      title: Text('#${item['id']}'),
-                      subtitle: Text(J.str(item['status'])),
-                      trailing: Text(
-                        money(
-                          item['total'] ?? item['fare'],
-                          appController.currency,
-                          appController.decimals,
-                        ),
-                      ),
-                      onTap: () =>
-                          context.push('/akhdimni/orders/${item['id']}'),
-                    ),
-                  )
-                  .toList(),
-            ),
-    );
-  }
-}
-
-class AkhdimniOrderDetailsScreen extends StatefulWidget {
-  const AkhdimniOrderDetailsScreen({super.key, required this.id});
-  final String id;
-
-  @override
-  State<AkhdimniOrderDetailsScreen> createState() =>
-      _AkhdimniOrderDetailsScreenState();
-}
-
-class _AkhdimniOrderDetailsScreenState
-    extends State<AkhdimniOrderDetailsScreen> {
-  Map<String, dynamic>? order;
-  bool loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    appController.api.akhdimniOrder(widget.id).then((res) {
-      if (!mounted) return;
-      setState(() {
-        order = res.dataMap.isNotEmpty ? res.dataMap : J.map(res.raw['data'] ?? res.raw);
-        loading = false;
-      });
-    });
-  }
-
-  Future<void> _cancel() async {
-    final ok = await showDialog<bool>(context: context, builder: (ctx)=> AlertDialog(title: const Text('إلغاء الطلب؟'), actions: [TextButton(onPressed: ()=>Navigator.pop(ctx,false), child: const Text('لا')), FilledButton(onPressed: ()=>Navigator.pop(ctx,true), child: const Text('نعم'))]));
-    if (ok != true) return;
-    final res = await appController.api.akhdimniCancel(widget.id);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.ok ? 'تم الإلغاء' : res.message)));
-    if (res.ok && mounted) context.pop();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text('طلب #${widget.id}'), actions: [IconButton(icon: const Icon(Icons.cancel), onPressed: _cancel)]),
-      body: loading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                ListTile(
-                  title: const Text('الحالة'),
-                  subtitle: Text(J.str(order?['status'] ?? order?['order_status'])),
-                ),
-                ListTile(
-                  title: const Text('الاستلام'),
-                  subtitle: Text(J.str(order?['pickup_address'])),
-                ),
-                ListTile(
-                  title: const Text('التسليم'),
-                  subtitle: Text(J.str(order?['dropoff_address'])),
-                ),
-                ListTile(
-                  title: const Text('التفاصيل'),
-                  subtitle: Text(J.str(order?['details'] ?? order?['notes'] ?? order?['item_description'])),
-                ),
-                ListTile(
-                  title: const Text('الإجمالي'),
-                  subtitle: Text(
-                    money(
-                      order?['total'] ?? order?['fare'] ?? order?['delivery_charge'],
-                      appController.currency,
-                      appController.decimals,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(onPressed: _cancel, icon: const Icon(Icons.cancel), label: const Text('إلغاء الطلب')),
-              ],
-            ),
-    );
-  }
-}
-
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
 
@@ -968,6 +707,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final app = appController;
     return Scaffold(
       appBar: AppBar(
         title: TextField(
@@ -975,7 +715,7 @@ class _SearchScreenState extends State<SearchScreen> {
           autofocus: true,
           onSubmitted: _search,
           decoration: InputDecoration(
-            hintText: appController.t('search'),
+            hintText: app.t('search'),
             border: InputBorder.none,
           ),
         ),
@@ -983,27 +723,58 @@ class _SearchScreenState extends State<SearchScreen> {
       body: loading
           ? const Center(child: CircularProgressIndicator())
           : !searched
-          ? EmptyState(icon: Icons.search, message: appController.t('search'))
+          ? EmptyState(icon: Icons.search, message: app.t('search'))
           : items.isEmpty
-          ? EmptyState(message: appController.t('no_search_results'))
+          ? EmptyState(message: app.t('no_search_results'))
           : ListView(
-              children: items
-                  .map(
-                    (item) => ListTile(
-                      leading: SizedBox(
-                        width: 48,
-                        child: AppImage(
-                          J.str(item['image_url']),
-                          placeholder: appController.placeholder,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${items.length} • ${app.t('search')}',
+                          style: const TextStyle(
+                              color: Colors.grey, fontSize: 12),
                         ),
                       ),
-                      title: Text(J.str(item['name'])),
-                      onTap: () => context.push(
-                        '/product/${item['slug'] ?? item['id']}',
+                      TextButton(
+                        onPressed: () => context.push(
+                          '/products?search=${Uri.encodeComponent(controller.text.trim())}',
+                        ),
+                        child: Text(app.t('see_all_results')),
+                      ),
+                    ],
+                  ),
+                ),
+                ...items.map(
+                  (item) => ListTile(
+                    leading: SizedBox(
+                      width: 48,
+                      child: AppImage(
+                        J.str(item['image_url']),
+                        placeholder: app.placeholder,
                       ),
                     ),
-                  )
-                  .toList(),
+                    title: Text(J.str(item['name'])),
+                    subtitle: Text(
+                      money(
+                        item['price'] ?? item['final_price'],
+                        app.currency,
+                        app.decimals,
+                      ),
+                      style: TextStyle(
+                        color: app.accentColor,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    onTap: () => context.push(
+                      '/product/${item['slug'] ?? item['id']}',
+                    ),
+                  ),
+                ),
+              ],
             ),
     );
   }

@@ -70,27 +70,100 @@ class _CheckoutGroupDetailsScreenState extends State<CheckoutGroupDetailsScreen>
     setState((){ group = res.dataMap.isNotEmpty ? res.dataMap : J.map(res.raw['data']); loading=false; });
   }
   Future<void> _cancel() async {
-    final ok = await showDialog<bool>(context: context, builder: (ctx)=> AlertDialog(title: const Text('إلغاء المجموعة؟'), actions: [TextButton(onPressed: ()=>Navigator.pop(ctx,false), child: const Text('لا')), FilledButton(onPressed: ()=>Navigator.pop(ctx,true), child: const Text('نعم'))]));
-    if (ok!=true) return;
-    final res = await appController.cancelCheckoutGroup(widget.id);
+    // Parity with front: cancel requires a reason (cancelCheckoutGroup reason).
+    final reasonC = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(appController.t('cancel_order')),
+        content: TextField(
+          controller: reasonC,
+          maxLines: 3,
+          decoration: InputDecoration(hintText: appController.t('write_cancel_reason')),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(appController.t('cancel'))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(appController.t('confirm'))),
+        ],
+      ),
+    );
+    if (ok != true || reasonC.text.trim().isEmpty) return;
+    final res = await appController.cancelCheckoutGroup(widget.id, reason: reasonC.text.trim());
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.ok ? 'تم الإلغاء' : res.message)));
-    if (res.ok) context.pop();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(res.ok ? appController.t('order_cancelled') : res.message)),
+    );
+    if (res.ok) {
+      await _load();
+      if (mounted) context.pop();
+    }
+  }
+
+  Future<void> _returnItem(dynamic itemId) async {
+    final reasonC = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(appController.t('return')),
+        content: TextField(
+          controller: reasonC,
+          maxLines: 3,
+          decoration: InputDecoration(hintText: appController.t('write_return_reason')),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(appController.t('cancel'))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(appController.t('confirm'))),
+        ],
+      ),
+    );
+    if (ok != true || reasonC.text.trim().isEmpty) return;
+    final res = await appController.api.requestCommerceReturn(itemId, reason: reasonC.text.trim());
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.message)));
+    if (res.ok) _load();
   }
   @override
   Widget build(BuildContext context){
     if (loading) return Scaffold(appBar: AppBar(), body: const Center(child: CircularProgressIndicator()));
     final app = appController;
     final orders = J.maps(group?['seller_orders'] ?? group?['orders']);
+    final canCancel = group?['can_cancel'] == true || group?['can_cancel'] == 1 || group?['can_cancel'] == '1';
+    final cancelReason = J.str(group?['cancel_blocked_reason']);
+    final trackingOn = app.orderTrackingEnabled;
     return Scaffold(
-      appBar: AppBar(title: Text('مجموعة #${widget.id}'), actions: [IconButton(icon: const Icon(Icons.cancel), onPressed: _cancel)]),
+      appBar: AppBar(title: Text('مجموعة #${widget.id}'), actions: [if (canCancel) IconButton(icon: const Icon(Icons.cancel), onPressed: _cancel)]),
       body: ListView(padding: const EdgeInsets.all(16), children: [
         ListTile(title: const Text('الحالة'), subtitle: Text(J.str(group?['status'] ?? group?['customer_status']))),
         ListTile(title: const Text('الإجمالي'), subtitle: Text(money(group?['final_total'] ?? group?['total'], app.currency, app.decimals))),
+        if (trackingOn) ListTile(title: const Text('التتبع'), subtitle: Text(J.str(group?['tracking_status'] ?? group?['delivery_status'] ?? '—'))),
+        if (!canCancel && cancelReason.isNotEmpty)
+          Card(child: ListTile(leading: const Icon(Icons.info_outline), title: const Text('الإلغاء غير متاح'), subtitle: Text(cancelReason))),
         const Divider(),
-        ...orders.map((o)=> Card(child: ListTile(title: Text('طلب ${o['id']} - ${J.str(o['store_name'])}'), subtitle: Text('${J.maps(o['items']).length} منتجات'), trailing: Text(money(o['total'] ?? o['final_total'], app.currency, app.decimals))))),
+        ...orders.expand((o) => [
+              Card(
+                child: ListTile(
+                  title: Text('طلب ${o['id']} - ${J.str(o['store_name'])}'),
+                  subtitle: Text('${J.maps(o['items']).length} منتجات'),
+                  trailing: Text(money(o['total'] ?? o['final_total'], app.currency, app.decimals)),
+                ),
+              ),
+              ...J.maps(o['items']).map(
+                (it) => ListTile(
+                  dense: true,
+                  title: Text(J.str(it['name'] ?? it['product_name'])),
+                  subtitle: Text('x${it['quantity']}'),
+                  trailing: J.flag(it['can_return'])
+                      ? TextButton(
+                          onPressed: () => _returnItem(it['id']),
+                          child: Text(appController.t('return')),
+                        )
+                      : null,
+                ),
+              ),
+            ]),
         const SizedBox(height: 12),
-        OutlinedButton.icon(onPressed: _cancel, icon: const Icon(Icons.cancel), label: const Text('إلغاء المجموعة')),
+        if (canCancel)
+          OutlinedButton.icon(onPressed: _cancel, icon: const Icon(Icons.cancel), label: Text(appController.t('cancel_order'))),
       ]),
     );
   }

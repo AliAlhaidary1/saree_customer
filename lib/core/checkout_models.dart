@@ -1,8 +1,10 @@
 import 'json_util.dart';
 
+const int kDefaultMaxSellersPerCheckout = 3;
+
 class CheckoutConfig {
   CheckoutConfig({
-    this.maxSellersPerCheckout = 5,
+    this.maxSellersPerCheckout = kDefaultMaxSellersPerCheckout,
     this.distanceThreshold = 10,
     this.distanceFeePerKm = 2,
     this.platformFee = 0,
@@ -16,17 +18,41 @@ class CheckoutConfig {
   final double baseFee;
   final double maxDistanceKm;
 
-  static CheckoutConfig from(ApiResult res) {
+  static CheckoutConfig from(ApiResult res, {CheckoutConfig? fallback}) {
     final m = res.dataMap.isNotEmpty ? res.dataMap : J.map(res.raw['data']);
+    final defaults = fallback ?? CheckoutConfig.defaults();
+    final max = J.i(m['max_sellers_per_checkout'], 0);
     return CheckoutConfig(
-      maxSellersPerCheckout: J.i(m['max_sellers_per_checkout'], 5),
-      distanceThreshold: J.d(m['distance_threshold'], 10),
-      distanceFeePerKm: J.d(m['distance_fee_per_km'], 2),
-      platformFee: J.d(m['platform_fee'], 0),
-      baseFee: J.d(m['base_fee'], 0),
-      maxDistanceKm: J.d(m['max_distance_km'], 50),
+      maxSellersPerCheckout: max > 0 ? max : defaults.maxSellersPerCheckout,
+      distanceThreshold: J.d(m['distance_threshold'], defaults.distanceThreshold),
+      distanceFeePerKm: J.d(m['distance_fee_per_km'], defaults.distanceFeePerKm),
+      platformFee: J.d(m['platform_fee'], defaults.platformFee),
+      baseFee: J.d(m['base_fee'], defaults.baseFee),
+      maxDistanceKm: J.d(m['max_distance_km'], defaults.maxDistanceKm),
     );
   }
+
+  static CheckoutConfig fromSettings(Map<String, dynamic> settings) {
+    final max = J.i(settings['max_sellers_per_checkout'], 0);
+    return CheckoutConfig(
+      maxSellersPerCheckout:
+          max > 0 ? max : kDefaultMaxSellersPerCheckout,
+      distanceThreshold: J.d(
+        settings['free_inter_store_distance_km'] ??
+            settings['distance_threshold'],
+        10,
+      ),
+      distanceFeePerKm: J.d(
+        settings['additional_distance_fee_per_km'] ??
+            settings['distance_fee_per_km'],
+        2,
+      ),
+      platformFee: J.d(settings['platform_fee']),
+      baseFee: J.d(settings['base_fee']),
+      maxDistanceKm: J.d(settings['max_distance_km'], 50),
+    );
+  }
+
   static CheckoutConfig defaults() => CheckoutConfig();
 }
 

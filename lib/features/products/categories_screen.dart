@@ -61,13 +61,17 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         }
       }
       if (!mounted) return;
+      // Web parity: /category/:slug is a real product listing page
+      // (CategoryPage), not a sellers redirect.
       if (match != null) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) context.go('/sellers?type=${match!['id']}');
+          if (mounted) {
+            context.go('/products?category=${match!['id']}');
+          }
         });
       } else {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) context.go('/sellers');
+          if (mounted) context.go('/products');
         });
       }
       return;

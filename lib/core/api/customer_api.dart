@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../config.dart';
 import '../json_util.dart';
@@ -158,10 +159,11 @@ class CustomerApi {
       'email': email,
       'mobile': mobile,
       'password': password,
+      'password_confirmation': password,
       'type': type,
       'fcm_token': fcm,
       'country_code': countryCode,
-      'platform': AppConfig.platform,
+      'platform': AppConfig.devicePlatform,
       if (otp != null && otp.isNotEmpty) 'otp': otp,
       if (cityId != null) 'city_id': cityId,
       if (backupPhone.isNotEmpty) 'backup_phone': backupPhone,
@@ -179,7 +181,7 @@ class CustomerApi {
       'password': password,
       'fcm_token': fcm,
       'country_code': countryCode,
-      'platform': AppConfig.platform,
+      'platform': AppConfig.devicePlatform,
     });
   }
 
@@ -196,7 +198,7 @@ class CustomerApi {
       if (id != null) 'id': id,
       if (type != null) 'type': type,
       'fcm_token': fcm,
-      'platform': AppConfig.platform,
+      'platform': AppConfig.devicePlatform,
     });
   }
 
@@ -409,6 +411,7 @@ class CustomerApi {
     String? search,
     String? sort,
     String? type,
+    dynamic minRating,
   }) {
     return _get('sellers', {
       if (latitude != null) 'latitude': latitude,
@@ -418,6 +421,7 @@ class CustomerApi {
       if (search != null && search.isNotEmpty) 'search': search,
       if (sort != null && sort.isNotEmpty) 'sort': sort,
       if (type != null && type.isNotEmpty) 'type': type,
+      if (minRating != null && '$minRating'.isNotEmpty) 'min_rating': minRating,
     });
   }
 
@@ -443,19 +447,15 @@ class CustomerApi {
   Future<ApiResult> assistantChat(
     String message, {
     List<Map<String, String>> history = const [],
-    String? sellerId,
-    String? sellerSlug,
   }) {
-    return _post('assistant/chat', {
-      'message': message,
+    return _post('assistant/ask', {
+      'question': message,
       if (history.isNotEmpty) 'history': jsonEncode(history),
-      if (sellerId != null && sellerId.isNotEmpty) 'seller_id': sellerId,
-      if (sellerSlug != null && sellerSlug.isNotEmpty) 'seller_slug': sellerSlug,
     });
   }
 
   Future<ApiResult> assistantSearch(String query, {int limit = 10}) {
-    return _post('assistant/search', {'query': query, 'limit': limit});
+    return _get('assistant/search', {'q': query, 'limit': limit});
   }
 
   Future<ApiResult> flashSales({int limit = 20}) =>
@@ -730,6 +730,50 @@ class CustomerApi {
 
   Future<ApiResult> updateOrderStatus(Map<String, dynamic> fields) =>
       _post('update_order_status', fields);
+
+  /// Parity with front `api.updateOrderStatus(jwt, order_id, item_id, status, reason)`.
+  /// Front sends device_type=website; mobile sends device_type=android.
+  Future<ApiResult> updateOrderItemStatus({
+    required dynamic orderId,
+    required dynamic orderItemId,
+    required dynamic status,
+    String reason = '',
+  }) {
+    return _post('update_order_status', {
+      'order_id': orderId,
+      'order_item_id': orderItemId,
+      'status': status,
+      'device_type': AppConfig.devicePlatform,
+      'app_version': '1.0',
+      if (reason.isNotEmpty) 'reason': reason,
+    });
+  }
+
+  /// Parity with front `api.requestCommerceReturn(jwt, itemId, reason)`
+  /// -> POST order-items/{id}/return {reason}
+  Future<ApiResult> requestCommerceReturn(dynamic itemId, {String reason = ''}) {
+    return _post('order-items/$itemId/return', {
+      if (reason.isNotEmpty) 'reason': reason,
+    });
+  }
+
+  /// Best-effort FCM token sync — keeps pushes arriving when the app is closed.
+  /// Real backend routes (routes/customer.php, base /customer/):
+  /// `add_fcm_token` + `update_fcm_token` (CustomerAuthController — both store
+  /// into UserToken{type: customer} which order notifications are sent from).
+  /// Requires login (api-customers guard); failures are ignored gracefully.
+  Future<ApiResult> updateFcmToken(String fcmToken) async {
+    for (final path in ['add_fcm_token', 'update_fcm_token', 'update_fcm', 'user/update_fcm', 'users/update_fcm_token']) {
+      try {
+        final res = await _post(path, {
+          'fcm_token': fcmToken,
+          'platform': AppConfig.devicePlatform,
+        });
+        if (res.ok) return res;
+      } catch (_) {}
+    }
+    return ApiResult({'status': 0, 'message': 'fcm_sync_skipped'});
+  }
   Future<ApiResult> initiateTransaction(Map<String, dynamic> fields) =>
       _post('initiate_transaction', fields);
   Future<ApiResult> initiateTransactionForCheckoutGroup({
@@ -796,6 +840,32 @@ class CustomerApi {
   Future<ApiResult> invoice(dynamic orderId) =>
       _post('invoice_download', {'order_id': orderId});
 
+  /// Raw PDF bytes for invoice_download (front getInvoice blob download).
+  Future<(bool ok, List<int>? bytes, String message)> invoiceBytes(dynamic orderId) async {
+    try {
+      final res = await _dio.post(
+        'invoice_download',
+        data: FormData.fromMap({'order_id': '$orderId'}),
+        options: Options(
+          contentType: Headers.multipartFormDataContentType,
+          responseType: ResponseType.bytes,
+          validateStatus: (s) => s != null && s < 500,
+        ),
+      );
+      final contentType = '${res.headers.map['content-type']?.join(',') ?? ''}';
+      if ((res.statusCode ?? 0) >= 200 &&
+          (res.statusCode ?? 0) < 300 &&
+          !contentType.contains('application/json')) {
+        final data = res.data;
+        if (data is List<int>) return (true, data, '');
+        if (data is List) return (true, data.cast<int>(), '');
+      }
+      return (false, null, 'something_went_wrong');
+    } catch (_) {
+      return (false, null, 'something_went_wrong');
+    }
+  }
+
   // ---- Favorites / address / notifications ----
   Future<ApiResult> favorites({
     required double latitude,
@@ -856,6 +926,15 @@ class CustomerApi {
   Future<ApiResult> harajUserRatings(dynamic userId) => _get('haraj/users/$userId/ratings');
   Future<ApiResult> harajRate(Map<String, dynamic> fields) =>
       _postJson('haraj/ratings', fields);
+  Future<ApiResult> harajReport(dynamic postId,
+      {required String reason, String? details}) {
+    return _post('haraj/posts/$postId/report', {
+      'reason': reason,
+      if (details != null && details.isNotEmpty) 'details': details,
+    });
+  }
+  Future<ApiResult> harajBulkImport(List<Map<String, dynamic>> posts) =>
+      _postJson('haraj/posts/bulk-import', {'posts': posts});
   Future<ApiResult> harajBlock(dynamic blockedId) =>
       _postJson('haraj/blocks', {'blocked_id': blockedId});
   Future<ApiResult> harajUnblock(dynamic blockedId) =>
@@ -872,8 +951,16 @@ class CustomerApi {
 
   Future<ApiResult> akhdimniEstimateRaw(FormData data) => _postRaw('akhdimni/estimate', data);
 
-  Future<ApiResult> akhdimniPlace(Map<String, dynamic> fields) {
+  Future<ApiResult> akhdimniPlace(Map<String, dynamic> fields, {List<XFile>? images}) async {
     final data = FormData.fromMap(_clean(fields) ?? {});
+    if (images != null) {
+      for (final img in images) {
+        data.files.add(MapEntry(
+          'images[]',
+          await MultipartFile.fromFile(img.path, filename: img.name),
+        ));
+      }
+    }
     return _postRaw('akhdimni/place', data);
   }
 
@@ -888,6 +975,30 @@ class CustomerApi {
       return _postRaw('akhdimni/orders/$id/cancel', data);
     }
     return _post('akhdimni/orders/$id/cancel');
+  }
+
+  /// Raw PDF bytes for akhdimni/orders/{id}/invoice (Backend AkhdimniInvoiceService).
+  Future<(bool ok, List<int>? bytes, String message)> akhdimniInvoiceBytes(dynamic id) async {
+    try {
+      final res = await _dio.get(
+        'akhdimni/orders/$id/invoice',
+        options: Options(
+          responseType: ResponseType.bytes,
+          validateStatus: (s) => s != null && s < 500,
+        ),
+      );
+      final contentType = '${res.headers.map['content-type']?.join(',') ?? ''}';
+      if ((res.statusCode ?? 0) >= 200 &&
+          (res.statusCode ?? 0) < 300 &&
+          !contentType.contains('application/json')) {
+        final data = res.data;
+        if (data is List<int>) return (true, data, '');
+        if (data is List) return (true, data.cast<int>(), '');
+      }
+      return (false, null, 'something_went_wrong');
+    } catch (_) {
+      return (false, null, 'something_went_wrong');
+    }
   }
 
   // ---- Multi-seller Checkout ----

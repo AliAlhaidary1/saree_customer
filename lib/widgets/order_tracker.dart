@@ -13,28 +13,62 @@ class OrderTracker extends StatelessWidget {
   final String status;
   final String? statusLabel;
 
+  // Parity with front OrderDetails STEPS: [2 confirmed, 3 preparing, 5 on_the_way, 6 delivered]
   static const _steps = [
-  ('pending', Icons.receipt_long_outlined, 'طلب'),
-  ('confirmed', Icons.check_circle_outline, 'تأكيد'),
-  ('preparing', Icons.restaurant_outlined, 'تحضير'),
-  ('on_the_way', Icons.delivery_dining_outlined, 'في الطريق'),
-  ('delivered', Icons.home_outlined, 'تسليم'),
+  (2, Icons.check_circle_outline, 'تأكيد'),
+  (3, Icons.restaurant_outlined, 'تحضير'),
+  (5, Icons.delivery_dining_outlined, 'في الطريق'),
+  (6, Icons.home_outlined, 'تسليم'),
   ];
 
   int _activeIndex(String s) {
-    final lower = s.toLowerCase();
-    if (lower.contains('deliver') || lower.contains('complete')) return 4;
-    if (lower.contains('way') || lower.contains('ship') || lower.contains('out')) {
-      return 3;
+    final n = int.tryParse(s.trim());
+    if (n != null) {
+      if (n == 7 || n == 8) return -1; // terminal cancelled/returned handled as banner
+      final idx = _steps.indexWhere((e) => e.$1 == n);
+      if (idx >= 0) return idx;
+      if (n >= 6) return 3;
+      if (n >= 5) return 2;
+      if (n >= 3) return 1;
+      return 0;
     }
-    if (lower.contains('prepar') || lower.contains('process')) return 2;
-    if (lower.contains('confirm') || lower.contains('accept')) return 1;
+    final lower = s.toLowerCase();
+    if (lower.contains('cancel')) return -1;
+    if (lower.contains('return') || lower.contains('refund')) return -1;
+    if (lower.contains('deliver') || lower.contains('complete')) return 3;
+    if (lower.contains('way') || lower.contains('ship') || lower.contains('out') || lower.contains('pick')) {
+      return 2;
+    }
+    if (lower.contains('prepar') || lower.contains('process') || lower.contains('ready') || lower.contains('in_delivery')) return 1;
     return 0;
   }
 
   @override
   Widget build(BuildContext context) {
     final active = _activeIndex(status);
+    if (active < 0) {
+      final cancelled = status == '7' || status.toLowerCase().contains('cancel');
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: cancelled ? Colors.red.withValues(alpha: 0.08) : Colors.orange.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          children: [
+            Icon(cancelled ? Icons.cancel_outlined : Icons.restart_alt_outlined,
+                color: cancelled ? Colors.red : AppTheme.accentOrange),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                statusLabel ?? (cancelled ? 'ملغي' : 'مرتجع'),
+                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
   final progress = active / (_steps.length - 1);
 
     return Container(

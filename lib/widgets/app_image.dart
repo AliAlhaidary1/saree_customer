@@ -14,24 +14,36 @@ class AppImage extends StatelessWidget {
   final BoxFit fit;
   final String? placeholder;
 
-  @override
-  Widget build(BuildContext context) {
-    final src = (url == null || url!.isEmpty) ? placeholder : url;
-    if (src == null || src.isEmpty) {
-      return ColoredBox(
-        color: Colors.grey.shade200,
-        child: const Icon(Icons.image_outlined, color: Colors.grey),
-      );
-    }
+  Widget _iconFallback() {
+    return ColoredBox(
+      color: Colors.grey.shade200,
+      child: const Icon(Icons.image_outlined, color: Colors.grey),
+    );
+  }
+
+  Widget _network(String src, {String? fallback}) {
     return CachedNetworkImage(
       imageUrl: src,
       fit: fit,
       placeholder: (_, __) => ColoredBox(color: Colors.grey.shade100),
-      errorWidget: (_, __, ___) => ColoredBox(
-        color: Colors.grey.shade200,
-        child: const Icon(Icons.broken_image_outlined, color: Colors.grey),
-      ),
+      errorWidget: (_, __, ___) {
+        if (fallback != null && fallback.isNotEmpty && fallback != src) {
+          return CachedNetworkImage(
+            imageUrl: fallback,
+            fit: fit,
+            errorWidget: (_, __, ___) => _iconFallback(),
+          );
+        }
+        return _iconFallback();
+      },
     );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final src = (url == null || url!.isEmpty) ? placeholder : url;
+    if (src == null || src.isEmpty) return _iconFallback();
+    return _network(src, fallback: placeholder);
   }
 }
 

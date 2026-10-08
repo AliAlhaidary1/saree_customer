@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'city_mode.dart';
-import 'app_theme.dart';
 import 'business_hours.dart';
 import 'checkout_models.dart';
 import 'config.dart';
@@ -25,6 +24,11 @@ class AppController extends ChangeNotifier {
   String apiUrl = AppConfig.defaultApiUrl;
   String? token;
   String? viewerKey;
+  /// Device push token parity with front NotificationBootstrap (saree_fcm_token).
+  /// Without firebase native config we keep a stable per-device token so the
+  /// backend can still target this device; once firebase_messaging is added,
+  /// overwrite this value with messaging.getToken().
+  String fcmToken = '';
   Map<String, dynamic>? user;
   Map<String, dynamic> settings = {
     'web_settings': <String, dynamic>{},
@@ -67,6 +71,43 @@ class AppController extends ChangeNotifier {
   bool get isGuest => !isLoggedIn;
   bool get maintenance => J.str(webSettings['website_mode']) == '1';
   bool get akhdimniEnabled => J.flag(settings['akhdimni_enabled']);
+  bool get akhdimniPointToPointEnabled => J.flag(settings['akhdimni_point_to_point_enabled'], true);
+  bool get akhdimniSpecialItemsEnabled => J.flag(settings['akhdimni_special_items_enabled'], true);
+  bool get orderTrackingEnabled => J.flag(settings['order_tracking_enabled']);
+  double get minOrderAmount => J.d(settings['min_order_amount']);
+  int get maxCartItemsCount => J.i(settings['max_cart_items_count']);
+  double get walletRefillLimit => J.d(settings['user_wallet_refill_limit']);
+  String get walletBankName => J.str(settings['wallet_admin_bank_name']);
+  String get walletAccountHolder => J.str(settings['wallet_admin_account_holder']);
+  String get walletAccountNumber => J.str(settings['wallet_admin_account_number']);
+  String get walletTransferInstructions => J.str(settings['wallet_admin_transfer_instructions']);
+  bool get isCategorySectionEnabled => J.flag(settings['is_category_section_in_homepage'], true);
+  bool get isBrandSectionEnabled => J.flag(settings['is_brand_section_in_homepage'], true);
+  bool get isSellerSectionEnabled => J.flag(settings['is_seller_section_in_homepage'], true);
+  bool get isCountrySectionEnabled => J.flag(settings['is_country_section_in_homepage'], true);
+
+  /// Catalog display mode (parity with web utils/catalogMode.ts).
+  /// stores_only hides the global product catalog; products are only
+  /// visible from inside a store.
+  String get catalogMode {
+    final raw = J
+        .str(settings['catalog_mode'] ??
+            webSettings['catalog_mode'] ??
+            shop?['catalog_mode'])
+        .trim()
+        .toLowerCase();
+    if (raw == 'stores_only' ||
+        raw == '0' ||
+        raw == 'false' ||
+        raw == 'no' ||
+        raw == 'off' ||
+        raw == 'disabled') {
+      return 'stores_only';
+    }
+    return 'mixed';
+  }
+
+  bool get isStoresOnly => catalogMode == 'stores_only';
   Map<String, dynamic> get webSettings => J.map(settings['web_settings']);
   /// Deep Navy Blue — headers, navigation, primary structures.
   Color get brandColor => brand.primary;
@@ -78,6 +119,13 @@ class AppController extends ChangeNotifier {
   int get decimals => J.i(settings['decimal_point'], 2);
   String get placeholder => J.str(webSettings['placeholder_image']);
   int get cartCount => isLoggedIn ? cartProducts.length : guestCart.length;
+  bool get oneSellerCart => J.flag(settings['one_seller_cart']);
+  int get maxSellersPerCheckout {
+    final fromSettings = J.i(settings['max_sellers_per_checkout']);
+    if (fromSettings > 0) return fromSettings;
+    final fromConfig = checkoutConfig.maxSellersPerCheckout;
+    return fromConfig > 0 ? fromConfig : kDefaultMaxSellersPerCheckout;
+  }
 
   ({double latitude, double longitude})? get coords => shopCoordinates(city);
   ({double latitude, double longitude}) get browseCoords =>
@@ -93,17 +141,36 @@ class AppController extends ChangeNotifier {
       viewerKey = _newViewerKey();
       await _prefs.setString('viewer_key', viewerKey!);
     }
+    fcmToken = _prefs.getString('saree_fcm_token') ?? '';
+    if (fcmToken.isEmpty) {
+      // Temporary stub until PushNotifications replaces it with the real FCM
+      // token (front stores saree_fcm_token the same way).
+      fcmToken = '${AppConfig.devicePlatform}_${viewerKey}_${DateTime.now().millisecondsSinceEpoch}';
+      await _prefs.setString('saree_fcm_token', fcmToken);
+    }
     final lang = _prefs.getString('language') ?? 'ar';
     await i18n.load(lang);
     i18n.addListener(notifyListeners);
 
-    final guestRaw = _prefs.getString('guest_cart');
-    if (guestRaw != null) {
-      guestCart = J.maps(jsonDecode(guestRaw));
+    // Stored strings may be corrupted (interrupted write, older build):
+    // never let them break startup into a frozen splash screen.
+    try {
+      final guestRaw = _prefs.getString('guest_cart');
+      if (guestRaw != null && guestRaw.isNotEmpty) {
+        guestCart = J.maps(jsonDecode(guestRaw));
+      }
+    } catch (_) {
+      guestCart = [];
+      await _prefs.remove('guest_cart');
     }
-    final cityRaw = _prefs.getString('city');
-    if (cityRaw != null) {
-      city = J.map(jsonDecode(cityRaw));
+    try {
+      final cityRaw = _prefs.getString('city');
+      if (cityRaw != null && cityRaw.isNotEmpty) {
+        city = J.map(jsonDecode(cityRaw));
+      }
+    } catch (_) {
+      city = null;
+      await _prefs.remove('city');
     }
 
     api = CustomerApi(baseUrl: apiUrl, token: token, viewerKey: viewerKey);
@@ -122,6 +189,7 @@ class AppController extends ChangeNotifier {
       await resolveCity();
       await loadShop();
       await loadRootCategories();
+      await loadBusinessHours();
       if (isLoggedIn) {
         await loadAddresses();
         await refreshCart();
@@ -164,6 +232,11 @@ class AppController extends ChangeNotifier {
       if (data['firebase'] is List) data['firebase'] = <String, dynamic>{};
       settings = data;
       favoriteIds = J.list(data['favorite_product_ids']);
+      checkoutConfig = CheckoutConfig.fromSettings(data);
+      final hoursRaw = data['business_hours'];
+      if (hoursRaw is Map) {
+        businessHours = BusinessHoursResult.fromMap(J.map(hoursRaw));
+      }
     }
     try {
       final pay = await api.paymentMethods();
@@ -245,7 +318,11 @@ class AppController extends ChangeNotifier {
   // ---- Front parity: checkout config / business hours / time slots ----
   Future<void> loadCheckoutConfig() async {
     final res = await api.checkoutConfig();
-    if (res.ok) checkoutConfig = CheckoutConfig.from(res);
+    if (res.ok) {
+      checkoutConfig = CheckoutConfig.from(res, fallback: checkoutConfig);
+    } else {
+      checkoutConfig = CheckoutConfig.fromSettings(settings);
+    }
     notifyListeners();
   }
 
@@ -257,16 +334,96 @@ class AppController extends ChangeNotifier {
   }
 
   List<dynamic> _sellerIdsFromCart() {
-    final ids = <dynamic>{};
+    return cartSellerIds().toList();
+  }
+
+  Set<String> cartSellerIds() {
+    final ids = <String>{};
+    void add(dynamic sid) {
+      if (sid == null) return;
+      final key = '$sid';
+      if (key.isEmpty || key == 'null' || key == '0') return;
+      ids.add(key);
+    }
+
     for (final p in cartProducts) {
-      final sid = J.sellerId(p) ?? p['seller_id'];
-      if (sid != null) ids.add(sid);
+      add(J.sellerId(p) ?? p['seller_id']);
     }
     for (final p in guestCart) {
-      final sid = p['seller_id'];
-      if (sid != null) ids.add(sid);
+      add(p['seller_id'] ?? J.sellerId(p));
     }
-    return ids.toList();
+    for (final group in sellerGroups) {
+      add(group['seller_id'] ?? group['sellerId'] ?? group['id']);
+    }
+    return ids;
+  }
+
+  int get distinctCartSellerCount => cartSellerIds().length;
+
+  bool variantAlreadyInCart(dynamic variantId) {
+    return _qtyInCart(variantId) > 0;
+  }
+
+  int _qtyInCart(dynamic variantId) {
+    if (variantId == null) return 0;
+    final key = '$variantId';
+    final lines = isLoggedIn ? cartProducts : guestCart;
+    for (final item in lines) {
+      if ('${item['product_variant_id'] ?? item['id']}' == key) {
+        return J.i(item['qty'] ?? item['quantity']);
+      }
+    }
+    return 0;
+  }
+
+  bool wouldExceedStoreLimit({dynamic sellerId, dynamic variantId}) {
+    if (sellerId == null) return false;
+    if (variantAlreadyInCart(variantId)) return false;
+    final key = '$sellerId';
+    final existing = cartSellerIds();
+    if (existing.contains(key)) return false;
+    return existing.length >= maxSellersPerCheckout;
+  }
+
+  String storeNameOf(Map<String, dynamic>? product) {
+    if (product == null) return '';
+    return J.str(
+      J.map(product['seller'])['store_name'] ??
+          product['seller_name'] ??
+          product['seller_store_name'] ??
+          product['store_name'],
+    );
+  }
+
+  /// Returns a user-facing reason when add-to-cart must be blocked.
+  Future<String?> cartAddBlockedReason({
+    dynamic sellerId,
+    dynamic variantId,
+    String storeName = '',
+  }) async {
+    final ids = <dynamic>[
+      ..._sellerIdsFromCart(),
+      if (sellerId != null) sellerId,
+    ];
+    await loadBusinessHours(sellerIds: ids);
+    final closed = addToCartClosedMessage(
+      hours: businessHours,
+      sellerId: sellerId,
+      storeName: storeName,
+    );
+    if (closed != null && closed.isNotEmpty) return closed;
+
+    if (oneSellerCart && sellerId != null) {
+      final existing = cartSellerIds();
+      if (existing.isNotEmpty && !existing.contains('$sellerId')) {
+        return 'same_seller';
+      }
+    }
+
+    if (wouldExceedStoreLimit(sellerId: sellerId, variantId: variantId)) {
+      return t('max_stores_exceeded').replaceAll('{max}', '$maxSellersPerCheckout');
+    }
+    return null;
   }
 
   Future<void> loadTimeSlots() async {
@@ -327,13 +484,25 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setFcmToken(String value) async {
+    fcmToken = value;
+    await _prefs.setString('saree_fcm_token', value);
+    if (isLoggedIn) {
+      try {
+        await api.updateFcmToken(value);
+      } catch (_) {}
+    }
+    notifyListeners();
+  }
+
   Future<String?> login({
     required String mobile,
     required String password,
   }) async {
-    final result = await api.loginMobile(mobile: mobile, password: password);
-    if (!result.ok)
+    final result = await api.loginMobile(mobile: mobile, password: password, fcm: fcmToken);
+    if (!result.ok) {
       return result.message.isEmpty ? t('login_error') : result.message;
+    }
     await _applyAuth(result);
     return null;
   }
@@ -345,6 +514,7 @@ class AppController extends ChangeNotifier {
     String email = '',
     String? otp,
     int? cityId,
+    String backupPhone = '',
   }) async {
     final result = await api.register(
       name: name,
@@ -353,9 +523,25 @@ class AppController extends ChangeNotifier {
       email: email,
       otp: otp,
       cityId: cityId,
+      backupPhone: backupPhone,
+      fcm: fcmToken,
     );
     if (!result.ok) return result.message;
     await _applyAuth(result);
+    return null;
+  }
+
+  Future<String?> changePassword({
+    required String currentPassword,
+    required String password,
+    required String passwordConfirmation,
+  }) async {
+    final result = await api.changePassword(
+      currentPassword: currentPassword,
+      password: password,
+      passwordConfirmation: passwordConfirmation,
+    );
+    if (!result.ok) return result.message;
     return null;
   }
 
@@ -367,6 +553,11 @@ class AppController extends ChangeNotifier {
     user = result.user.isNotEmpty ? result.user : result.dataMap;
     api.setToken(token);
     await _prefs.setString('token', token!);
+    if (fcmToken.isNotEmpty) {
+      try {
+        await api.updateFcmToken(fcmToken);
+      } catch (_) {}
+    }
     if (guestCart.isNotEmpty) {
       final ids = guestCart
           .map((item) => '${item['product_variant_id']}')
@@ -427,10 +618,21 @@ class AppController extends ChangeNotifier {
           isWalletChecked = J.i(cart?['is_wallet_checked']) == 1;
         }
         // auto load supporting data for checkout
+        final cartMax = J.i(cart?['max_sellers_per_checkout']);
+        if (cartMax > 0) {
+          checkoutConfig = CheckoutConfig(
+            maxSellersPerCheckout: cartMax,
+            distanceThreshold: checkoutConfig.distanceThreshold,
+            distanceFeePerKm: checkoutConfig.distanceFeePerKm,
+            platformFee: checkoutConfig.platformFee,
+            baseFee: checkoutConfig.baseFee,
+            maxDistanceKm: checkoutConfig.maxDistanceKm,
+          );
+        }
         if (checkout == 1) {
           await loadBusinessHours();
           if (timeSlots.isEmpty) await loadTimeSlots();
-          if (checkoutConfig.maxSellersPerCheckout == 5) await loadCheckoutConfig();
+          await loadCheckoutConfig();
         }
       }
       notifyListeners();
@@ -479,7 +681,31 @@ class AppController extends ChangeNotifier {
     double? productPrice,
     dynamic sellerId,
     bool replaceSeller = false,
+    String storeName = '',
   }) async {
+    if (!replaceSeller) {
+      if (maxCartItemsCount > 0 && qty > maxCartItemsCount) {
+        return t('max_cart_limit_error').replaceAll('{max}', '$maxCartItemsCount');
+      }
+      final currentQty = _qtyInCart(variantId);
+      final isNewOrIncrease = qty > currentQty;
+      if (isNewOrIncrease) {
+        final blocked = await cartAddBlockedReason(
+          sellerId: sellerId,
+          variantId: variantId,
+          storeName: storeName,
+        );
+        if (blocked != null) return blocked;
+      }
+    } else {
+      await loadBusinessHours(sellerIds: sellerId != null ? [sellerId] : []);
+      final closed = addToCartClosedMessage(
+        hours: businessHours,
+        sellerId: sellerId,
+        storeName: storeName,
+      );
+      if (closed != null && closed.isNotEmpty) return closed;
+    }
     if (isLoggedIn) {
       if (replaceSeller) await api.clearCart();
       final result = await api.addToCart(
@@ -497,7 +723,7 @@ class AppController extends ChangeNotifier {
     }
     if (replaceSeller) {
       guestCart = [];
-    } else if (guestCart.isNotEmpty && sellerId != null) {
+    } else if (guestCart.isNotEmpty && sellerId != null && oneSellerCart) {
       final current = guestCart.first['seller_id'];
       if (current != null &&
           '$current'.isNotEmpty &&

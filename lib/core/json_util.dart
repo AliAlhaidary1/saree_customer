@@ -34,7 +34,8 @@ class J {
     return double.tryParse('$value') ?? fallback;
   }
 
-  static bool flag(dynamic value) {
+  static bool flag(dynamic value, [bool fallback = false]) {
+    if (value == null || value == '' || value == 'null') return fallback;
     return value == true || value == 1 || value == '1';
   }
 

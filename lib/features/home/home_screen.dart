@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/app_theme.dart';
@@ -7,6 +8,7 @@ import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/product_card.dart';
+import '../../widgets/product_variant_sheet.dart';
 import '../../widgets/skeleton_loader.dart';
 import '../more/more_screens.dart';
 import '../products/categories_screen.dart';
@@ -23,9 +25,12 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Map<String, dynamic>> flash = [];
   List<Map<String, dynamic>> haraj = [];
   List<Map<String, dynamic>> products = [];
+  List<Map<String, dynamic>> brands = [];
+  List<Map<String, dynamic>> countries = [];
   bool loading = true;
   String? loadError;
   String? _cityKey;
+  bool _popupShown = false;
 
   @override
   void initState() {
@@ -84,6 +89,21 @@ class _HomeScreenState extends State<HomeScreen> {
         extra = productRes.dataMaps;
       }
       if (!mounted) return;
+      List<Map<String, dynamic>> brandRows = J.maps(app.shop?['brands']);
+      List<Map<String, dynamic>> countryRows = J.maps(app.shop?['countries']);
+      if (app.isBrandSectionEnabled && brandRows.isEmpty) {
+        try {
+          final bRes = await app.api.shopByBrands(limit: 20);
+          if (bRes.ok) brandRows = bRes.dataMaps;
+        } catch (_) {}
+      }
+      if (app.isCountrySectionEnabled && countryRows.isEmpty) {
+        try {
+          final cRes = await app.api.shopByCountries(limit: 20);
+          if (cRes.ok) countryRows = cRes.dataMaps;
+        } catch (_) {}
+      }
+      if (!mounted) return;
       setState(() {
         sliders = sliderRes.dataMaps.isNotEmpty
             ? sliderRes.dataMaps
@@ -91,8 +111,11 @@ class _HomeScreenState extends State<HomeScreen> {
         flash = flashRes.dataMaps;
         haraj = harajRes.dataMaps;
         products = extra;
+        brands = brandRows;
+        countries = countryRows;
         loading = false;
       });
+      _maybeShowPopup();
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -100,6 +123,61 @@ class _HomeScreenState extends State<HomeScreen> {
         loadError = '$error';
       });
     }
+  }
+
+  /// Marketing popup (parity with web MainContainer popup).
+  Future<void> _maybeShowPopup() async {
+    if (_popupShown || !mounted) return;
+    final app = appController;
+    final shop = app.shop;
+    if (shop == null) return;
+    final enabled = J.str(shop['popup_enabled']);
+    final image = J.str(shop['popup_image'] ?? shop['popup_image_url']);
+    if (!(enabled == '1' || enabled.toLowerCase() == 'true') || image.isEmpty) {
+      return;
+    }
+    _popupShown = true;
+    final type = J.str(shop['popup_type']);
+    final url = J.str(shop['popup_url']);
+    final category = J.map(shop['popup_category'] ?? shop['category']);
+    await showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipRRect(
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+              child: AppImage(image, placeholder: app.placeholder),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text(app.t('cancel')),
+                ),
+                if (type.isNotEmpty || url.isNotEmpty || category.isNotEmpty)
+                  FilledButton(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      if (url.isNotEmpty && type == 'url') {
+                        launchUrl(Uri.parse(url),
+                            mode: LaunchMode.externalApplication);
+                      } else if (category.isNotEmpty) {
+                        openCategory(context, category);
+                      } else if (url.isNotEmpty) {
+                        context.push(url);
+                      }
+                    },
+                    child: Text(app.t('shop_now')),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _openOffer(Map<String, dynamic> item) {
@@ -116,6 +194,15 @@ class _HomeScreenState extends State<HomeScreen> {
     final slug = J.str(item['product']?['slug']);
     if (type == 'product' || slug.isNotEmpty) {
       if (slug.isNotEmpty) context.push('/product/$slug');
+      return;
+    }
+    final url = J.str(item['offer_url'] ?? item['url']);
+    if (url.isNotEmpty) {
+      if (url.startsWith('/')) {
+        context.push(url);
+      } else {
+        launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      }
     }
   }
 
@@ -129,23 +216,28 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final app = appController;
-    final categories = J.maps(app.shop?['categories']).isNotEmpty
-        ? J.maps(app.shop?['categories'])
-        : app.rootCategories;
-    final sellers = J.maps(app.shop?['sellers']);
+    final shopCategories = J.maps(app.shop?['categories']);
+    final categories = !app.isCategorySectionEnabled
+        ? <Map<String, dynamic>>[]
+        : (shopCategories.isNotEmpty ? shopCategories : app.rootCategories);
+    final sellers = app.isSellerSectionEnabled ? J.maps(app.shop?['sellers']) : <Map<String, dynamic>>[];
     final sections = J.maps(app.shop?['sections']);
     final topOffers = _offers('top');
     final belowSlider = _offers('below_slider');
     final belowCategory = _offers('below_category');
+    final belowSection = _offers('below_section');
+    final storesOnly = app.isStoresOnly;
+    final showCatalog = !storesOnly;
     final hasContent =
         topOffers.isNotEmpty ||
         sliders.isNotEmpty ||
         categories.isNotEmpty ||
-        flash.isNotEmpty ||
+        (showCatalog && flash.isNotEmpty) ||
         sellers.isNotEmpty ||
+        brands.isNotEmpty ||
+        countries.isNotEmpty ||
         haraj.isNotEmpty ||
-        sections.isNotEmpty ||
-        products.isNotEmpty ||
+        (showCatalog && (sections.isNotEmpty || products.isNotEmpty)) ||
         app.akhdimniEnabled;
 
     return RefreshIndicator(
@@ -239,12 +331,10 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ],
-          if (flash.isNotEmpty) ...[
+          if (showCatalog && flash.isNotEmpty) ...[
             SliverToBoxAdapter(
               child: SectionHeader(
-                app.t('flash_sale') == 'flash_sale'
-                    ? 'عروض فلاش'
-                    : app.t('flash_sale'),
+                app.t('flash_sale'),
                 onSeeAll: () => context.push('/offers'),
               ),
             ),
@@ -319,7 +409,7 @@ class _HomeScreenState extends State<HomeScreen> {
           if (haraj.isNotEmpty) ...[
             SliverToBoxAdapter(
               child: SectionHeader(
-                app.t('haraj') == 'haraj' ? 'حراج' : app.t('haraj'),
+                app.t('haraj'),
                 onSeeAll: () => context.push('/haraj'),
               ),
             ),
@@ -371,6 +461,24 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ],
+          if (brands.isNotEmpty) ...[
+            SliverToBoxAdapter(
+              child: SectionHeader(
+                app.t('brands'),
+                onSeeAll: () => context.push('/products'),
+              ),
+            ),
+            _logoStrip(brands, (b) => J.str(b['store_name'] ?? b['name'] ?? b['title']), (b) => J.str(b['logo_url'] ?? b['image_url'] ?? b['image'])),
+          ],
+          if (countries.isNotEmpty) ...[
+            SliverToBoxAdapter(
+              child: SectionHeader(
+                app.t('countries'),
+                onSeeAll: () => context.push('/products'),
+              ),
+            ),
+            _logoStrip(countries, (c) => J.str(c['name']), (c) => J.str(c['image_url'] ?? c['image'] ?? c['flag'])),
+          ],
           if (app.akhdimniEnabled)
             SliverToBoxAdapter(
               child: Padding(
@@ -381,17 +489,16 @@ class _HomeScreenState extends State<HomeScreen> {
                     borderRadius: BorderRadius.circular(16),
                   ),
                   leading: Icon(Icons.delivery_dining, color: app.accentColor),
-                  title: const Text('أخدمني'),
-                  subtitle: const Text(
-                    'اطلب خدمة من نقطة إلى نقطة أو أغراض خاصة',
-                  ),
+                  title: Text(app.t('akhdimni')),
+                  subtitle: Text(app.t('akhdimni_home_hint')),
                   trailing: const Icon(Icons.chevron_left),
                   onTap: () => context.push('/akhdimni'),
                 ),
               ),
             ),
-          for (final section in sections)
-            if (J.maps(section['products']).isNotEmpty) ...[
+          if (showCatalog)
+            for (final section in sections)
+              if (J.maps(section['products']).isNotEmpty) ...[
             SliverToBoxAdapter(
               child: SectionHeader(
                 _sectionTitle(section),
@@ -407,7 +514,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             _productStrip(J.maps(section['products'])),
           ],
-          if (products.isNotEmpty) ...[
+          if (belowSection.isNotEmpty) _bannerPage(belowSection, 140),
+          if (showCatalog && products.isNotEmpty) ...[
             SliverToBoxAdapter(
               child: SectionHeader(
                 app.t('products'),
@@ -416,6 +524,16 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             _productGrid(products.take(8).toList()),
           ],
+          if (storesOnly && sellers.isNotEmpty)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: FilledButton(
+                  onPressed: () => context.push('/sellers'),
+                  child: Text(app.t('see_all_sellers')),
+                ),
+              ),
+            ),
           if (!loading && !hasContent)
             SliverFillRemaining(
               hasScrollBody: false,
@@ -436,18 +554,14 @@ class _HomeScreenState extends State<HomeScreen> {
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 8),
-                      const Text(
-                        'تأكد من المدينة وعنوان الخادم، ثم اسحب للتحديث.',
+                      Text(
+                        app.t('home_city_hint'),
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 16),
                       FilledButton(
                         onPressed: _load,
-                        child: Text(
-                          app.t('retry') == 'retry'
-                              ? 'إعادة المحاولة'
-                              : app.t('retry'),
-                        ),
+                        child: Text(app.t('retry')),
                       ),
                     ],
                   ),
@@ -465,6 +579,52 @@ class _HomeScreenState extends State<HomeScreen> {
     if (type == 'for_you') return appController.t('for_you');
     if (type == 'recently_viewed') return appController.t('recently_viewed');
     return J.str(section['title'] ?? section['short_description']);
+  }
+
+  Widget _logoStrip(
+    List<Map<String, dynamic>> items,
+    String Function(Map<String, dynamic>) label,
+    String Function(Map<String, dynamic>) image,
+  ) {
+    return SliverToBoxAdapter(
+      child: SizedBox(
+        height: 108,
+        child: ListView.separated(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          scrollDirection: Axis.horizontal,
+          itemCount: items.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 10),
+          itemBuilder: (_, i) => SizedBox(
+            width: 92,
+            child: Column(
+              children: [
+                CircleAvatar(
+                  radius: 32,
+                  backgroundColor: AppTheme.surfaceGrey,
+                  child: ClipOval(
+                    child: SizedBox(
+                      width: 64,
+                      height: 64,
+                      child: AppImage(
+                        image(items[i]),
+                        placeholder: appController.placeholder,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  label(items[i]),
+                  maxLines: 2,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _bannerPage(List<Map<String, dynamic>> items, double height) {
@@ -510,7 +670,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: ProductCard(
               product: items[i],
               onTap: () => _openProduct(items[i]),
-              onAdd: () => _quickAdd(items[i]),
+              onAdd: () => addProductFromCatalog(context, items[i]),
             ),
           ),
         ),
@@ -536,7 +696,7 @@ class _HomeScreenState extends State<HomeScreen> {
           (_, i) => ProductCard(
             product: items[i],
             onTap: () => _openProduct(items[i]),
-            onAdd: () => _quickAdd(items[i]),
+            onAdd: () => addProductFromCatalog(context, items[i]),
           ),
           childCount: items.length,
         ),
@@ -551,58 +711,5 @@ class _HomeScreenState extends State<HomeScreen> {
           ? '/product/$slug'
           : '/product/${product['id']}?id=${product['id']}',
     );
-  }
-
-  Future<void> _quickAdd(Map<String, dynamic> product) async {
-    final variants = J.maps(product['variants']);
-    final variant = variants.isNotEmpty ? variants.first : product;
-    final price = variantDisplayPrice(variant);
-    final error = await appController.addToCart(
-      productId: product['id'],
-      variantId: variant['id'] ?? product['product_variant_id'],
-      qty: 1,
-      productPrice: price.finalPrice,
-      sellerId: J.sellerId(product),
-    );
-    if (!mounted) return;
-    if (error == 'same_seller') {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: Text(appController.t('Oops')),
-          content: const Text(
-            'السلة تقبل منتجات بائع واحد فقط. هل تريد إفراغ السلة وإضافة هذا المنتج؟',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text(appController.t('cancel')),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text(appController.t('confirm')),
-            ),
-          ],
-        ),
-      );
-      if (ok == true) {
-        await appController.addToCart(
-          productId: product['id'],
-          variantId: variant['id'] ?? product['product_variant_id'],
-          qty: 1,
-          productPrice: price.finalPrice,
-          sellerId: J.sellerId(product),
-          replaceSeller: true,
-        );
-      }
-    } else if (error != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error)));
-    } else {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(appController.t('add_to_cart'))));
-    }
   }
 }

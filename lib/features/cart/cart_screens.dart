@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/business_hours.dart';
@@ -17,27 +18,81 @@ class CartScreen extends StatefulWidget {
 
 class _CartScreenState extends State<CartScreen> {
   bool loading = true;
+  String? error;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    // Cached lines render instantly; the network refresh runs silently
+    // in the background so an empty cart never waits on the network.
+    if (lines.isNotEmpty) {
+      loading = false;
+      _load(silent: true);
+    } else {
+      _load();
+    }
   }
 
-  Future<void> _load() async {
-    setState(() => loading = true);
-    await appController.refreshCart();
-    if (mounted) setState(() => loading = false);
+  Future<void> _load({bool silent = false}) async {
+    // Without this guard any failure leaves the spinner on screen forever
+    // and the user has to kill the app.
+    if (!silent && mounted) {
+      setState(() {
+        loading = true;
+        error = null;
+      });
+    }
+    try {
+      await appController
+          .refreshCart()
+          .timeout(const Duration(seconds: 30));
+      if (!mounted) return;
+      setState(() => error = null);
+    } catch (_) {
+      if (!mounted) return;
+      // Show cached lines if we have them; only block an empty cart
+      // with a retryable error instead of a frozen spinner.
+      if (lines.isEmpty) {
+        setState(
+          () => error = appController.t('cart_load_failed'),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
   }
 
   List<Map<String, dynamic>> get lines => appController.isLoggedIn
       ? appController.cartProducts
       : appController.guestCart;
 
+  bool _lineOutOfStock(Map<String, dynamic> e) {
+    final unlimited = J.i(e['is_unlimited_stock']) == 1 ||
+        J.str(e['stock_status']).toLowerCase() == 'unlimited';
+    if (unlimited) return false;
+    final stock = J.i(
+      e['stock'] ?? e['total_stock'] ?? e['total_allowed_quantity'] ?? -1,
+      -1,
+    );
+    if (stock == 0) return true;
+    final status = J.str(e['status'] ?? e['stock_status']).toLowerCase();
+    return status == 'out_of_stock' || status == '0';
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = appController;
-    if (loading) return const Center(child: CircularProgressIndicator());
+    if (loading && lines.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (error != null && lines.isEmpty) {
+      return EmptyState(
+        icon: Icons.cloud_off_outlined,
+        message: error!,
+        actionLabel: app.t('retry'),
+        onAction: _load,
+      );
+    }
     if (lines.isEmpty) {
       return EmptyState(
         icon: Icons.shopping_cart_outlined,
@@ -47,11 +102,13 @@ class _CartScreenState extends State<CartScreen> {
       );
     }
     final total = app.isLoggedIn ? app.cartSubTotal : app.guestCartTotal;
-    // multi-seller info if available
-    final groups = app.sellerGroups;
+    final cartMap = app.cart;
+    final savedAmount = J.d(cartMap?['saved_amount'] ?? cartMap?['saved']);
+    final promoDiscount = J.d(
+        app.promoCode?['discount'] ?? cartMap?['promo_discount']);
     return Column(
       children: [
-        if (groups.isNotEmpty)
+        if (app.distinctCartSellerCount > 0)
           Container(
             color: Colors.orange.withValues(alpha: 0.08),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -59,14 +116,23 @@ class _CartScreenState extends State<CartScreen> {
               children: [
                 const Icon(Icons.storefront, size: 14, color: Colors.orange),
                 const SizedBox(width: 6),
-                Text('${groups.length} متاجر', style: const TextStyle(fontSize: 12)),
+                Text(
+                    '${app.distinctCartSellerCount} ${app.t('sellers')}',
+                    style: const TextStyle(fontSize: 12)),
                 const Spacer(),
-                Text('الحد ${app.checkoutConfig.maxSellersPerCheckout}', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                Text(
+                    app
+                        .t('max_sellers_limit')
+                        .replaceAll('{max}', '${app.maxSellersPerCheckout}'),
+                    style:
+                        const TextStyle(fontSize: 11, color: Colors.grey)),
               ],
             ),
           ),
         Expanded(
-          child: ListView.separated(
+          child: RefreshIndicator(
+            onRefresh: () => _load(silent: true),
+            child: ListView.separated(
             padding: const EdgeInsets.all(16),
             itemCount: lines.length,
             separatorBuilder: (_, __) => const SizedBox(height: 10),
@@ -76,8 +142,23 @@ class _CartScreenState extends State<CartScreen> {
               final name = J.str(item['name'] ?? item['product_name']);
               final image = J.str(item['image_url'] ?? item['image']);
               final price = variantDisplayPrice(item);
+              final outOfStock = _lineOutOfStock(item);
+              final unit = [
+                J.str(item['measurement']),
+                J.str(item['stock_unit_name'] ?? item['unit']),
+              ].where((e) => e.isNotEmpty).join(' ');
+              final stock = J.i(
+                item['stock'] ?? item['total_stock'] ?? -1,
+                -1,
+              );
+              final allowed = J.i(item['total_allowed_quantity'], 0);
+              final unlimited = J.i(item['is_unlimited_stock']) == 1 ||
+                  J.str(item['stock_status']).toLowerCase() == 'unlimited';
+              final maxQty = unlimited
+                  ? 99
+                  : (allowed > 0 ? allowed : (stock >= 0 ? stock : 99));
               return ListTile(
-                tileColor: Colors.white,
+                tileColor: outOfStock ? Colors.red.withValues(alpha: 0.05) : Colors.white,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16),
                 ),
@@ -87,9 +168,32 @@ class _CartScreenState extends State<CartScreen> {
                   child: AppImage(image, placeholder: app.placeholder),
                 ),
                 title: Text(name, maxLines: 2),
-                subtitle: Text(
-                  money(price.finalPrice, app.currency, app.decimals),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (unit.isNotEmpty)
+                      Text(unit,
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.grey)),
+                    Text(
+                      '${money(price.finalPrice, app.currency, app.decimals)} × $qty = ${money(price.finalPrice * qty, app.currency, app.decimals)}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    if (outOfStock)
+                      Text(app.t('OutOfStock'),
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.red)),
+                  ],
                 ),
+                onTap: () {
+                  final slug = J.str(item['slug']);
+                  final pid = item['product_id'] ?? item['id'];
+                  if (slug.isNotEmpty) {
+                    context.push('/product/$slug');
+                  } else if (pid != null) {
+                    context.push('/product/$pid');
+                  }
+                },
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -121,21 +225,53 @@ class _CartScreenState extends State<CartScreen> {
                     Text('$qty'),
                     IconButton(
                       icon: const Icon(Icons.add),
+                      onPressed: qty >= maxQty
+                          ? () {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(app
+                                      .t('limited_product_stock_error')
+                                      .replaceAll('{max}', '$maxQty')),
+                                ),
+                              );
+                            }
+                          : () async {
+                              final err = await app.addToCart(
+                                productId: item['product_id'] ?? item['id'],
+                                variantId:
+                                    item['product_variant_id'] ?? item['id'],
+                                qty: qty + 1,
+                                sellerId:
+                                    item['seller_id'] ?? J.sellerId(item),
+                                storeName: app.storeNameOf(item),
+                              );
+                              if (!context.mounted) return;
+                              if (err != null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text(err)),
+                                );
+                              }
+                              setState(() {});
+                            },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline, size: 20),
+                      tooltip: app.t('delete_item'),
                       onPressed: () => app
-                          .addToCart(
+                          .removeCartLine(
                             productId: item['product_id'] ?? item['id'],
-                            variantId: item['product_variant_id'] ?? item['id'],
-                            qty: qty + 1,
-                            sellerId: item['seller_id'] ?? J.sellerId(item),
+                            variantId:
+                                item['product_variant_id'] ?? item['id'],
                           )
                           .then((_) {
-                            if (mounted) setState(() {});
-                          }),
+                        if (mounted) setState(() {});
+                      }),
                     ),
                   ],
                 ),
               );
             },
+            ),
           ),
         ),
         Material(
@@ -156,11 +292,37 @@ class _CartScreenState extends State<CartScreen> {
                       ),
                     ],
                   ),
+                  if (promoDiscount > 0) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Text(app.t('promo_code_discount')),
+                        const Spacer(),
+                        Text(
+                          '- ${money(promoDiscount, app.currency, app.decimals)}',
+                          style: const TextStyle(color: Colors.green),
+                        ),
+                      ],
+                    ),
+                  ],
+                  if (savedAmount > 0) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Text(app.t('you_saved')),
+                        const Spacer(),
+                        Text(
+                          money(savedAmount, app.currency, app.decimals),
+                          style: const TextStyle(color: Colors.green),
+                        ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 10),
                   FilledButton(
                     onPressed: () {
                       if (!app.isLoggedIn) {
-                        context.push('/login');
+                        context.push('/login?next=${Uri.encodeComponent('/checkout')}');
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
                             content: Text(app.t('please_login_continue')),
@@ -168,10 +330,29 @@ class _CartScreenState extends State<CartScreen> {
                         );
                         return;
                       }
-                      // stock / seller limit guard like front
-                      if (app.sellerGroups.length > app.checkoutConfig.maxSellersPerCheckout) {
+                      // Parity with front Cart.js stockValidation: block zero-stock checkout.
+                      final outOfStock = lines.where((e) {
+                        final unlimited = J.i(e['is_unlimited_stock']) == 1 ||
+                            J.str(e['stock_status']).toLowerCase() == 'unlimited';
+                        if (unlimited) return false;
+                        final stock = J.i(
+                          e['stock'] ?? e['total_stock'] ?? e['total_allowed_quantity'] ?? -1,
+                          -1,
+                        );
+                        if (stock == 0) return true;
+                        final status = J.str(e['status'] ?? e['stock_status']).toLowerCase();
+                        return status == 'out_of_stock' || status == '0';
+                      }).toList();
+                      if (outOfStock.isNotEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('الحد الأقصى ${app.checkoutConfig.maxSellersPerCheckout} متاجر للطلب الواحد')),
+                          SnackBar(content: Text(app.t('some_items_are_out_of_stock'))),
+                        );
+                        return;
+                      }
+                      // stock / seller limit guard like front
+                      if (app.distinctCartSellerCount > app.maxSellersPerCheckout) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(app.t('max_stores_exceeded').replaceAll('{max}', '${app.maxSellersPerCheckout}'))),
                         );
                         return;
                       }
@@ -207,6 +388,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   DateTime? selectedDay;
   String? selectedSlot;
   bool loadingCheckout = true;
+  String? loadError;
 
   @override
   void initState() {
@@ -222,17 +404,42 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   Future<void> _load() async {
-    setState(() => loadingCheckout = true);
-    final result = await appController.refreshCart(checkout: 1);
-    // also load multi seller if needed
-    if (appController.sellerGroups.length > 1) {
-      await appController.loadMultiSellerCheckout();
+    // Same guard as the cart: never leave the spinner stuck on failure.
+    if (mounted) {
+      setState(() {
+        loadingCheckout = true;
+        loadError = null;
+      });
     }
-    if (!mounted) return;
-    setState(() {
-      checkout = result.dataMap.isNotEmpty ? result.dataMap : appController.cart;
-      loadingCheckout = false;
-    });
+    try {
+      final result = await appController
+          .refreshCart(checkout: 1)
+          .timeout(const Duration(seconds: 30));
+      // also load multi seller if needed
+      if (appController.sellerGroups.length > 1) {
+        await appController.loadMultiSellerCheckout().timeout(
+          const Duration(seconds: 30),
+        );
+      }
+      if (!mounted) return;
+      setState(() {
+        checkout = result.dataMap.isNotEmpty
+            ? result.dataMap
+            : appController.cart;
+        if (!result.ok && (checkout == null || checkout!.isEmpty)) {
+          loadError = result.message.isNotEmpty
+              ? result.message
+              : appController.t('checkout_load_failed');
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(
+        () => loadError = appController.t('checkout_load_failed'),
+      );
+    } finally {
+      if (mounted) setState(() => loadingCheckout = false);
+    }
   }
 
   bool _methodOn(String key) =>
@@ -250,17 +457,39 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
     }
     if (loadingCheckout) return Scaffold(appBar: AppBar(title: Text(app.t('checkout'))), body: const Center(child: CircularProgressIndicator()));
+    if (loadError != null && (checkout == null || checkout!.isEmpty)) {
+      return Scaffold(
+        appBar: AppBar(title: Text(app.t('checkout'))),
+        body: EmptyState(
+          message: loadError!,
+          icon: Icons.cloud_off_outlined,
+          actionLabel: app.t('retry'),
+          onAction: _load,
+        ),
+      );
+    }
     final items = J.maps(
       checkout?['cart'] ?? checkout?['items'] ?? app.cartProducts,
     );
     final subTotal = J.d(checkout?['sub_total'] ?? app.cartSubTotal);
-    final delivery = J.d(checkout?['delivery_charge'] ?? checkout?['delivery_fee'] ?? app.multiSellerCheckout?.deliveryTotal);
+    final deliveryNode = checkout?['delivery_charge'];
+    final delivery = J.d(
+      deliveryNode is Map
+          ? deliveryNode['total_delivery_charge'] ?? deliveryNode['total']
+          : (deliveryNode ??
+              checkout?['delivery_fee'] ??
+              app.multiSellerCheckout?.deliveryTotal),
+    );
+    final freeDelivery = J.str(
+            deliveryNode is Map ? deliveryNode['is_free_delivery'] : null) ==
+        '1';
     final discount = J.d(
       app.promoCode?['discount'] ?? checkout?['promo_discount'],
     );
+    final platformFee = J.d(checkout?['platform_fee'] ?? app.platformFee);
     var finalTotal = J.d(
       checkout?['final_total'] ?? checkout?['total'],
-      subTotal + delivery - discount,
+      subTotal + delivery + platformFee - discount,
     );
     final wallet = J.d(
       app.user?['balance'] ??
@@ -283,6 +512,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // Min-order guard parity with web Checkout (backend still enforces).
+          if (app.minOrderAmount > 0 && subTotal < app.minOrderAmount)
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: Colors.orange.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.orange.withValues(alpha: 0.4))),
+              child: Row(
+                children: [
+                  const Icon(Icons.info_outline, color: Colors.orange, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(
+                    '${app.t('minimum_order_amount_is').replaceAll('{amount}', money(app.minOrderAmount, app.currency, app.decimals))}',
+                    style: const TextStyle(color: Colors.orange, fontSize: 12, fontWeight: FontWeight.bold),
+                  )),
+                ],
+              ),
+            ),
+          if (app.minOrderAmount > 0 && subTotal < app.minOrderAmount) const SizedBox(height: 12),
           // Business hours banner parity with front BusinessHoursBanner
           if (bh != null && !canPlace.allowed)
             Container(
@@ -295,7 +541,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   Expanded(child: Text(
                     canPlace.reason == 'platform'
                         ? buildMarketplaceClosedMessage(canPlace.status)
-                        : buildSellerClosedMessage(canPlace.status, ''),
+                        : buildSellerClosedMessage(
+                            canPlace.status,
+                            canPlace.status?.storeName ?? '',
+                          ),
                     style: const TextStyle(color: Colors.red, fontSize: 12),
                   )),
                 ],
@@ -333,7 +582,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           const SizedBox(height: 12),
           // time slots picker like front Checkout.js
           if (app.timeSlots.isNotEmpty) ...[
-            Text('وقت التوصيل', style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text(app.t('select_delivery_time'),
+                style: const TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             SizedBox(
               height: 80,
@@ -378,8 +628,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           ),
           const Divider(),
           _row(app.t('sub_total'), money(subTotal, app.currency, app.decimals)),
-          _row('التوصيل', money(delivery, app.currency, app.decimals)),
-          if (app.platformFee > 0) _row('رسوم المنصة', money(app.platformFee, app.currency, app.decimals)),
+          _row(
+            '${app.t('delivery_charge')}${freeDelivery ? ' (${app.t('free_delivery')})' : ''}',
+            money(delivery, app.currency, app.decimals),
+          ),
+          if (platformFee > 0)
+            _row(app.t('platform_fee'),
+                money(platformFee, app.currency, app.decimals)),
           if (discount > 0)
             _row(
               app.t('discount'),
@@ -403,7 +658,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           if (codAllowed &&
               (_methodOn('cod_payment_method') || !_paymentConfigured()))
             RadioListTile(
-              title: const Text('الدفع عند الاستلام'),
+              title: Text(app.t('cash_on_delivery')),
               value: 'COD',
               groupValue: method,
               onChanged: walletUsed && finalTotal == 0
@@ -429,33 +684,53 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             RadioListTile(title: const Text('Cashfree'), value: 'Cashfree', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
           if (_methodOn('midtrans_payment_method'))
             RadioListTile(title: const Text('Midtrans'), value: 'Midtrans', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
-          if (_methodOn('phonepe_payment_method'))
+          if (_methodOn('phonepe_payment_method') ||
+              _methodOn('phonepay_payment_method'))
             RadioListTile(title: const Text('PhonePe'), value: 'Phonepe', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
           TextField(
             controller: promo,
             decoration: InputDecoration(
               labelText: app.t('promo_code'),
-              suffixIcon: TextButton(
-                onPressed: () async {
-                  final error = await app.applyPromo(
-                    promo.text.trim(),
-                    subTotal,
-                  );
-                  if (!context.mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(error ?? app.t('apply'))),
-                  );
-                  setState(() {});
-                },
-                child: Text(app.t('apply')),
-              ),
+              suffixIcon: app.promoCode == null
+                  ? TextButton(
+                      onPressed: () async {
+                        final error = await app.applyPromo(
+                          promo.text.trim(),
+                          subTotal,
+                        );
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                              content: Text(error ??
+                                  app.t('promo_applied'))),
+                        );
+                        setState(() {});
+                      },
+                      child: Text(app.t('apply')),
+                    )
+                  : TextButton(
+                      onPressed: () {
+                        app.clearPromo();
+                        promo.clear();
+                        setState(() {});
+                      },
+                      child: Text(app.t('remove_promo')),
+                    ),
             ),
           ),
           TextField(
             controller: note,
-            decoration: InputDecoration(labelText: 'ملاحظة الطلب'),
+            decoration: InputDecoration(
+              labelText: app.t('order_note'),
+              hintText: app.t('order_note_hint'),
+            ),
           ),
-          if (deliveryTime != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text('وقت التوصيل: $deliveryTime', style: const TextStyle(fontSize: 12, color: Colors.grey))),
+          if (deliveryTime != null)
+            Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text('${app.t('delivery_time')}: $deliveryTime',
+                    style:
+                        const TextStyle(fontSize: 12, color: Colors.grey))),
           const SizedBox(height: 16),
           if (address == null)
             Padding(
@@ -474,7 +749,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ),
             ),
           FilledButton(
-            onPressed: placing || !canPlace.allowed
+            onPressed: placing || !canPlace.allowed || (app.minOrderAmount > 0 && subTotal < app.minOrderAmount)
                 ? null
                 : () {
                     if (address == null) {
@@ -496,7 +771,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 : Text(
                     address == null
                         ? app.t('add_address_first')
-                        : _isGateway(method) ? 'ادفع عبر $method' : app.t('place_order'),
+                        : _isGateway(method)
+                            ? app.t('pay_via_gateway').replaceAll('{method}', method)
+                            : app.t('place_order'),
                   ),
           ),
         ],
@@ -578,11 +855,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(init.message)));
           return;
         }
-        // front would open StripeModal/Paypal redirect etc. Here we show success with transaction url
+        // Parity with front: open gateway redirect (Stripe/Paypal/Cashfree/...) externally.
         final data = init.dataMap;
-        final url = data['url'] ?? data['redirect_url'] ?? data['snap_url'] ?? data['payment_url'];
-        if (url != null && url.toString().isNotEmpty && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('افتح رابط الدفع: $url')));
+        final url = J.str(
+          data['url'] ??
+              data['redirect_url'] ??
+              data['redirectUrl'] ??
+              data['snap_url'] ??
+              data['payment_url'] ??
+              data['paymentUrl'],
+        );
+        if (url.isNotEmpty && mounted) {
+          final uri = Uri.tryParse(url);
+          if (uri != null) {
+            await launchUrl(uri, mode: LaunchMode.externalApplication);
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(url)));
+          }
         }
       }
     }
@@ -590,8 +879,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     app.clearPromo();
     await app.refreshCart();
     if (!mounted) return;
-    context.go('/orders');
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(app.t('place_order'))));
+    final groupId = result.dataMap['checkout_group_id'] ??
+        result.dataMap['group_id'] ??
+        result.dataMap['id'];
+    if (groupId != null && '$groupId'.isNotEmpty) {
+      context.go('/orders/$groupId');
+    } else {
+      context.go('/orders');
+    }
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(app.t('order_placed_ok'))));
   }
 
   Widget _row(String label, String value, {bool bold = false}) {
