@@ -1,6 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:saree_customer/core/api/api_errors.dart';
+import 'package:sreamart_customer/core/api/api_errors.dart';
 
 void main() {
   group('development: detailed errors remain visible', () {

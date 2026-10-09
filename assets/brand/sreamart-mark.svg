@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="سريع مارت">
+  <rect width="512" height="512" rx="112" fill="#0A2540"/>
+  <g fill="#FF6B00">
+    <rect x="42" y="208" width="86" height="18" rx="9"/>
+    <rect x="28" y="246" width="112" height="18" rx="9"/>
+    <rect x="50" y="284" width="78" height="18" rx="9"/>
+  </g>
+  <path fill="#FFFFFF" d="M196 186c0-42 26-70 60-70s60 28 60 70h22c14 0 26 10 28 24l22 168c2 18-12 34-30 34H198c-18 0-32-16-30-34l22-168c2-14 14-24 28-24h18z"/>
+  <path fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" d="M214 186c0-36 18-58 42-58s42 22 42 58"/>
+  <path fill="#FF6B00" d="M286 150 208 268h46l-40 108 108-128h-48z"/>
+</svg>

@@ -1,5 +1,5 @@
-name: saree_customer
-description: تطبيق سريع ماركت للعملاء.
+name: sreamart_customer
+description: تطبيق سريع مارت للعملاء.
 publish_to: "none"
 version: 1.0.0+2
 
@@ -43,11 +43,11 @@ flutter:
 flutter_launcher_icons:
   android: launcher_icon
   ios: true
-  image_path: assets/brand/saree-market-mark.png
+  image_path: assets/brand/sreamart-mark.png
   adaptive_icon_background: '#0A2540'
-  adaptive_icon_foreground: assets/brand/saree-market-mark.png
+  adaptive_icon_foreground: assets/brand/sreamart-mark.png
   web:
     generate: true
-    image_path: assets/brand/saree-market-favicon.png
+    image_path: assets/brand/sreamart-favicon.png
     background_color: '#0A2540'
     theme_color: '#0A2540'

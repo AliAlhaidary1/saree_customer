@@ -14,7 +14,7 @@ if (hasReleaseKeystore) {
 }
 
 android {
-    namespace = "com.saree.saree_customer"
+    namespace = "com.sreamart.sreamart_customer"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -30,7 +30,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.saree.saree_customer"
+        applicationId = "com.sreamart.sreamart_customer"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

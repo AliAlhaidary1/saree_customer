@@ -174,6 +174,6 @@ class _BootstrapAppState extends State<BootstrapApp> {
         ),
       );
     }
-    return SareeCustomerApp(router: router!);
+    return SreamartCustomerApp(router: router!);
   }
 }

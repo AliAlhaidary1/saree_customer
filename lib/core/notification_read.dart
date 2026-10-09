@@ -6,7 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Backend returns a global broadcast list (total + data) without per-user
 /// read state, so "viewed = read" and read IDs are stored locally per user.
 class NotificationRead {
-  static const _prefix = 'saree_notif_read_';
+  static const _prefix = 'sreamart_notif_read_';
   static const _cap = 500;
 
   static String keyFor(dynamic userId) {

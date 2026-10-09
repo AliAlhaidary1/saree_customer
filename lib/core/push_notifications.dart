@@ -12,7 +12,7 @@ import 'app_controller.dart';
 /// Real push notifications (FCM) — parity with front `NotificationBootstrap.jsx`.
 ///
 /// Front reads the Firebase web config from backend `settings.firebase` and
-/// registers `saree_fcm_token`. Mobile does the same: Firebase is initialized
+/// registers `sreamart_fcm_token`. Mobile does the same: Firebase is initialized
 /// from backend `settings['firebase']` when native `google-services.json` /
 /// `GoogleService-Info.plist` files are absent, the real FCM token is sent to
 /// the backend (`fcm_token`), and messages are shown + routed whether the app
@@ -34,9 +34,9 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 class PushNotifications {
   PushNotifications._();
 
-  static const channelId = 'saree_high_importance';
-  static const channelName = 'تنبيهات سريع ماركت';
-  static const _optionsCacheKey = 'saree_firebase_options';
+  static const channelId = 'sreamart_high_importance';
+  static const channelName = 'تنبيهات سريع مارت';
+  static const _optionsCacheKey = 'sreamart_firebase_options';
 
   static bool enabled = false;
   static bool _listenersAttached = false;

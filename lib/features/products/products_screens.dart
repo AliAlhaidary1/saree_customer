@@ -516,7 +516,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     final name = J.str(product!['name']);
     final slug = J.str(product!['slug']);
     final id = '${product!['id']}';
-    final link = 'https://saree.market/product/${slug.isNotEmpty ? slug : id}';
+    final link = 'https://sreamart.com/product/${slug.isNotEmpty ? slug : id}';
     final text = '$name\n$link';
     final encoded = Uri.encodeComponent(text);
     final actions = <String, String>{

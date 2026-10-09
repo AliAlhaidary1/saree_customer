@@ -106,7 +106,7 @@ class _BrandSplashScreenState extends State<BrandSplashScreen>
                       Transform.translate(
                         offset: Offset(_slideAnim.value, 0),
                         child: Image.asset(
-                          'assets/brand/saree-market-mark.png',
+                          'assets/brand/sreamart-mark.png',
                           width: 72,
                           height: 72,
                           fit: BoxFit.contain,

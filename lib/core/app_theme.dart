@@ -4,7 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'brand/brand_config.dart';
 
-/// Saree Market (سريع ماركت) brand design tokens.
+/// Sreamart (سريع مارت) brand design tokens.
 abstract final class AppTheme {
   static const primaryNavy = Color(0xFF0A2540);
   static const accentOrange = Color(0xFFFF6B00);
@@ -13,8 +13,8 @@ abstract final class AppTheme {
   static const textPrimary = Color(0xFF0A2540);
   static const textSecondary = Color(0xFF6B7280);
 
-  static const brandNameAr = 'سريع ماركت';
-  static const brandNameEn = 'Saree Market';
+  static const brandNameAr = 'سريع مارت';
+  static const brandNameEn = 'Sreamart';
 
   static TextTheme _textTheme(Locale locale) {
     final base = locale.languageCode == 'ar'

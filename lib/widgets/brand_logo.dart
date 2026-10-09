@@ -10,7 +10,7 @@ class BrandLogo extends StatelessWidget {
     super.key,
     this.height = 48,
     this.brand,
-    this.assetFallback = 'assets/brand/saree-market-mark.png',
+    this.assetFallback = 'assets/brand/sreamart-mark.png',
   });
 
   final double height;

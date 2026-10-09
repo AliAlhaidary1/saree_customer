@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:saree_customer/core/promo_price.dart';
+import 'package:sreamart_customer/core/promo_price.dart';
 
 void main() {
   test('flash price wins over promo and discounted', () {

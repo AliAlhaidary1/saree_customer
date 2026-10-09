@@ -495,7 +495,7 @@ class _BrandHeader extends StatelessWidget {
                             height: 36,
                             fit: BoxFit.contain,
                             errorBuilder: (_, __, ___) => Image.asset(
-                              'assets/brand/saree-market-logo.png',
+                              'assets/brand/sreamart-logo.png',
                               width: 36,
                               height: 36,
                               errorBuilder: (_, __, ___) => const Icon(
@@ -506,11 +506,11 @@ class _BrandHeader extends StatelessWidget {
                             ),
                           )
                         : Image.asset(
-                            'assets/brand/saree-market-logo.png',
+                            'assets/brand/sreamart-logo.png',
                             width: 36,
                             height: 36,
                             errorBuilder: (_, __, ___) => Image.asset(
-                              'assets/brand/saree-market-mark.png',
+                              'assets/brand/sreamart-mark.png',
                               width: 36,
                               height: 36,
                               errorBuilder: (_, __, ___) => const Icon(
@@ -716,8 +716,8 @@ class _AnimatedCartBadgeState extends State<_AnimatedCartBadge>
   }
 }
 
-class SareeCustomerApp extends StatelessWidget {
-  const SareeCustomerApp({super.key, required this.router});
+class SreamartCustomerApp extends StatelessWidget {
+  const SreamartCustomerApp({super.key, required this.router});
   final GoRouter router;
 
   @override

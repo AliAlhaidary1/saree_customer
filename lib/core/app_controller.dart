@@ -24,7 +24,7 @@ class AppController extends ChangeNotifier {
   String apiUrl = AppConfig.defaultApiUrl;
   String? token;
   String? viewerKey;
-  /// Device push token parity with front NotificationBootstrap (saree_fcm_token).
+  /// Device push token parity with front NotificationBootstrap (sreamart_fcm_token).
   /// Without firebase native config we keep a stable per-device token so the
   /// backend can still target this device; once firebase_messaging is added,
   /// overwrite this value with messaging.getToken().
@@ -141,12 +141,12 @@ class AppController extends ChangeNotifier {
       viewerKey = _newViewerKey();
       await _prefs.setString('viewer_key', viewerKey!);
     }
-    fcmToken = _prefs.getString('saree_fcm_token') ?? '';
+    fcmToken = _prefs.getString('sreamart_fcm_token') ?? '';
     if (fcmToken.isEmpty) {
       // Temporary stub until PushNotifications replaces it with the real FCM
-      // token (front stores saree_fcm_token the same way).
+      // token (front stores sreamart_fcm_token the same way).
       fcmToken = '${AppConfig.devicePlatform}_${viewerKey}_${DateTime.now().millisecondsSinceEpoch}';
-      await _prefs.setString('saree_fcm_token', fcmToken);
+      await _prefs.setString('sreamart_fcm_token', fcmToken);
     }
     final lang = _prefs.getString('language') ?? 'ar';
     await i18n.load(lang);
@@ -486,7 +486,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> setFcmToken(String value) async {
     fcmToken = value;
-    await _prefs.setString('saree_fcm_token', value);
+    await _prefs.setString('sreamart_fcm_token', value);
     if (isLoggedIn) {
       try {
         await api.updateFcmToken(value);

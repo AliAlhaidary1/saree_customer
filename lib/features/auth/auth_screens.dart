@@ -70,10 +70,10 @@ class _LoginScreenState extends State<LoginScreen> {
         padding: EdgeInsets.fromLTRB(20, 20, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
         children: [
           Image.asset(
-            'assets/brand/saree-market-logo.png',
+            'assets/brand/sreamart-logo.png',
             height: 88,
             errorBuilder: (_, __, ___) => Image.asset(
-              'assets/brand/saree-market-mark.png',
+              'assets/brand/sreamart-mark.png',
               width: 64,
               height: 64,
               fit: BoxFit.contain,
@@ -667,10 +667,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
                     child: Image.asset(
-                      'assets/brand/saree-market-logo.png',
+                      'assets/brand/sreamart-logo.png',
                       height: 42,
                       fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => Image.asset('assets/brand/saree-market-mark.png', height: 42),
+                      errorBuilder: (_, __, ___) => Image.asset('assets/brand/sreamart-mark.png', height: 42),
                     ),
                   ),
                   const SizedBox(height: 12),
