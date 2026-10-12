@@ -9,6 +9,7 @@ import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/product_card.dart';
+import '../../widgets/product_variant_sheet.dart';
 import '../../core/app_theme.dart';
 import '../../widgets/skeleton_loader.dart';
 import '../../widgets/ui_helpers.dart';
@@ -497,6 +498,7 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
               key: ValueKey('store-$id-${sectionId ?? 'all'}'),
               sellerId: id,
               sellerSectionId: sectionId,
+              listenHeaderSearch: false,
             ),
           ),
         ],
@@ -646,7 +648,7 @@ class _OffersScreenState extends State<OffersScreen> {
                           crossAxisCount: count,
                           mainAxisSpacing: 12,
                           crossAxisSpacing: 12,
-                          childAspectRatio: count > 2 ? 0.68 : 0.62,
+                          childAspectRatio: count > 2 ? 0.6 : 0.55,
                         ),
                     itemCount: products.length,
                     itemBuilder: (_, i) => ProductCard(
@@ -654,6 +656,8 @@ class _OffersScreenState extends State<OffersScreen> {
                       onTap: () => context.push(
                         '/product/${products[i]['slug'] ?? products[i]['id']}',
                       ),
+                      onAdd: () =>
+                          addProductFromCatalog(context, products[i]),
                     ),
                   );}),
                 ],

@@ -4,13 +4,16 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/app_controller.dart';
+import '../../core/app_theme.dart';
 import '../../core/config.dart';
 import '../../core/json_util.dart';
 import '../../core/product_media.dart';
 import '../../core/promo_price.dart';
+import '../../core/search_scope.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/closed_store_badge.dart';
 import '../../widgets/product_card.dart';
+import '../../widgets/product_filter_drawer.dart';
 import '../../widgets/product_variant_sheet.dart';
 import '../../widgets/ui_helpers.dart';
 
@@ -23,6 +26,14 @@ class ProductsScreen extends StatefulWidget {
     this.hasOffer = false,
     this.sectionId,
     this.sellerSectionId,
+    this.sort,
+    this.minRating,
+    this.inStock = false,
+    this.priceMin,
+    this.priceMax,
+    this.canDeliver = false,
+    this.isReturnable = false,
+    this.listenHeaderSearch = true,
   });
 
   final String? categoryId;
@@ -31,42 +42,87 @@ class ProductsScreen extends StatefulWidget {
   final bool hasOffer;
   final String? sectionId;
   final String? sellerSectionId;
+  final String? sort;
+  final String? minRating;
+  final bool inStock;
+  final String? priceMin;
+  final String? priceMax;
+  final bool canDeliver;
+  final bool isReturnable;
+
+  /// False when embedded (store page): the header search must not leak
+  /// a stale query into another seller's catalog.
+  final bool listenHeaderSearch;
 
   @override
   State<ProductsScreen> createState() => _ProductsScreenState();
 }
 
-class _ProductsScreenState extends State<ProductsScreen> {
+class _ProductsScreenState extends State<ProductsScreen>
+    with SingleTickerProviderStateMixin {
+  // Hidden query holder: the single visible search field lives in the app
+  // header and drives this screen through [headerSearch].
   final _search = TextEditingController();
   List<Map<String, dynamic>> items = [];
   bool loading = true;
   bool loadingMore = false;
   bool hasMore = true;
   int offset = 0;
+  int _seq = 0; // drops stale responses when filters change fast (race fix).
   String sort = '';
   String? categoryId;
   bool inStock = false;
   bool onlyOffers = false;
+  TabController? _tabC;
 
   @override
   void initState() {
     super.initState();
     categoryId = widget.categoryId;
     onlyOffers = widget.hasOffer;
-    _search.text = widget.search ?? '';
+    sort = widget.sort ?? '';
+    minRating = widget.minRating ?? '';
+    inStock = widget.inStock;
+    priceMin = widget.priceMin ?? '';
+    priceMax = widget.priceMax ?? '';
+    canDeliver = widget.canDeliver;
+    isReturnable = widget.isReturnable;
+    _search.text =
+        widget.search ?? (widget.listenHeaderSearch ? headerSearch.productQuery : '');
+    if (widget.listenHeaderSearch) {
+      headerSearch.addListener(_onHeaderSearch);
+    }
     _load(reset: true);
   }
 
   @override
+  void didUpdateWidget(covariant ProductsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.listenHeaderSearch) return;
+    if (oldWidget.search != widget.search &&
+        (widget.search ?? '') != _search.text) {
+      _search.text = widget.search ?? '';
+      _load(reset: true);
+    }
+  }
+
+  @override
   void dispose() {
+    headerSearch.removeListener(_onHeaderSearch);
+    _tabC?.dispose();
     _search.dispose();
     super.dispose();
+  }
+
+  void _onHeaderSearch() {
+    if (headerSearch.productQuery == _search.text) return;
+    _search.text = headerSearch.productQuery;
+    _load(reset: true);
   }
 
   // parity with front productFilterReducer + getProductbyFilter
   String priceMin='';
   String priceMax='';
-  String brandIds='';
   String minRating='';
   bool canDeliver=false;
   bool isHome=false;
@@ -79,12 +135,101 @@ class _ProductsScreenState extends State<ProductsScreen> {
     return isAr ? (ar.isNotEmpty ? ar : en) : (en.isNotEmpty ? en : ar);
   }
 
+  int _tabIndexFor(List<Map<String, dynamic>> cats) {
+    if (categoryId == null || categoryId!.isEmpty) return 0;
+    final i = cats.indexWhere((c) => '${c['id']}' == '$categoryId');
+    return i < 0 ? 0 : i + 1;
+  }
+
+  Widget _categoryTabs(AppController app) {
+    final cats = app.rootCategories;
+    if (cats.isEmpty) return const SizedBox(height: 48);
+    if (_tabC == null || _tabC!.length != cats.length + 1) {
+      _tabC?.dispose();
+      _tabC = TabController(
+        length: cats.length + 1,
+        vsync: this,
+        initialIndex: _tabIndexFor(cats),
+      );
+    } else {
+      final want = _tabIndexFor(cats);
+      if (_tabC!.index != want && !_tabC!.indexIsChanging) {
+        _tabC!.index = want;
+      }
+    }
+    return TabBar(
+      controller: _tabC,
+      isScrollable: true,
+      tabAlignment: TabAlignment.start,
+      labelColor: AppTheme.accentOrange,
+      unselectedLabelColor: AppTheme.textSecondary,
+      indicatorColor: AppTheme.accentOrange,
+      indicatorWeight: 3,
+      labelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+      unselectedLabelStyle:
+          const TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
+      onTap: (i) {
+        final next = i == 0 ? null : '${cats[i - 1]['id']}';
+        if ('$next' == '$categoryId') return;
+        setState(() => categoryId = next);
+        _load(reset: true);
+      },
+      tabs: [
+        Tab(text: app.t('all') == 'all' ? 'الكل' : app.t('all')),
+        for (final c in cats) Tab(text: _catName(c)),
+      ],
+    );
+  }
+
+  ProductFilterValue get _drawerValue => ProductFilterValue(
+        sort: sort,
+        categoryId: categoryId,
+        priceMin: priceMin,
+        priceMax: priceMax,
+        minRating: minRating,
+        inStock: inStock,
+        onlyOffers: onlyOffers,
+        canDeliver: canDeliver,
+        isReturnable: isReturnable,
+      );
+
+  void _applyDrawer(ProductFilterValue v) {
+    sort = v.sort;
+    categoryId = v.categoryId;
+    priceMin = v.priceMin;
+    priceMax = v.priceMax;
+    minRating = v.minRating;
+    inStock = v.inStock;
+    onlyOffers = v.onlyOffers;
+    canDeliver = v.canDeliver;
+    isReturnable = v.isReturnable;
+    _load(reset: true);
+  }
+
+  /// Opens the filter bottom sheet; the price slider bounds follow the
+  /// prices present in the currently loaded list.
+  void _openFilters() {
+    var hi = 0.0;
+    for (final p in items) {
+      final variants = J.maps(p['variants']);
+      final variant = variants.isNotEmpty ? variants.first : p;
+      final price = variantDisplayPrice(variant).finalPrice;
+      if (price > hi) hi = price;
+    }
+    showProductFilterSheet(
+      context,
+      initial: _drawerValue,
+      categories: appController.rootCategories,
+      onApply: _applyDrawer,
+      priceMaxBound: hi > 0 ? (hi * 1.1).ceilToDouble() : 1000,
+    );
+  }
+
   Map<String, dynamic> get _filters => {
     'limit': AppConfig.productPageSize,
     'offset': offset,
     if (categoryId != null && categoryId!.isNotEmpty)
       'category_ids': categoryId,
-    if (brandIds.isNotEmpty) 'brand_ids': brandIds,
     if (widget.sellerId != null) 'seller_id': widget.sellerId,
     if (widget.sectionId != null && widget.sectionId!.isNotEmpty)
       'section_id': widget.sectionId,
@@ -106,6 +251,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
 
   Future<void> _load({bool reset = false}) async {
     if (!reset && (loadingMore || !hasMore)) return;
+    final mySeq = ++_seq;
     final point = appController.browseCoords;
     if (reset) {
       offset = 0;
@@ -119,8 +265,8 @@ class _ProductsScreenState extends State<ProductsScreen> {
       longitude: point.longitude,
       filters: _filters,
     );
+    if (!mounted || mySeq != _seq) return; // stale response: ignore.
     final next = result.dataMaps;
-    if (!mounted) return;
     setState(() {
       items = reset ? next : [...items, ...next];
       offset = items.length;
@@ -133,66 +279,62 @@ class _ProductsScreenState extends State<ProductsScreen> {
   @override
   Widget build(BuildContext context) {
     final app = appController;
-    return Column(
+    final activeCount = [
+      sort.isNotEmpty,
+      minRating.isNotEmpty,
+      priceMin.isNotEmpty || priceMax.isNotEmpty,
+      inStock,
+      onlyOffers,
+      canDeliver,
+      isReturnable,
+    ].where((e) => e).length;
+    return Scaffold(
+      body: Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        // Category TABS on a solid bar (never transparent, so products can
+        // never show through from underneath). The only search field is the
+        // header one — it drives [_search] through [headerSearch].
+        Container(
+          color: Colors.white,
+          padding: const EdgeInsetsDirectional.only(start: 8),
           child: Row(
             children: [
-              Expanded(
-                child: TextField(
-                  controller: _search,
-                  textInputAction: TextInputAction.search,
-                  onSubmitted: (_) => _load(reset: true),
-                  decoration: InputDecoration(
-                    hintText: app.t('search'),
-                    prefixIcon: const Icon(Icons.search),
-                    filled: true,
-                    fillColor: Colors.white,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14),
-                      borderSide: BorderSide.none,
-                    ),
+              Expanded(child: _categoryTabs(app)),
+              Stack(
+                alignment: Alignment.topRight,
+                children: [
+                  IconButton(
+                    onPressed: _openFilters,
+                    icon: const Icon(Icons.tune),
+                    tooltip: app.t('filters'),
                   ),
-                ),
+                  if (activeCount > 0)
+                    Positioned(
+                      right: 6,
+                      top: 6,
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: AppTheme.accentOrange,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 1.5),
+                        ),
+                        child: Text(
+                          '$activeCount',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
-              IconButton(onPressed: _openFilters, icon: const Icon(Icons.tune)),
             ],
           ),
         ),
-        if (app.rootCategories.isNotEmpty)
-          SizedBox(
-            height: 42,
-            child: ListView.separated(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              scrollDirection: Axis.horizontal,
-              itemCount: app.rootCategories.length + 1,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
-              itemBuilder: (_, i) {
-                if (i == 0) {
-                  final selected = categoryId == null || categoryId!.isEmpty;
-                  return ChoiceChip(
-                    label: Text(app.t('all') == 'all' ? 'الكل' : app.t('all')),
-                    selected: selected,
-                    onSelected: (_) {
-                      categoryId = null;
-                      _load(reset: true);
-                    },
-                  );
-                }
-                final cat = app.rootCategories[i - 1];
-                final selected = '${cat['id']}' == '$categoryId';
-                return ChoiceChip(
-                  label: Text(_catName(cat)),
-                  selected: selected,
-                  onSelected: (_) {
-                    categoryId = selected ? null : '${cat['id']}';
-                    _load(reset: true);
-                  },
-                );
-              },
-            ),
-          ),
+        const Divider(height: 1),
         Expanded(
           child: loading
               ? const Center(child: CircularProgressIndicator())
@@ -209,9 +351,11 @@ class _ProductsScreenState extends State<ProductsScreen> {
                   },
                   child: LayoutBuilder(builder: (ctx, c){
                     final count = c.maxWidth >= 900 ? 4 : c.maxWidth >= 600 ? 3 : 2;
-                    final aspect = c.maxWidth >= 600 ? 0.68 : 0.62;
+                    final aspect = c.maxWidth >= 600 ? 0.6 : 0.55;
                     return GridView.builder(
                     padding: const EdgeInsets.all(16),
+                    addRepaintBoundaries: true,
+                    addAutomaticKeepAlives: false,
                     gridDelegate:
                         SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: count,
@@ -241,164 +385,8 @@ class _ProductsScreenState extends State<ProductsScreen> {
                 ),
         ),
       ],
+      ),
     );
-  }
-
-  Future<void> _openFilters() async {
-    List<Map<String, dynamic>> brandList = [];
-    try {
-      final bRes = await appController.api.brands(limit: 50);
-      if (bRes.ok) brandList = bRes.dataMaps;
-    } catch (_) {}
-    if (!mounted) return;
-    final selected = await showModalBottomSheet<Map<String, dynamic>>(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) {
-        var localSort = sort;
-        var stock = inStock;
-        var offer = onlyOffers;
-        var pMin = priceMin;
-        var pMax = priceMax;
-        var deliver = canDeliver;
-        var ret = isReturnable;
-        var rating = int.tryParse(minRating) ?? 0;
-        var pickedBrands = brandIds.isEmpty
-            ? <String>{}
-            : brandIds.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
-        final minCtrl = TextEditingController(text: pMin);
-        final maxCtrl = TextEditingController(text: pMax);
-        final t = appController.t;
-        return StatefulBuilder(
-          builder: (context, setModal) => Padding(
-            padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          t('filters'),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 18,
-                          ),
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.pop(ctx, {'clear': true}),
-                        child: Text(t('clear_all')),
-                      ),
-                    ],
-                  ),
-                  Text(t('sort_by'), style: const TextStyle(fontWeight: FontWeight.w700)),
-                  RadioListTile(title: Text(t('low_to_high')), value: 'low', groupValue: localSort, onChanged: (v) => setModal(() => localSort = v ?? '')),
-                  RadioListTile(title: Text(t('high_to_low')), value: 'high', groupValue: localSort, onChanged: (v) => setModal(() => localSort = v ?? '')),
-                  RadioListTile(title: Text(t('newest_first')), value: 'new', groupValue: localSort, onChanged: (v) => setModal(() => localSort = v ?? '')),
-                  RadioListTile(title: Text(t('nearest')), value: 'nearest', groupValue: localSort, onChanged: (v) => setModal(() => localSort = v ?? '')),
-                  const SizedBox(height: 8),
-                  Text(t('min_seller_rating'), style: const TextStyle(fontWeight: FontWeight.w700)),
-                  Row(
-                    children: [
-                      for (var i = 1; i <= 5; i++)
-                        IconButton(
-                          icon: Icon(
-                            i <= rating ? Icons.star : Icons.star_border,
-                            color: Colors.amber,
-                          ),
-                          onPressed: () => setModal(() => rating = rating == i ? 0 : i),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(t('brands'), style: const TextStyle(fontWeight: FontWeight.w700)),
-                  if (brandList.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: Text(t('no_brands')),
-                    )
-                  else
-                    Wrap(
-                      spacing: 8,
-                      children: brandList.map((b) {
-                        final id = '${b['id']}';
-                        final selected = pickedBrands.contains(id);
-                        return FilterChip(
-                          label: Text(J.str(b['name'])),
-                          selected: selected,
-                          onSelected: (_) => setModal(() {
-                            if (selected) {
-                              pickedBrands.remove(id);
-                            } else {
-                              pickedBrands.add(id);
-                            }
-                          }),
-                        );
-                      }).toList(),
-                    ),
-                  const SizedBox(height: 8),
-                  Row(children: [
-                    Expanded(child: TextField(decoration: InputDecoration(labelText: t('price_from')), keyboardType: TextInputType.number, controller: minCtrl)),
-                    const SizedBox(width: 8),
-                    Expanded(child: TextField(decoration: InputDecoration(labelText: t('price_to')), keyboardType: TextInputType.number, controller: maxCtrl)),
-                  ]),
-                  SwitchListTile(title: Text(t('in_stock_only')), value: stock, onChanged: (v) => setModal(() => stock = v)),
-                  SwitchListTile(title: Text(t('offers')), value: offer, onChanged: (v) => setModal(() => offer = v)),
-                  SwitchListTile(title: Text(t('can_deliver')), value: deliver, onChanged: (v)=> setModal(()=> deliver=v)),
-                  SwitchListTile(title: Text(t('returnable_only')), value: ret, onChanged: (v)=> setModal(()=> ret=v)),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: () => Navigator.pop(ctx, {
-                        'sort': localSort,
-                        'stock': stock,
-                        'offer': offer,
-                        'pMin': minCtrl.text.trim(),
-                        'pMax': maxCtrl.text.trim(),
-                        'deliver': deliver,
-                        'returnable': ret,
-                        'rating': rating > 0 ? '$rating' : '',
-                        'brands': pickedBrands.join(','),
-                      }),
-                      child: Text(t('apply')),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
-    if (selected != null) {
-      if (selected['clear'] == true) {
-        sort = '';
-        inStock = false;
-        onlyOffers = widget.hasOffer;
-        priceMin = '';
-        priceMax = '';
-        canDeliver = false;
-        isReturnable = false;
-        minRating = '';
-        brandIds = '';
-      } else {
-        sort = selected['sort'] ?? '';
-        inStock = selected['stock'] == true;
-        onlyOffers = selected['offer'] == true;
-        priceMin = selected['pMin'] ?? '';
-        priceMax = selected['pMax'] ?? '';
-        canDeliver = selected['deliver'] == true;
-        isReturnable = selected['returnable'] == true;
-        minRating = selected['rating'] ?? '';
-        brandIds = selected['brands'] ?? '';
-      }
-      _load(reset: true);
-    }
   }
 }
 
@@ -463,52 +451,57 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   Future<void> _loadExtras(Map<String, dynamic> data) async {
     final app = appController;
     final point = app.browseCoords;
-    // Ratings summary + list
-    try {
-      final r = await app.api.productRatings(productId: data['id'], limit: 5);
-      if (mounted && r.ok) {
+    final tags = J.str(data['tag_names'] ?? data['tags']);
+    // Parallel: ratings + similar + catalog offers in one wave.
+    final results = await Future.wait([
+      app.api
+          .productRatings(productId: data['id'], limit: 5)
+          .timeout(const Duration(seconds: 12),
+              onTimeout: () => ApiResult({'status': 0}))
+          .catchError((_) => ApiResult({'status': 0})),
+      if (tags.isNotEmpty)
+        app.api
+            .products(
+              latitude: point.latitude,
+              longitude: point.longitude,
+              tagNames: tags,
+              filters: {'limit': 10, 'in_stock': 1},
+            )
+            .timeout(const Duration(seconds: 12),
+                onTimeout: () => ApiResult({'status': 0}))
+            .catchError((_) => ApiResult({'status': 0})),
+      app.api
+          .catalogOffers(productId: data['id'])
+          .timeout(const Duration(seconds: 12),
+              onTimeout: () => ApiResult({'status': 0}))
+          .catchError((_) => ApiResult({'status': 0})),
+    ]);
+    if (!mounted) return;
+    final r = results[0];
+    final o = results.last;
+    final s = results.length == 3 ? results[1] : null;
+    setState(() {
+      if (r.ok) {
         final d = J.map(r.dataMap['data']);
         final list = J.maps(r.dataMap['data']).isNotEmpty
             ? J.maps(r.dataMap['data'])
             : r.dataMaps;
-        setState(() {
-          ratings = list;
-          ratingAvg = double.tryParse(
-                  '${d['average'] ?? data['average_rating'] ?? ''}') ??
-              0;
-          ratingCount = int.tryParse(
-                  '${d['count'] ?? d['total'] ?? data['rating_count'] ?? ''}') ??
-              list.length;
-        });
+        ratings = list;
+        ratingAvg = double.tryParse(
+                '${d['average'] ?? data['average_rating'] ?? ''}') ??
+            0;
+        ratingCount = int.tryParse(
+                '${d['count'] ?? d['total'] ?? data['rating_count'] ?? ''}') ??
+            list.length;
       }
-    } catch (_) {}
-    // Similar products via tags
-    final tags = J.str(data['tag_names'] ?? data['tags']);
-    if (tags.isNotEmpty) {
-      try {
-        final s = await app.api.products(
-          latitude: point.latitude,
-          longitude: point.longitude,
-          tagNames: tags,
-          filters: {'limit': 10, 'in_stock': 1},
-        );
-        if (mounted && s.ok) {
-          setState(() {
-            similar = s.dataMaps
-                .where((p) => '${p['id']}' != '${data['id']}')
-                .take(10)
-                .toList();
-          });
-        }
-      } catch (_) {}
-    }
-    // Other sellers (catalog offers)
-    try {
-      final o = await app.api.catalogOffers(productId: data['id']);
-      if (mounted && o.ok) {
-        setState(() => offers = o.dataMaps);
+      if (s != null && s.ok) {
+        similar = s.dataMaps
+            .where((p) => '${p['id']}' != '${data['id']}')
+            .take(10)
+            .toList();
       }
-    } catch (_) {}
+      if (o.ok) offers = o.dataMaps;
+    });
   }
 
   Future<void> _share() async {
@@ -968,9 +961,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           fontWeight: FontWeight.w800, fontSize: 16)),
                   const SizedBox(height: 8),
                   SizedBox(
-                    height: 250,
+                    height: 296,
                     child: ListView.separated(
                       scrollDirection: Axis.horizontal,
+                      cacheExtent: 600,
                       itemCount: similar.length,
                       separatorBuilder: (_, __) =>
                           const SizedBox(width: 10),

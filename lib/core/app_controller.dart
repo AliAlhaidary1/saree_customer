@@ -184,12 +184,11 @@ class AppController extends ChangeNotifier {
           await _clearSession();
         }
       }
-      await reloadSettings();
-      await loadCities();
+      // Parallel bootstrap: settings + cities are independent.
+      await Future.wait([reloadSettings(), loadCities()]);
       await resolveCity();
-      await loadShop();
-      await loadRootCategories();
-      await loadBusinessHours();
+      // Shop + categories + hours are independent of each other.
+      await Future.wait([loadShop(), loadRootCategories(), loadBusinessHours()]);
       if (isLoggedIn) {
         await loadAddresses();
         await refreshCart();
@@ -297,20 +296,97 @@ class AppController extends ChangeNotifier {
     if (isLoggedIn) await refreshCart();
   }
 
-  Future<void> loadShop() async {
+  /// Cache-first shop: paints cached home instantly (max 2 min old), then
+  /// refreshes in background. New stores appear within ~2 min max — never hidden.
+  Future<void> loadShop({bool force = false}) async {
+    const ttl = Duration(minutes: 2);
+    if (!force) {
+      try {
+        final raw = _prefs.getString('shop_cache');
+        final at = _prefs.getInt('shop_cache_at') ?? 0;
+        if (raw != null && raw.isNotEmpty &&
+            DateTime.now().millisecondsSinceEpoch - at < ttl.inMilliseconds) {
+          final decoded = J.map(jsonDecode(raw));
+          if (decoded.isNotEmpty) {
+            shop = decoded;
+            notifyListeners();
+            // Background revalidate without blocking UI.
+            _refreshShopInBackground();
+            return;
+          }
+        }
+      } catch (_) {}
+    }
     final point = browseCoords;
     final result = await api.shop(
       latitude: point.latitude,
       longitude: point.longitude,
     );
-    if (result.ok) shop = result.dataMap;
+    if (result.ok) {
+      shop = result.dataMap;
+      try {
+        var dump = jsonEncode(shop);
+        // Device-safe: skip persisting giant payloads (>400KB).
+        if (dump.length < 400 * 1024) {
+          await _prefs.setString('shop_cache', dump);
+          await _prefs.setInt(
+              'shop_cache_at', DateTime.now().millisecondsSinceEpoch);
+        }
+      } catch (_) {}
+    }
     notifyListeners();
   }
 
-  Future<void> loadRootCategories() async {
+  Future<void> _refreshShopInBackground() async {
+    try {
+      final point = browseCoords;
+      final result = await api.shop(
+        latitude: point.latitude,
+        longitude: point.longitude,
+      );
+      if (result.ok) {
+        shop = result.dataMap;
+        try {
+          var dump = jsonEncode(shop);
+          if (dump.length < 400 * 1024) {
+            await _prefs.setString('shop_cache', dump);
+            await _prefs.setInt(
+                'shop_cache_at', DateTime.now().millisecondsSinceEpoch);
+          }
+        } catch (_) {}
+        notifyListeners();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> loadRootCategories({bool force = false}) async {
+    const ttl = Duration(minutes: 10);
+    if (!force) {
+      try {
+        final raw = _prefs.getString('cats_cache');
+        final at = _prefs.getInt('cats_cache_at') ?? 0;
+        if (raw != null && raw.isNotEmpty &&
+            DateTime.now().millisecondsSinceEpoch - at < ttl.inMilliseconds) {
+          final decoded = J.maps(jsonDecode(raw));
+          if (decoded.isNotEmpty) {
+            rootCategories = decoded;
+            notifyListeners();
+            return;
+          }
+        }
+      } catch (_) {}
+    }
     final result = await api.categories(categoryId: 0, limit: 50, offset: 0);
     if (result.ok) {
       rootCategories = result.dataMaps;
+      try {
+        var dump = jsonEncode(rootCategories);
+        if (dump.length < 200 * 1024) {
+          await _prefs.setString('cats_cache', dump);
+          await _prefs.setInt(
+              'cats_cache_at', DateTime.now().millisecondsSinceEpoch);
+        }
+      } catch (_) {}
     }
     notifyListeners();
   }

@@ -34,6 +34,17 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   Future<void> _load({bool silent = false}) async {
+    // Fast path: a guest with no local lines has nothing to refresh —
+    // show the empty state instantly instead of spinning on the network.
+    if (!appController.isLoggedIn && lines.isEmpty) {
+      if (mounted) {
+        setState(() {
+          loading = false;
+          error = null;
+        });
+      }
+      return;
+    }
     // Without this guard any failure leaves the spinner on screen forever
     // and the user has to kill the app.
     if (!silent && mounted) {
@@ -43,9 +54,11 @@ class _CartScreenState extends State<CartScreen> {
       });
     }
     try {
+      // Short timeout so a slow/unreachable backend surfaces a retryable
+      // error quickly instead of looking like a frozen app.
       await appController
           .refreshCart()
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(seconds: 12));
       if (!mounted) return;
       setState(() => error = null);
     } catch (_) {
@@ -487,7 +500,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       app.promoCode?['discount'] ?? checkout?['promo_discount'],
     );
     final platformFee = J.d(checkout?['platform_fee'] ?? app.platformFee);
-    var finalTotal = J.d(
+    final preWalletTotal = J.d(
       checkout?['final_total'] ?? checkout?['total'],
       subTotal + delivery + platformFee - discount,
     );
@@ -496,10 +509,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           app.user?['wallet'] ??
           app.settings['user_balance'],
     );
-    if (walletUsed) {
-      finalTotal = (finalTotal - wallet).clamp(0, double.infinity);
-      if (finalTotal == 0) method = 'Wallet';
-    }
+    // Web parity: wallet deduction is always computed (even when it covers
+    // everything), and the wallet card is always visible.
+    final walletDeduction =
+        walletUsed ? wallet.clamp(0.0, preWalletTotal) : 0.0;
+    var finalTotal = preWalletTotal - walletDeduction;
+    final fullWalletCover =
+        walletUsed && preWalletTotal > 0 && walletDeduction >= preWalletTotal;
+    if (fullWalletCover) method = 'Wallet';
     final codAllowed = J.flag(checkout?['cod_allowed'] ?? 1);
     final address = app.selectedAddress;
     final bh = app.businessHours;
@@ -551,35 +568,123 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ),
             ),
           if (bh != null && !canPlace.allowed) const SizedBox(height: 12),
-          // seller groups like front
-          if (sellerGroups.isNotEmpty)
-            ...sellerGroups.map((g) => Card(
-              child: ListTile(
-                leading: const Icon(Icons.store),
-                title: Text(J.str(g['store_name'] ?? g['seller_id'])),
-                subtitle: Text('${J.maps(g['items']).length} منتجات'),
-                trailing: Text(money(deliveryFees['${g['seller_id']}']?['amount'] ?? 0, app.currency, app.decimals)),
+          // ── Delivery addresses (web parity: inline radio list, not a
+          // single tile that forces leaving checkout) ──
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.location_on_outlined),
+                    title: Text(app.t('delivery_address'),
+                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    trailing: TextButton.icon(
+                      onPressed: () async {
+                        await context.push('/addresses');
+                        if (!mounted) return;
+                        setState(() {});
+                        await _load();
+                      },
+                      icon: const Icon(Icons.add, size: 18),
+                      label: Text(app.addresses.isEmpty
+                          ? app.t('add_new_address')
+                          : app.t('add_another_address')),
+                    ),
+                  ),
+                  if (app.addresses.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                      child: Text(app.t('no_address_yet'),
+                          style: const TextStyle(
+                              color: Colors.grey, fontSize: 12)),
+                    )
+                  else
+                    ...app.addresses.map((a) {
+                      final sel = '${a['id']}' == '${address?['id']}';
+                      final line = [
+                        J.str(a['address'] ?? a['formatted_address']),
+                        J.str(a['area']),
+                        J.str(a['city']),
+                        J.str(a['mobile']),
+                      ].where((p) => p.isNotEmpty).join('، ');
+                      return RadioListTile<String>(
+                        dense: true,
+                        value: '${a['id']}',
+                        groupValue:
+                            address == null ? null : '${address['id']}',
+                        onChanged: (_) async {
+                          app.selectAddress(a);
+                          await _load();
+                        },
+                        title: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                J.str(a['type'] ?? a['name']),
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w600, fontSize: 14),
+                              ),
+                            ),
+                            if (J.str(a['is_default']) == '1' ||
+                                J.i(a['is_default']) == 1)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: app.accentColor
+                                      .withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Text(
+                                  app.t('default_address_badge'),
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: app.accentColor,
+                                      fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                          ],
+                        ),
+                        subtitle: line.isEmpty
+                            ? null
+                            : Text(line,
+                                maxLines: 2, overflow: TextOverflow.ellipsis),
+                        secondary: sel
+                            ? Icon(Icons.check_circle,
+                                color: app.accentColor)
+                            : null,
+                      );
+                    }),
+                ],
               ),
-            )),
-          ListTile(
-            tileColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
             ),
-            title: Text(app.t('deliver_to')),
-            subtitle: Text(
-              address == null
-                  ? app.t('new_address')
-                  : J.str(address['address'] ?? address['formatted_address']),
-            ),
-            trailing: const Icon(Icons.chevron_left),
-            onTap: () async {
-              await context.push('/addresses');
-              setState(() {});
-              await _load();
-            },
           ),
           const SizedBox(height: 12),
+          // ── Stores in this order ──
+          if (sellerGroups.isNotEmpty)
+            Card(
+              child: Column(
+                children: sellerGroups
+                    .map((g) => ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.store_outlined),
+                          title: Text(J.str(
+                              g['store_name'] ?? g['seller_id'])),
+                          subtitle: Text(
+                              '${J.maps(g['items']).length} • ${app.t('products')}'),
+                          trailing: Text(money(
+                              deliveryFees['${g['seller_id']}']?['amount'] ??
+                                  0,
+                              app.currency,
+                              app.decimals)),
+                        ))
+                    .toList(),
+              ),
+            ),
+          if (sellerGroups.isNotEmpty) const SizedBox(height: 12),
           // time slots picker like front Checkout.js
           if (app.timeSlots.isNotEmpty) ...[
             Text(app.t('select_delivery_time'),
@@ -620,73 +725,173 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
             const SizedBox(height: 12),
           ],
-          ...items.map(
-            (item) => ListTile(
-              title: Text(J.str(item['name'] ?? item['product_name'])),
-              trailing: Text('x${item['qty'] ?? item['quantity']}'),
+          // ── Items ──
+          Card(
+            child: Column(
+              children: [
+                for (var i = 0; i < items.length; i++) ...[
+                  ListTile(
+                    dense: true,
+                    leading: _thumb(items[i], app),
+                    title: Text(
+                        J.str(items[i]['name'] ??
+                            items[i]['product_name']),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis),
+                    trailing: Text(
+                        'x${items[i]['qty'] ?? items[i]['quantity']}',
+                        style:
+                            const TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                  if (i < items.length - 1) const Divider(height: 1),
+                ],
+              ],
             ),
-          ),
-          const Divider(),
-          _row(app.t('sub_total'), money(subTotal, app.currency, app.decimals)),
-          _row(
-            '${app.t('delivery_charge')}${freeDelivery ? ' (${app.t('free_delivery')})' : ''}',
-            money(delivery, app.currency, app.decimals),
-          ),
-          if (platformFee > 0)
-            _row(app.t('platform_fee'),
-                money(platformFee, app.currency, app.decimals)),
-          if (discount > 0)
-            _row(
-              app.t('discount'),
-              '- ${money(discount, app.currency, app.decimals)}',
-            ),
-          _row(
-            app.t('total'),
-            money(finalTotal, app.currency, app.decimals),
-            bold: true,
           ),
           const SizedBox(height: 12),
-          if (wallet > 0)
-            SwitchListTile(
-              title: Text(
-                '${app.t('wallet')} (${money(wallet, app.currency, app.decimals)})',
+          // ── Summary ──
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  _row(app.t('sub_total'),
+                      money(subTotal, app.currency, app.decimals)),
+                  _row(
+                    '${app.t('delivery_charge')}${freeDelivery ? ' (${app.t('free_delivery')})' : ''}',
+                    money(delivery, app.currency, app.decimals),
+                  ),
+                  if (platformFee > 0)
+                    _row(app.t('platform_fee'),
+                        money(platformFee, app.currency, app.decimals)),
+                  if (discount > 0)
+                    _row(
+                      app.t('discount'),
+                      '- ${money(discount, app.currency, app.decimals)}',
+                    ),
+                  if (walletUsed && walletDeduction > 0)
+                    _row(
+                      app.t('walletBalance'),
+                      '- ${money(walletDeduction, app.currency, app.decimals)}',
+                    ),
+                  const Divider(),
+                  _row(
+                    app.t('total'),
+                    money(finalTotal, app.currency, app.decimals),
+                    bold: true,
+                  ),
+                ],
               ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          // ── Wallet (web parity: ALWAYS visible, disabled when empty) ──
+          Card(
+            color: walletUsed ? app.accentColor.withValues(alpha: 0.08) : null,
+            child: SwitchListTile(
               value: walletUsed,
-              onChanged: (v) => setState(() => walletUsed = v),
-            ),
-          // Payment methods parity with front (9 gateways)
-          if (codAllowed &&
-              (_methodOn('cod_payment_method') || !_paymentConfigured()))
-            RadioListTile(
-              title: Text(app.t('cash_on_delivery')),
-              value: 'COD',
-              groupValue: method,
-              onChanged: walletUsed && finalTotal == 0
+              onChanged: wallet <= 0
                   ? null
-                  : (v) => setState(() => method = '$v'),
+                  : (v) => setState(() {
+                        walletUsed = v;
+                        if (v && finalTotal - wallet <= 0) method = 'Wallet';
+                      }),
+              secondary: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: app.accentColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(Icons.account_balance_wallet_outlined,
+                    color: app.accentColor),
+              ),
+              title: Text(
+                '${app.t('walletBalance')} • ${money(wallet, app.currency, app.decimals)}',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              subtitle: Text(
+                wallet <= 0
+                    ? app.t('wallet_empty_hint')
+                    : (walletUsed
+                        ? app.t('wallet_in_use')
+                        : app.t('wallet_use_hint')),
+                style: const TextStyle(fontSize: 12),
+              ),
             ),
-          if (_methodOn('wallet_payment_method') || walletUsed)
-            RadioListTile(
-              title: Text(app.t('wallet')),
-              value: 'Wallet',
-              groupValue: method,
-              onChanged: (v) => setState(() => method = '$v'),
+          ),
+          if (fullWalletCover)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.check_circle,
+                      color: Colors.green, size: 18),
+                  const SizedBox(width: 6),
+                  Expanded(
+                      child: Text(app.t('wallet_covers_full'),
+                          style: const TextStyle(
+                              color: Colors.green,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13))),
+                ],
+              ),
             ),
-          if (_methodOn('stripe_payment_method') || _methodOn('stripe'))
-            RadioListTile(title: const Text('Stripe'), value: 'Stripe', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
-          if (_methodOn('paypal_payment_method') || _methodOn('paypal'))
-            RadioListTile(title: const Text('PayPal'), value: 'Paypal', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
-          if (_methodOn('paystack_payment_method') || _methodOn('paystack'))
-            RadioListTile(title: const Text('Paystack'), value: 'Paystack', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
-          if (_methodOn('razorpay_payment_method') || _methodOn('razorpay'))
-            RadioListTile(title: const Text('Razorpay'), value: 'Razorpay', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
-          if (_methodOn('cashfree_payment_method'))
-            RadioListTile(title: const Text('Cashfree'), value: 'Cashfree', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
-          if (_methodOn('midtrans_payment_method'))
-            RadioListTile(title: const Text('Midtrans'), value: 'Midtrans', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
-          if (_methodOn('phonepe_payment_method') ||
-              _methodOn('phonepay_payment_method'))
-            RadioListTile(title: const Text('PhonePe'), value: 'Phonepe', groupValue: method, onChanged: (v) => setState(() => method = '$v')),
+          const SizedBox(height: 12),
+          // ── Payment methods (selectable cards, web parity) ──
+          if (!fullWalletCover)
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                      child: Text(app.t('payment_method'),
+                          style:
+                              const TextStyle(fontWeight: FontWeight.w700)),
+                    ),
+                    if (codAllowed &&
+                        (_methodOn('cod_payment_method') ||
+                            !_paymentConfigured()))
+                      _payTile(
+                        app: app,
+                        icon: Icons.money_outlined,
+                        label: app.t('cash_on_delivery'),
+                        value: 'COD',
+                        group: method,
+                        enabled: !(walletUsed && finalTotal == 0),
+                        onTap: (v) => setState(() => method = '$v'),
+                      ),
+                    if (_methodOn('wallet_payment_method') || walletUsed)
+                      _payTile(
+                        app: app,
+                        icon: Icons.account_balance_wallet_outlined,
+                        label: app.t('walletBalance'),
+                        value: 'Wallet',
+                        group: method,
+                        enabled: true,
+                        onTap: (v) => setState(() => method = '$v'),
+                      ),
+                    if (_methodOn('stripe_payment_method') || _methodOn('stripe'))
+                      _payTile(app: app, icon: Icons.credit_card_outlined, label: 'Stripe', value: 'Stripe', group: method, enabled: true, onTap: (v) => setState(() => method = '$v')),
+                    if (_methodOn('paypal_payment_method') || _methodOn('paypal'))
+                      _payTile(app: app, icon: Icons.payment_outlined, label: 'PayPal', value: 'Paypal', group: method, enabled: true, onTap: (v) => setState(() => method = '$v')),
+                    if (_methodOn('paystack_payment_method') || _methodOn('paystack'))
+                      _payTile(app: app, icon: Icons.payment_outlined, label: 'Paystack', value: 'Paystack', group: method, enabled: true, onTap: (v) => setState(() => method = '$v')),
+                    if (_methodOn('razorpay_payment_method') || _methodOn('razorpay'))
+                      _payTile(app: app, icon: Icons.payment_outlined, label: 'Razorpay', value: 'Razorpay', group: method, enabled: true, onTap: (v) => setState(() => method = '$v')),
+                    if (_methodOn('cashfree_payment_method'))
+                      _payTile(app: app, icon: Icons.payment_outlined, label: 'Cashfree', value: 'Cashfree', group: method, enabled: true, onTap: (v) => setState(() => method = '$v')),
+                    if (_methodOn('midtrans_payment_method'))
+                      _payTile(app: app, icon: Icons.payment_outlined, label: 'Midtrans', value: 'Midtrans', group: method, enabled: true, onTap: (v) => setState(() => method = '$v')),
+                    if (_methodOn('phonepe_payment_method') ||
+                        _methodOn('phonepay_payment_method'))
+                      _payTile(app: app, icon: Icons.payment_outlined, label: 'PhonePe', value: 'Phonepe', group: method, enabled: true, onTap: (v) => setState(() => method = '$v')),
+                  ],
+                ),
+              ),
+            ),
           TextField(
             controller: promo,
             decoration: InputDecoration(
@@ -889,6 +1094,77 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(app.t('order_placed_ok'))));
+  }
+
+  Widget _thumb(Map<String, dynamic> item, AppController app) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: SizedBox(
+        width: 44,
+        height: 44,
+        child: AppImage(
+          J.str(item['image'] ?? item['image_url']),
+          placeholder: app.placeholder,
+        ),
+      ),
+    );
+  }
+
+  Widget _payTile({
+    required AppController app,
+    required IconData icon,
+    required String label,
+    required String value,
+    required String group,
+    required bool enabled,
+    required ValueChanged<String> onTap,
+  }) {
+    final active = group == value;
+    return Opacity(
+      opacity: enabled ? 1 : 0.45,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: enabled ? () => onTap(value) : null,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: active
+                    ? app.accentColor
+                    : Colors.grey.withValues(alpha: 0.3),
+                width: active ? 1.6 : 1,
+              ),
+              color: active
+                  ? app.accentColor.withValues(alpha: 0.07)
+                  : Colors.transparent,
+            ),
+            child: Row(
+              children: [
+                Icon(icon,
+                    color: active
+                        ? app.accentColor
+                        : Colors.grey.shade600),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(label,
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                ),
+                Icon(
+                  active
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  color:
+                      active ? app.accentColor : Colors.grey.shade500,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _row(String label, String value, {bool bold = false}) {

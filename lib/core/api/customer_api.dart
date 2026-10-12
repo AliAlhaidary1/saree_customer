@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../config.dart';
 import '../json_util.dart';
+import 'api_cache.dart';
 import 'api_errors.dart';
 
 class CustomerApi {
@@ -12,9 +13,11 @@ class CustomerApi {
     _dio = Dio(
       BaseOptions(
         baseUrl: _normalizeBase(baseUrl),
-        connectTimeout: const Duration(seconds: 25),
-        receiveTimeout: const Duration(seconds: 40),
-        sendTimeout: const Duration(seconds: 40),
+        // Tight timeouts: fail fast + retry once instead of hanging 40s
+        // on slow networks (main perceived cause of "very slow" catalog).
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 15),
+        sendTimeout: const Duration(seconds: 15),
         headers: {AppConfig.accessKeyHeader: AppConfig.accessKey},
         validateStatus: (status) => status != null && status < 500,
       ),
@@ -24,6 +27,36 @@ class CustomerApi {
   }
 
   late final Dio _dio;
+
+  /// Bounded in-memory cache for public catalog GETs (device-safe, short TTL).
+  final ApiCache cache = ApiCache(maxEntries: 80);
+
+  static const _catalogTtls = <String, Duration>{
+    'sliders': Duration(minutes: 10),
+    'offers': Duration(minutes: 5),
+    'brands': Duration(minutes: 10),
+    'countries': Duration(minutes: 15),
+    'sellers': Duration(minutes: 2),
+    'categories': Duration(minutes: 10),
+    'shop': Duration(minutes: 2),
+    'sections': Duration(minutes: 5),
+    'flash_sales': Duration(minutes: 2),
+  };
+
+  Duration? _ttlFor(String path) {
+    for (final e in _catalogTtls.entries) {
+      if (path == e.key || path.startsWith('${e.key}/') || path.startsWith('${e.key}?')) {
+        return e.value;
+      }
+    }
+    return null;
+  }
+
+  String _cacheKey(String path, [Map<String, dynamic>? query]) {
+    final q = _clean(query);
+    final parts = (q?.entries ?? <MapEntry<String, dynamic>>[]).map((e) => '${e.key}=${e.value}').toList()..sort();
+    return '$path|${parts.join('&')}';
+  }
 
   static String _normalizeBase(String url) {
     var root = url.trim();
@@ -88,11 +121,40 @@ class CustomerApi {
     }
   }
 
-  Future<ApiResult> _get(String path, [Map<String, dynamic>? query]) {
-    return _guard(
+  Future<ApiResult> _get(String path, [Map<String, dynamic>? query]) async {
+    final ttl = _ttlFor(path);
+    final key = _cacheKey(path, query);
+    if (ttl != null) {
+      final cached = cache.get(key, ttl);
+      if (cached != null) return cached;
+      // Stale-while-revalidate: paint stale instantly, refresh in background.
+      final stale = cache.getStale(key);
+      if (stale != null) {
+        () async {
+          try {
+            final fresh = await _guard(
+              () => _dio.get(path, queryParameters: _clean(query)),
+              kind: inferRequestKind(path, method: 'GET'),
+            );
+            if (fresh.ok) cache.set(key, fresh);
+          } catch (_) {}
+        }();
+        return stale;
+      }
+    }
+    final res = await _guard(
       () => _dio.get(path, queryParameters: _clean(query)),
       kind: inferRequestKind(path, method: 'GET'),
     );
+    if (ttl != null && res.ok) cache.set(key, res);
+    return res;
+  }
+
+  /// Call after seller/product creation flows so lists refresh immediately.
+  void invalidateCatalog() {
+    for (final p in ['sellers', 'shop', 'sections', 'brands', 'countries']) {
+      cache.invalidate(p);
+    }
   }
 
   Future<ApiResult> _post(String path, [Map<String, dynamic>? fields]) {
@@ -340,6 +402,29 @@ class CustomerApi {
 
   Future<ApiResult> contactUs() => _get('settings/contact_us');
 
+  // ---- Complaints & Suggestions ----
+  Future<ApiResult> submitComplaint({
+    required String name,
+    required String phone,
+    String email = '',
+    required String type,
+    String subject = '',
+    required String message,
+    String orderId = '',
+  }) {
+    return _post('complaints', {
+      'name': name,
+      'phone': phone,
+      if (email.isNotEmpty) 'email': email,
+      'type': type,
+      if (subject.isNotEmpty) 'subject': subject,
+      'message': message,
+      if (orderId.isNotEmpty) 'order_id': orderId,
+    });
+  }
+
+  Future<ApiResult> myComplaints() => _get('complaints/mine');
+
   Future<ApiResult> city({
     required double latitude,
     required double longitude,
@@ -456,6 +541,22 @@ class CustomerApi {
 
   Future<ApiResult> assistantSearch(String query, {int limit = 10}) {
     return _get('assistant/search', {'q': query, 'limit': limit});
+  }
+
+  /// Web parity with assistantAct (AssistantChat.jsx confirm button):
+  /// executes the confirmed tool call and returns the follow-up message.
+  Future<ApiResult> assistantAct(
+    String tool, {
+    Map<String, dynamic> args = const {},
+    bool confirm = true,
+    String question = '',
+  }) {
+    return _post('assistant/act', {
+      'tool': tool,
+      if (args.isNotEmpty) 'args': jsonEncode(args),
+      'confirm': confirm ? 1 : 0,
+      if (question.isNotEmpty) 'question': question,
+    });
   }
 
   Future<ApiResult> flashSales({int limit = 20}) =>

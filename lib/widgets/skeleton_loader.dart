@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/app_theme.dart';
 
-/// Orange-and-navy skeleton shimmer for loading states.
+/// Formal neutral-grey skeleton shimmer for loading states.
 class SkeletonLoader extends StatefulWidget {
   const SkeletonLoader({
     super.key,
@@ -51,11 +51,11 @@ class _SkeletonLoaderState extends State<SkeletonLoader>
             gradient: LinearGradient(
               begin: Alignment(-1 + _controller.value * 2, 0),
               end: Alignment(_controller.value * 2, 0),
-              colors: [
-                AppTheme.surfaceGrey,
-                AppTheme.accentOrange.withValues(alpha: 0.15),
-                AppTheme.primaryNavy.withValues(alpha: 0.08),
-                AppTheme.surfaceGrey,
+              colors: const [
+                Color(0xFFE9EBEE),
+                Color(0xFFF7F8FA),
+                Color(0xFFF7F8FA),
+                Color(0xFFE9EBEE),
               ],
             ),
           ),

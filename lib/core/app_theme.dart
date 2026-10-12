@@ -4,7 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'brand/brand_config.dart';
 
-/// Sreamart (سريع مارت) brand design tokens.
+/// Saree MART (سريع MART) brand design tokens.
 abstract final class AppTheme {
   static const primaryNavy = Color(0xFF0A2540);
   static const accentOrange = Color(0xFFFF6B00);
@@ -13,8 +13,8 @@ abstract final class AppTheme {
   static const textPrimary = Color(0xFF0A2540);
   static const textSecondary = Color(0xFF6B7280);
 
-  static const brandNameAr = 'سريع مارت';
-  static const brandNameEn = 'Sreamart';
+  static const brandNameAr = 'سريع MART';
+  static const brandNameEn = 'SAREE MART';
 
   static TextTheme _textTheme(Locale locale) {
     final base = locale.languageCode == 'ar'
@@ -89,17 +89,17 @@ abstract final class AppTheme {
       ),
       navigationBarTheme: NavigationBarThemeData(
         backgroundColor: backgroundWhite,
-        indicatorColor: orange.withValues(alpha: 0.15),
+        indicatorColor: orange,
         labelTextStyle: WidgetStateProperty.resolveWith((states) {
           final selected = states.contains(WidgetState.selected);
           return textTheme.labelSmall?.copyWith(
             color: selected ? orange : muted,
-            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
           );
         }),
         iconTheme: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.selected)) {
-            return IconThemeData(color: orange);
+            return IconThemeData(color: backgroundWhite);
           }
           return IconThemeData(color: muted);
         }),
@@ -152,9 +152,19 @@ abstract final class AppTheme {
         hintStyle: textTheme.bodyMedium?.copyWith(color: muted),
       ),
       chipTheme: ChipThemeData(
-        selectedColor: orange.withValues(alpha: 0.15),
-        labelStyle: textTheme.bodySmall,
-        side: BorderSide(color: navy.withValues(alpha: 0.12)),
+        backgroundColor: backgroundWhite,
+        selectedColor: orange,
+        secondarySelectedColor: orange,
+        checkmarkColor: backgroundWhite,
+        labelStyle: textTheme.bodySmall?.copyWith(
+          color: ink,
+          fontWeight: FontWeight.w600,
+        ),
+        secondaryLabelStyle: textTheme.bodySmall?.copyWith(
+          color: backgroundWhite,
+          fontWeight: FontWeight.w700,
+        ),
+        side: BorderSide(color: navy.withValues(alpha: 0.14)),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       ),
       badgeTheme: BadgeThemeData(

@@ -77,13 +77,42 @@ class AssistantScreen extends StatefulWidget {
 
 class _AssistantScreenState extends State<AssistantScreen> {
   final controller = TextEditingController();
+  final scroll = ScrollController();
   final messages = <Map<String, dynamic>>[];
   bool loading = false;
+  bool confirming = false;
 
   @override
   void dispose() {
     controller.dispose();
+    scroll.dispose();
     super.dispose();
+  }
+
+  void _pushBot(String text,
+      {Map<String, dynamic>? action,
+      List<Map<String, dynamic>> products = const []}) {
+    if (!mounted) return;
+    setState(() {
+      messages.add({
+        'role': 'bot',
+        'text': text,
+        if (action != null) 'action': action,
+        if (products.isNotEmpty) 'products': products,
+      });
+    });
+    _scrollDown();
+  }
+
+  void _scrollDown() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!scroll.hasClients) return;
+      scroll.animateTo(
+        scroll.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+      );
+    });
   }
 
   Future<void> _send() async {
@@ -111,6 +140,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
       messages.add({'role': 'user', 'text': text});
       loading = true;
     });
+    _scrollDown();
     try {
       final result = await appController.api.assistantChat(text, history: history);
       if (!mounted) return;
@@ -118,6 +148,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
       final action =
           data['has_action'] == true || data['has_action'] == 1 ? J.map(data['action']) : <String, dynamic>{};
       final products = J.maps(data['products']);
+      if (!mounted) return;
       setState(() {
         loading = false;
         messages.add({
@@ -129,6 +160,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
           'products': products,
         });
       });
+      _scrollDown();
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -136,6 +168,39 @@ class _AssistantScreenState extends State<AssistantScreen> {
         messages.add(
             {'role': 'bot', 'text': appController.t('assistant_not_found')});
       });
+      _scrollDown();
+    }
+  }
+
+  /// Web parity (AssistantChat.jsx confirm button): executes the confirmed
+  /// tool call and appends the follow-up message/action.
+  Future<void> _confirm(Map<String, dynamic> action) async {
+    final payload = J.map(action['payload']);
+    final tool = J.str(payload['tool']);
+    if (tool.isEmpty || confirming || loading) return;
+    setState(() => confirming = true);
+    try {
+      final args = J.map(payload['args']);
+      final res = await appController.api.assistantAct(
+        tool,
+        args: args,
+        question: J.str(payload['question']),
+      );
+      final data = res.dataMap;
+      final nextAction = data['has_action'] == true || data['has_action'] == 1
+          ? J.map(data['action'])
+          : <String, dynamic>{};
+      _pushBot(
+        J.str(data['message']).isEmpty
+            ? appController.t('assistant_not_found')
+            : J.str(data['message']),
+        action: nextAction.isEmpty ? null : nextAction,
+        products: J.maps(data['products']),
+      );
+    } catch (_) {
+      _pushBot(appController.t('assistant_not_found'));
+    } finally {
+      if (mounted) setState(() => confirming = false);
     }
   }
 
@@ -176,7 +241,17 @@ class _AssistantScreenState extends State<AssistantScreen> {
   Widget build(BuildContext context) {
     final app = appController;
     return Scaffold(
-      appBar: AppBar(title: Text(app.t('assistant_title'))),
+      appBar: AppBar(
+        title: Text(app.t('assistant_title')),
+        actions: [
+          if (messages.isNotEmpty)
+            IconButton(
+              onPressed: () => setState(messages.clear),
+              icon: const Icon(Icons.add_comment_outlined),
+              tooltip: app.t('new_chat'),
+            ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
@@ -185,6 +260,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
           ),
           Expanded(
             child: ListView.builder(
+              controller: scroll,
               padding: const EdgeInsets.all(16),
               itemCount: messages.length,
               itemBuilder: (context, index) {
@@ -325,40 +401,29 @@ class _AssistantScreenState extends State<AssistantScreen> {
   Widget _actionWidget(Map<String, dynamic> action) {
     if (action.isEmpty) return const SizedBox.shrink();
     final app = appController;
-    if (action['type'] == 'PRODUCT_CARD') {
-      final product = J.map(action['product']);
-      final url = J.str(product['url']).isNotEmpty
-          ? _assistantPath(J.str(product['url']))
-          : (J.str(product['slug']).isNotEmpty || product['id'] != null
-              ? '/product/${J.str(product['slug']).isNotEmpty ? product['slug'] : product['id']}'
-              : '/');
-      return ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: SizedBox(
-          width: 48,
-          height: 48,
-          child: AppImage(
-            J.str(product['image']),
-            placeholder: app.placeholder,
-          ),
-        ),
-        title: Text(J.str(product['name']).isNotEmpty
-            ? J.str(product['name'])
-            : J.str(action['label'])),
-        subtitle: J.str(product['price']).isNotEmpty
-            ? Text(J.str(product['price']))
-            : null,
-        trailing: Text(
-          J.str(action['label']).isNotEmpty
+    // Web parity: CONFIRM executes the tool call (assistant/act).
+    if (action['type'] == 'CONFIRM' && J.map(action['payload']).isNotEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: FilledButton.icon(
+          onPressed:
+              (confirming || loading) ? null : () => _confirm(action),
+          icon: confirming
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.check, size: 18),
+          label: Text(J.str(action['label']).isNotEmpty
               ? J.str(action['label'])
-              : app.t('assistant_open_product'),
-          style: TextStyle(
-            color: app.accentColor,
-            fontWeight: FontWeight.w600,
-            fontSize: 12,
-          ),
+              : app.t('assistant_confirm')),
         ),
-        onTap: () => context.push(url),
+      );
+    }
+    if (action['type'] == 'PRODUCT_CARD') {
+      return _AssistantProductCard(
+        action: action,
+        pushBot: (text) => _pushBot(text),
       );
     }
     final url = J.str(action['url']);
@@ -370,6 +435,161 @@ class _AssistantScreenState extends State<AssistantScreen> {
         child: Text(J.str(action['label']).isNotEmpty
             ? J.str(action['label'])
             : app.t('assistant_open_page')),
+      ),
+    );
+  }
+
+}
+
+/// Web parity with AssistantProductCard: product link + qty stepper +
+/// in-chat add to cart (resolves an in-stock variant first).
+class _AssistantProductCard extends StatefulWidget {
+  const _AssistantProductCard({required this.action, required this.pushBot});
+  final Map<String, dynamic> action;
+  final ValueChanged<String> pushBot;
+
+  @override
+  State<_AssistantProductCard> createState() => _AssistantProductCardState();
+}
+
+class _AssistantProductCardState extends State<_AssistantProductCard> {
+  int qty = 1;
+  bool adding = false;
+  bool added = false;
+
+  Map<String, dynamic> get product => J.map(widget.action['product']);
+
+  Future<void> _add() async {
+    if (adding) return;
+    final app = appController;
+    setState(() => adding = true);
+    try {
+      final point = app.browseCoords;
+      final detail = await app.api.productById(
+        latitude: point.latitude,
+        longitude: point.longitude,
+        id: product['id'],
+        slug: J.str(product['slug']),
+      );
+      final variants = J.maps(
+          detail.dataMap['variants'] ?? detail.dataMap['product_variants']);
+      Map<String, dynamic>? variant;
+      for (final v in variants) {
+        if (J.i(v['stock']) > 0) {
+          variant = v;
+          break;
+        }
+      }
+      variant ??= variants.isNotEmpty ? variants.first : null;
+      final variantId =
+          variant?['id'] ?? product['product_variant_id'] ?? product['id'];
+      final error = await app.addToCart(
+        productId: product['id'],
+        variantId: variantId,
+        qty: qty,
+        sellerId: J.sellerId(product),
+        storeName: app.storeNameOf(product),
+      );
+      if (!mounted) return;
+      if (error != null) {
+        widget.pushBot('${app.t('assistant_add_failed')}: $error');
+      } else {
+        setState(() => added = true);
+        widget.pushBot(
+            '${app.t('assistant_added_to_cart')} (${J.str(product['name'])} × $qty)');
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) setState(() => added = false);
+        });
+      }
+    } catch (_) {
+      if (mounted) widget.pushBot(appController.t('assistant_add_failed'));
+    } finally {
+      if (mounted) setState(() => adding = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = appController;
+    final p = product;
+    final url = J.str(p['url']).isNotEmpty
+        ? p['url']
+        : (J.str(p['slug']).isNotEmpty || p['id'] != null
+            ? '/product/${J.str(p['slug']).isNotEmpty ? p['slug'] : p['id']}'
+            : '/');
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            leading: SizedBox(
+              width: 48,
+              height: 48,
+              child: AppImage(
+                J.str(p['image']),
+                placeholder: app.placeholder,
+              ),
+            ),
+            title: Text(
+                J.str(p['name']).isNotEmpty
+                    ? J.str(p['name'])
+                    : J.str(widget.action['label']),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis),
+            subtitle: J.str(p['price']).isNotEmpty
+                ? Text(J.str(p['price']))
+                : null,
+            trailing: Text(
+              app.t('assistant_open_product'),
+              style: TextStyle(
+                color: app.accentColor,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
+            onTap: () => context.push(url),
+          ),
+          Row(
+            children: [
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                onPressed: adding
+                    ? null
+                    : () => setState(() => qty = qty > 1 ? qty - 1 : 1),
+                icon: const Icon(Icons.remove_circle_outline),
+              ),
+              Text('$qty', style: const TextStyle(fontWeight: FontWeight.w700)),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                onPressed:
+                    adding ? null : () => setState(() => qty = qty >= 99 ? 99 : qty + 1),
+                icon: const Icon(Icons.add_circle_outline),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: FilledButton.tonal(
+                  onPressed: adding ? null : _add,
+                  child: adding
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : Text(added
+                          ? '✓ ${app.t('assistant_added_to_cart')}'
+                          : app.t('add_to_cart')),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

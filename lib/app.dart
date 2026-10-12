@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:go_router/go_router.dart';
@@ -5,12 +7,14 @@ import 'package:go_router/go_router.dart';
 import 'core/app_controller.dart';
 import 'core/app_theme.dart';
 import 'core/json_util.dart';
+import 'core/search_scope.dart';
 import 'features/account/account_screens.dart';
 import 'features/akhdimni/akhdimni_screens.dart';
 import 'features/assistant/assistant_screen.dart';
 import 'features/auth/auth_screens.dart';
 import 'features/cart/cart_screens.dart';
 import 'features/checkout_groups/checkout_groups_screens.dart';
+import 'features/complaints/complaints_screen.dart';
 import 'features/haraj/haraj_screens.dart';
 import 'features/home/home_screen.dart';
 import 'features/more/more_screens.dart';
@@ -58,13 +62,6 @@ GoRouter buildRouter() {
         pageBuilder: (_, state) => AppTheme.slidePage(
           key: state.pageKey,
           child: const CheckoutScreen(),
-        ),
-      ),
-      GoRoute(
-        path: '/orders',
-        pageBuilder: (_, state) => AppTheme.slidePage(
-          key: state.pageKey,
-          child: const OrdersScreen(),
         ),
       ),
       GoRoute(
@@ -185,13 +182,6 @@ GoRouter buildRouter() {
         ),
       ),
       GoRoute(
-        path: '/haraj',
-        pageBuilder: (_, state) => AppTheme.slidePage(
-          key: state.pageKey,
-          child: const HarajListScreen(),
-        ),
-      ),
-      GoRoute(
         path: '/haraj/mine',
         pageBuilder: (_, state) => AppTheme.slidePage(
           key: state.pageKey,
@@ -232,13 +222,7 @@ GoRouter buildRouter() {
       GoRoute(path: '/admin/checkout-groups/:id', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: AdminCheckoutGroupDetailsScreen(id: s.pathParameters['id']!))),
       GoRoute(path: '/admin/dispatch', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const AdminDispatchScreen())),
       GoRoute(path: '/admin/returns', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const AdminReturnsScreen())),
-      GoRoute(
-        path: '/akhdimni',
-        pageBuilder: (_, state) => AppTheme.slidePage(
-          key: state.pageKey,
-          child: const AkhdimniHomeScreen(),
-        ),
-      ),
+
       GoRoute(
         path: '/akhdimni/create',
         pageBuilder: (_, state) => AppTheme.slidePage(
@@ -297,6 +281,13 @@ GoRouter buildRouter() {
         ),
       ),
       GoRoute(
+        path: '/complaints',
+        pageBuilder: (_, state) => AppTheme.slidePage(
+          key: state.pageKey,
+          child: const ComplaintsScreen(),
+        ),
+      ),
+      GoRoute(
         path: '/assistant',
         pageBuilder: (_, state) => AppTheme.slidePage(
           key: state.pageKey,
@@ -348,23 +339,57 @@ GoRouter buildRouter() {
             ),
           ),
           GoRoute(
-            path: '/products',
+            path: '/haraj',
             pageBuilder: (_, state) => AppTheme.slidePage(
               key: state.pageKey,
-              child: ProductsScreen(
-                categoryId: state.uri.queryParameters['category'],
-                search: state.uri.queryParameters['search'],
-                hasOffer: state.uri.queryParameters['offer'] == '1',
-                sectionId: state.uri.queryParameters['section'],
-                sellerId: state.uri.queryParameters['seller'],
-              ),
+              child: const HarajListScreen(),
             ),
+          ),
+          GoRoute(
+            path: '/products',
+            // Web parity: in stores_only the catalog is hidden entirely.
+            redirect: (_, __) =>
+                appController.isStoresOnly ? '/sellers' : null,
+            pageBuilder: (_, state) {
+              final q = state.uri.queryParameters;
+              return AppTheme.slidePage(
+                key: state.pageKey,
+                child: ProductsScreen(
+                  categoryId: q['category'],
+                  search: q['search'],
+                  hasOffer: q['offer'] == '1',
+                  sectionId: q['section'],
+                  sellerId: q['seller'],
+                  sort: q['sort'],
+                  minRating: q['rating'],
+                  inStock: q['in_stock'] == '1',
+                  priceMin: q['price_min'],
+                  priceMax: q['price_max'],
+                  canDeliver: q['deliver'] == '1',
+                  isReturnable: q['returnable'] == '1',
+                ),
+              );
+            },
           ),
           GoRoute(
             path: '/cart',
             pageBuilder: (_, state) => AppTheme.slidePage(
               key: state.pageKey,
               child: const CartScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/orders',
+            pageBuilder: (_, state) => AppTheme.slidePage(
+              key: state.pageKey,
+              child: const OrdersScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/akhdimni',
+            pageBuilder: (_, state) => AppTheme.slidePage(
+              key: state.pageKey,
+              child: const AkhdimniHomeScreen(),
             ),
           ),
           GoRoute(
@@ -385,10 +410,30 @@ class AppShell extends StatelessWidget {
   final Widget child;
   final String location;
 
+  /// Bottom tabs: [الرئيسية, الحراج, اخدمني?, طلباتي]. Products & stores now
+  /// live inside Home as a toggle (no separate tabs); Cart is reached from the
+  /// header shortcut and orders replaced it in the bar.
+  List<_Tab> get tabs {
+    return [
+      _Tab('home_tab', '/', Icons.home_outlined, Icons.home),
+      _Tab('haraj', '/haraj', Icons.sell_outlined, Icons.sell),
+      if (appController.akhdimniEnabled)
+        _Tab('akhdimni', '/akhdimni', Icons.delivery_dining_outlined,
+            Icons.delivery_dining),
+      _Tab('my_orders', '/orders', Icons.receipt_long_outlined,
+          Icons.receipt_long),
+    ];
+  }
+
   int get index {
-    if (location.startsWith('/products')) return 1;
-    if (location.startsWith('/cart')) return 2;
-    if (location.startsWith('/account')) return 3;
+    final ts = tabs;
+    for (var i = 0; i < ts.length; i++) {
+      if (ts[i].path == '/') {
+        if (location == '/') return i;
+      } else if (location.startsWith(ts[i].path)) {
+        return i;
+      }
+    }
     return 0;
   }
 
@@ -397,6 +442,11 @@ class AppShell extends StatelessWidget {
     if (fromApi.isNotEmpty) return fromApi;
     return AppTheme.brandNameAr;
   }
+
+  /// Haraj & Orders render their own AppBar (title + actions), so the brand
+  /// header must not stack on top of them.
+  bool get _hasOwnAppBar =>
+      location == '/haraj' || location == '/orders';
 
   @override
   Widget build(BuildContext context) {
@@ -412,7 +462,8 @@ class AppShell extends StatelessWidget {
     return Scaffold(
       body: Column(
         children: [
-          _BrandHeader(app: app, title: _brandTitle()),
+          if (!_hasOwnAppBar)
+            _BrandHeader(app: app, title: _brandTitle(), location: location),
           Expanded(child: child),
         ],
       ),
@@ -426,38 +477,126 @@ class AppShell extends StatelessWidget {
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
-        onDestinationSelected: (i) {
-          switch (i) {
-            case 0:
-              context.go('/');
-            case 1:
-              context.go('/products');
-            case 2:
-              context.go('/cart');
-            case 3:
-              context.go('/account');
-          }
-        },
+        onDestinationSelected: (i) => context.go(tabs[i].path),
         destinations: [
-          NavigationDestination(
-            icon: const Icon(Icons.home_outlined),
-            selectedIcon: const Icon(Icons.home),
-            label: app.t('home'),
+          for (final tab in tabs)
+            NavigationDestination(
+              icon: Icon(tab.icon),
+              selectedIcon: Icon(tab.selectedIcon),
+              label: app.t(tab.labelKey),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Tab {
+  const _Tab(this.labelKey, this.path, this.icon, this.selectedIcon);
+  final String labelKey;
+  final String path;
+  final IconData icon;
+  final IconData selectedIcon;
+}
+
+/// The single page-aware search field (under the app header).
+/// Visible only on home + products; searches the page you are on.
+class _HeaderSearchBar extends StatefulWidget {
+  const _HeaderSearchBar({required this.onProducts});
+  final bool onProducts;
+
+  @override
+  State<_HeaderSearchBar> createState() => _HeaderSearchBarState();
+}
+
+class _HeaderSearchBarState extends State<_HeaderSearchBar> {
+  final _ctrl = TextEditingController();
+  Timer? _deb;
+
+  @override
+  void dispose() {
+    _deb?.cancel();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit(String raw) {
+    final q = raw.trim();
+    if (widget.onProducts) {
+      headerSearch.submitProducts(q);
+    } else if (q.isNotEmpty) {
+      context.push('/products?search=${Uri.encodeComponent(q)}');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = appController;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      height: 44,
+      decoration: BoxDecoration(
+        color: AppTheme.backgroundWhite,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.search,
+            color: AppTheme.primaryNavy.withValues(alpha: 0.5),
+            size: 22,
           ),
-          NavigationDestination(
-            icon: const Icon(Icons.grid_view_outlined),
-            selectedIcon: const Icon(Icons.grid_view),
-            label: app.t('products'),
+          const SizedBox(width: 10),
+          Expanded(
+            child: TextField(
+              controller: _ctrl,
+              textInputAction: TextInputAction.search,
+              onSubmitted: _submit,
+              onChanged: (_) {
+                // Debounced live search while on the products page.
+                if (!widget.onProducts) return;
+                _deb?.cancel();
+                _deb = Timer(
+                  const Duration(milliseconds: 450),
+                  () => _submit(_ctrl.text),
+                );
+              },
+              decoration: InputDecoration(
+                hintText: app.t('i_am_looking_for'),
+                hintStyle: TextStyle(
+                  color: AppTheme.textSecondary,
+                  fontSize: 14,
+                ),
+                border: InputBorder.none,
+              ),
+            ),
           ),
-          NavigationDestination(
-            icon: _AnimatedCartBadge(count: app.cartCount, selected: false),
-            selectedIcon: _AnimatedCartBadge(count: app.cartCount, selected: true),
-            label: app.t('cart'),
-          ),
-          NavigationDestination(
-            icon: const Icon(Icons.person_outline),
-            selectedIcon: const Icon(Icons.person),
-            label: app.t('my_account'),
+          InkWell(
+            onTap: () => context.push('/search'),
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: AppTheme.accentOrange.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.search_outlined,
+                      size: 14, color: AppTheme.accentOrange),
+                  const SizedBox(width: 4),
+                  Text(
+                    app.t('search'),
+                    style: const TextStyle(
+                      color: AppTheme.accentOrange,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -466,16 +605,21 @@ class AppShell extends StatelessWidget {
 }
 
 class _BrandHeader extends StatelessWidget {
-  const _BrandHeader({required this.app, required this.title});
+  const _BrandHeader(
+      {required this.app, required this.title, required this.location});
   final AppController app;
   final String title;
+  final String location;
+
+  /// Search exists only on searchable pages (home + products).
+  /// Cart/account/orders/checkout never show it — like the web header.
+  bool get _searchable =>
+      location == '/' || location.startsWith('/products');
+
+  bool get _onProducts => location.startsWith('/products');
 
   @override
   Widget build(BuildContext context) {
-    final categories = app.rootCategories.isNotEmpty
-        ? app.rootCategories
-        : J.maps(app.shop?['categories']);
-
     return Container(
       color: AppTheme.primaryNavy,
       child: SafeArea(
@@ -486,40 +630,47 @@ class _BrandHeader extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: app.brand.logoUrl != null && app.brand.logoUrl!.isNotEmpty
-                        ? Image.network(
-                            app.brand.logoUrl!,
-                            width: 36,
-                            height: 36,
-                            fit: BoxFit.contain,
-                            errorBuilder: (_, __, ___) => Image.asset(
-                              'assets/brand/sreamart-logo.png',
-                              width: 36,
-                              height: 36,
-                              errorBuilder: (_, __, ___) => const Icon(
-                                Icons.shopping_cart_rounded,
-                                color: AppTheme.accentOrange,
-                                size: 28,
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: AppTheme.backgroundWhite,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: app.brand.logoUrl != null && app.brand.logoUrl!.isNotEmpty
+                          ? Image.network(
+                              app.brand.logoUrl!,
+                              width: 32,
+                              height: 32,
+                              fit: BoxFit.contain,
+                              errorBuilder: (_, __, ___) => Image.asset(
+                                'assets/brand/sareemart-logo.png',
+                                width: 32,
+                                height: 32,
+                                errorBuilder: (_, __, ___) => const Icon(
+                                  Icons.shopping_cart_rounded,
+                                  color: AppTheme.accentOrange,
+                                  size: 26,
+                                ),
+                              ),
+                            )
+                          : Image.asset(
+                              'assets/brand/sareemart-logo.png',
+                              width: 32,
+                              height: 32,
+                              errorBuilder: (_, __, ___) => Image.asset(
+                                'assets/brand/sareemart-mark.png',
+                                width: 32,
+                                height: 32,
+                                errorBuilder: (_, __, ___) => const Icon(
+                                  Icons.shopping_cart_rounded,
+                                  color: AppTheme.accentOrange,
+                                  size: 26,
+                                ),
                               ),
                             ),
-                          )
-                        : Image.asset(
-                            'assets/brand/sreamart-logo.png',
-                            width: 36,
-                            height: 36,
-                            errorBuilder: (_, __, ___) => Image.asset(
-                              'assets/brand/sreamart-mark.png',
-                              width: 36,
-                              height: 36,
-                              errorBuilder: (_, __, ___) => const Icon(
-                                Icons.shopping_cart_rounded,
-                                color: AppTheme.accentOrange,
-                                size: 28,
-                              ),
-                            ),
-                          ),
+                    ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -534,121 +685,41 @@ class _BrandHeader extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  // Location pin
-                  InkWell(
-                    onTap: app.cities.isEmpty
-                        ? null
-                        : () => showModalBottomSheet(
-                            context: context,
-                            builder: (_) => const CityPickerSheet(),
-                          ),
-                    borderRadius: BorderRadius.circular(20),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.location_on,
-                            color: AppTheme.accentOrange,
-                            size: 18,
-                          ),
-                          const SizedBox(width: 4),
-                          Flexible(
-                            child: Text(
-                              J.str(app.city?['name'], app.t('city')),
-                              style: const TextStyle(
-                                color: AppTheme.backgroundWhite,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
                   // Notification bell with unread count (parity with front Header)
                   const NotificationBell(),
+                  // Cart shortcut in the header.
                   IconButton(
-                    onPressed: () => context.push('/sellers'),
+                    onPressed: () => context.push('/cart'),
+                    icon: Badge(
+                      isLabelVisible: app.cartCount > 0,
+                      backgroundColor: AppTheme.accentOrange,
+                      label: Text(
+                        '${app.cartCount}',
+                        style: const TextStyle(
+                            fontSize: 10, color: Colors.white),
+                      ),
+                      child: const Icon(
+                        Icons.shopping_cart_outlined,
+                        color: AppTheme.backgroundWhite,
+                      ),
+                    ),
+                    tooltip: app.t('cart'),
+                  ),
+                  // My-account lives here now (bottom bar hosts Akhdimni).
+                  IconButton(
+                    onPressed: () => context.push('/account'),
                     icon: const Icon(
-                      Icons.storefront_outlined,
+                      Icons.person_outline,
                       color: AppTheme.backgroundWhite,
                     ),
-                    tooltip: app.t('sellers'),
+                    tooltip: app.t('my_account'),
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
-              // Search bar
-              GestureDetector(
-                onTap: () => context.push('/search'),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: AppTheme.backgroundWhite,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.search,
-                        color: AppTheme.primaryNavy.withValues(alpha: 0.5),
-                        size: 22,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          app.t('i_am_looking_for'),
-                          style: TextStyle(
-                            color: AppTheme.textSecondary,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                      if (categories.isNotEmpty)
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: AppTheme.accentOrange.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.filter_list,
-                                size: 14,
-                                color: AppTheme.accentOrange,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                app.t('categories') == 'categories'
-                                    ? 'فئات'
-                                    : app.t('categories'),
-                                style: const TextStyle(
-                                  color: AppTheme.accentOrange,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
+              // Single page-aware search bar: only on home/products,
+              // searching the page you are on.
+              if (_searchable) const SizedBox(height: 10),
+              if (_searchable) _HeaderSearchBar(onProducts: _onProducts),
             ],
           ),
         ),
@@ -657,67 +728,8 @@ class _BrandHeader extends StatelessWidget {
   }
 }
 
-class _AnimatedCartBadge extends StatefulWidget {
-  const _AnimatedCartBadge({required this.count, required this.selected});
-  final int count;
-  final bool selected;
-
-  @override
-  State<_AnimatedCartBadge> createState() => _AnimatedCartBadgeState();
-}
-
-class _AnimatedCartBadgeState extends State<_AnimatedCartBadge>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _pulse;
-
-  @override
-  void initState() {
-    super.initState();
-    _pulse = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 300),
-    );
-  }
-
-  @override
-  void didUpdateWidget(_AnimatedCartBadge oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.count != oldWidget.count && widget.count > 0) {
-      _pulse.forward(from: 0);
-    }
-  }
-
-  @override
-  void dispose() {
-    _pulse.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ScaleTransition(
-      scale: Tween<double>(begin: 1, end: 1.25).animate(
-        CurvedAnimation(parent: _pulse, curve: Curves.elasticOut),
-      ),
-      child: Badge(
-        isLabelVisible: widget.count > 0,
-        backgroundColor: AppTheme.accentOrange,
-        label: Text(
-          '${widget.count}',
-          style: const TextStyle(fontSize: 10, color: Colors.white),
-        ),
-        child: Icon(
-          widget.selected
-              ? Icons.shopping_cart
-              : Icons.shopping_cart_outlined,
-        ),
-      ),
-    );
-  }
-}
-
-class SreamartCustomerApp extends StatelessWidget {
-  const SreamartCustomerApp({super.key, required this.router});
+class SareemartCustomerApp extends StatelessWidget {
+  const SareemartCustomerApp({super.key, required this.router});
   final GoRouter router;
 
   @override

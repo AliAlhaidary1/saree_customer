@@ -35,7 +35,7 @@ class PushNotifications {
   PushNotifications._();
 
   static const channelId = 'sreamart_high_importance';
-  static const channelName = 'تنبيهات سريع مارت';
+  static const channelName = 'تنبيهات سريع MART';
   static const _optionsCacheKey = 'sreamart_firebase_options';
 
   static bool enabled = false;

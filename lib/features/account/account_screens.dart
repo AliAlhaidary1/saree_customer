@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:dio/dio.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -55,6 +56,13 @@ class AccountScreen extends StatelessWidget {
             app.t('contact_us'),
             '/contact',
           ),
+          _tile(
+            context,
+            Icons.feedback_outlined,
+            app.t('complaints_suggestions'),
+            '/complaints',
+          ),
+          _sellerAppTile(context),
           _cmsTile(
             context,
             Icons.chat_bubble_outline,
@@ -65,50 +73,87 @@ class AccountScreen extends StatelessWidget {
       );
     }
     final name = J.str(app.user?['name']);
-    final mobile = J.str(app.user?['mobile']);
+    final mobile = J.str(app.user?['mobile'] ?? app.user?['email']);
+    final profileImg = J.str(app.user?['profile'] ?? app.user?['image']);
+    final wallet = J.d(
+      app.user?['balance'] ?? app.user?['wallet'] ?? app.settings['user_balance'],
+    );
+    // Web parity (ProfileDashboard pf-nav): user header + wallet card +
+    // focused menu. No CMS clutter, no server field (debug-only below).
     return ListView(
+      padding: const EdgeInsets.all(16),
       children: [
-        const SizedBox(height: 12),
-        ListTile(
-          leading: CircleAvatar(
-            backgroundColor: app.accentColor,
-            child: Text(name.isEmpty ? 'م' : name.substring(0, 1)),
+        Card(
+          child: ListTile(
+            contentPadding: const EdgeInsets.all(12),
+            leading: CircleAvatar(
+              radius: 26,
+              backgroundColor: app.accentColor.withValues(alpha: 0.15),
+              backgroundImage:
+                  profileImg.isNotEmpty ? NetworkImage(profileImg) : null,
+              onBackgroundImageError: profileImg.isNotEmpty ? (_, __) {} : null,
+              child: profileImg.isEmpty
+                  ? Text(
+                      name.isEmpty ? 'م' : name.substring(0, 1),
+                      style: TextStyle(
+                          color: app.accentColor,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 22),
+                    )
+                  : null,
+            ),
+            title: Text(name.isEmpty ? app.t('profile') : name,
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: mobile.isEmpty ? null : Text(mobile),
+            trailing: const Icon(Icons.chevron_left, size: 18),
+            onTap: () => context.push('/profile'),
           ),
-          title: Text(name),
-          subtitle: Text(mobile),
         ),
-        _tile(context, Icons.receipt_long, app.t('orders'), '/orders'),
-        _tile(context, Icons.favorite, app.t('wishlist'), '/wishlist'),
-        _tile(context, Icons.location_on, app.t('myAddress'), '/addresses'),
-        _tile(
-          context,
-          Icons.notifications,
-          app.t('notification'),
-          '/notifications',
+        Card(
+          color: app.accentColor,
+          child: ListTile(
+            contentPadding: const EdgeInsets.all(12),
+            leading: const Icon(Icons.account_balance_wallet_outlined,
+                color: Colors.white, size: 30),
+            title: Text(app.t('walletBalance'),
+                style: const TextStyle(color: Colors.white70, fontSize: 12)),
+            subtitle: Text(
+              '${J.str(app.settings['currency'], '')} ${wallet.toStringAsFixed(app.decimals)}',
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 20),
+            ),
+            trailing: const Icon(Icons.chevron_left, color: Colors.white),
+            onTap: () => context.push('/wallet'),
+          ),
         ),
-        _tile(
-          context,
-          Icons.account_balance_wallet,
-          app.t('wallet'),
-          '/wallet',
+        const SizedBox(height: 4),
+        Row(
+          children: [
+            Expanded(
+                child: _hubCard(context, Icons.receipt_long_outlined,
+                    app.t('orders'), '/orders', app)),
+            const SizedBox(width: 10),
+            Expanded(
+                child: _hubCard(context, Icons.location_on_outlined,
+                    app.t('myAddress'), '/addresses', app)),
+            const SizedBox(width: 10),
+            Expanded(
+                child: _hubCard(context, Icons.favorite_border,
+                    app.t('wishlist'), '/wishlist', app)),
+          ],
         ),
-        _tile(
-          context,
-          Icons.swap_horiz,
-          app.t('transactions'),
-          '/transactions',
-        ),
-        _tile(context, Icons.campaign, app.t('haraj_my_posts'), '/haraj/mine'),
-        if (app.akhdimniEnabled)
-          _tile(context, Icons.delivery_dining, app.t('akhdimni_my_orders'),
-              '/akhdimni/orders'),
-        _tile(context, Icons.person, app.t('editProfile'), '/profile'),
-        _tile(
-          context,
-          Icons.lock_outline,
-          app.t('change_password'),
-          '/change-password',
-        ),
+        const SizedBox(height: 12),
+        _tile(context, Icons.person_outline, app.t('profile'), '/profile'),
+        _tile(context, Icons.receipt_long_outlined, app.t('orders'), '/orders'),
+        _tile(context, Icons.favorite_border, app.t('wishlist'), '/wishlist'),
+        _tile(context, Icons.location_on_outlined, app.t('myAddress'),
+            '/addresses'),
+        _tile(context, Icons.account_balance_wallet_outlined, app.t('wallet'),
+            '/wallet'),
+        _tile(context, Icons.lock_outline, app.t('change_password'),
+            '/change-password'),
         const Divider(),
         _cmsTile(
           context,
@@ -124,6 +169,13 @@ class AccountScreen extends StatelessWidget {
         ),
         _cmsTile(context, Icons.info_outline, app.t('about_us'), '/about'),
         _cmsTile(context, Icons.mail_outline, app.t('contact_us'), '/contact'),
+        _tile(
+          context,
+          Icons.feedback_outlined,
+          app.t('complaints_suggestions'),
+          '/complaints',
+        ),
+        _sellerAppTile(context),
         _cmsTile(
           context,
           Icons.chat_bubble_outline,
@@ -231,6 +283,62 @@ class AccountScreen extends StatelessWidget {
       trailing: const Icon(Icons.chevron_left),
       onTap: () => context.push(path),
     );
+  }
+
+  /// Web parity (pf-hub): quick hub cards for orders/address/wishlist.
+  Widget _hubCard(BuildContext context, IconData icon, String label,
+      String path, AppController app) {
+    return Card(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => context.push(path),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          child: Column(
+            children: [
+              Icon(icon, color: app.accentColor, size: 26),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// "Become a seller" tile — opens the seller app on Google Play
+  /// (the customer app itself has no seller registration).
+  Widget _sellerAppTile(BuildContext context) {
+    final app = appController;
+    return ListTile(
+      leading: Icon(Icons.storefront_outlined, color: app.accentColor),
+      title: Text(app.t('become_seller')),
+      subtitle: Text(app.t('become_seller_hint')),
+      trailing: const Icon(Icons.open_in_new),
+      onTap: () => _openSellerApp(context),
+    );
+  }
+
+  Future<void> _openSellerApp(BuildContext context) async {
+    final app = appController;
+    final url = J.str(app.settings['seller_android_app_url']).isNotEmpty
+        ? J.str(app.settings['seller_android_app_url'])
+        : 'https://play.google.com/store/apps/details?id=com.sreamart.sreamart_seller';
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    final opened =
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!opened && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(app.t('something_went_wrong'))),
+      );
+    }
   }
 
   Widget _cmsTile(
@@ -418,6 +526,11 @@ class _OrdersScreenState extends State<OrdersScreen>
         title: Text(app.t('orders')),
         bottom: TabBar(
           controller: tab,
+          indicatorColor: AppTheme.accentOrange,
+          indicatorWeight: 3,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white70,
+          labelStyle: const TextStyle(fontWeight: FontWeight.w700),
           tabs: [
             Tab(text: app.t('active_orders')),
             Tab(text: app.t('previous_orders')),
@@ -1319,18 +1432,33 @@ class _AddressesScreenState extends State<AddressesScreen> {
           : (app.addresses.isEmpty ? 1 : 0),
       if (customFields.isNotEmpty) 'custom_fields': jsonEncode(customFields),
     };
-    if (existing != null) {
-      fields['id'] = existing['id'];
-      await app.api.updateAddress(fields);
-    } else {
-      await app.api.addAddress(fields);
-    }
+    final hadAny = app.addresses.isNotEmpty;
+    final res = existing != null
+        ? await app.api.updateAddress({...fields, 'id': existing['id']})
+        : await app.api.addAddress(fields);
     await app.loadAddresses();
-    if (mounted) {
+    if (!mounted) return;
+    // Surface backend errors instead of failing silently (this was why
+    // addresses "never appeared" — e.g. the old required-pincode rule).
+    if (!res.ok) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(app.t('address_saved_ok'))),
+        SnackBar(
+            content: Text(res.message.isNotEmpty
+                ? res.message
+                : app.t('something_went_wrong'))),
       );
+      return;
     }
+    // Auto-select the new address so checkout sees it immediately.
+    if (!hadAny && app.addresses.isNotEmpty) {
+      app.selectAddress(app.addresses.firstWhere(
+        (a) => J.i(a['is_default']) == 1,
+        orElse: () => app.addresses.first,
+      ));
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(app.t('address_saved_ok'))),
+    );
   }
 }
 

@@ -37,6 +37,14 @@ class ProductCard extends StatelessWidget {
     final closed = isProductStoreClosed(product);
     final avg = double.tryParse('${product['average_rating'] ?? product['rating'] ?? ''}');
     final ratingCount = J.str(product['rating_count'] ?? product['total_ratings']);
+    final hasOptions = variants.length > 1;
+    final firstLabel = [
+      J.str(variant['measurement']),
+      J.str(variant['stock_unit_name']),
+    ].where((e) => e.isNotEmpty).join(' ');
+    final stock = J.i(variant['stock']);
+    final unlimited = J.flag(product['is_unlimited_stock'] ?? variant['is_unlimited_stock']);
+    final outOfStock = !unlimited && variants.isNotEmpty && stock <= 0;
 
     return InkWell(
       onTap: onTap,
@@ -186,63 +194,94 @@ class ProductCard extends StatelessWidget {
                         ),
                       ],
                     ),
-                  const SizedBox(height: 6),
                   Row(
                     children: [
                       Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              money(
-                                price.finalPrice,
-                                app.currency,
-                                app.decimals,
-                              ),
-                              style: const TextStyle(
-                                color: AppTheme.accentOrange,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            if (price.hasDiscount)
-                              Text(
-                                money(
-                                  price.original,
-                                  app.currency,
-                                  app.decimals,
-                                ),
-                                style: const TextStyle(
-                                  decoration: TextDecoration.lineThrough,
-                                  color: AppTheme.textSecondary,
-                                  fontSize: 11,
-                                ),
-                              ),
-                          ],
+                        child: Text(
+                          money(
+                            price.finalPrice,
+                            app.currency,
+                            app.decimals,
+                          ),
+                          style: const TextStyle(
+                            color: AppTheme.accentOrange,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
-                      if (onAdd != null)
-                        Material(
-                          color: closed
-                              ? Colors.grey.shade400
-                              : AppTheme.accentOrange,
-                          borderRadius: BorderRadius.circular(10),
-                          clipBehavior: Clip.antiAlias,
-                          child: InkWell(
-                            onTap: onAdd,
-                            splashColor:
-                                AppTheme.backgroundWhite.withValues(alpha: 0.2),
-                            child: const Padding(
-                              padding: EdgeInsets.all(8),
-                              child: Icon(
-                                Icons.add_shopping_cart,
-                                size: 18,
-                                color: AppTheme.backgroundWhite,
-                              ),
-                            ),
+                      if (price.hasDiscount)
+                        Text(
+                          money(
+                            price.original,
+                            app.currency,
+                            app.decimals,
+                          ),
+                          style: const TextStyle(
+                            decoration: TextDecoration.lineThrough,
+                            color: AppTheme.textSecondary,
+                            fontSize: 11,
                           ),
                         ),
                     ],
                   ),
+                  const SizedBox(height: 6),
+                  // Explicit web-parity button (not an icon): opens the
+                  // variant dialog when the product has multiple options.
+                  if (onAdd != null)
+                    SizedBox(
+                      width: double.infinity,
+                      height: 38,
+                      child: FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: (closed || outOfStock)
+                              ? Colors.grey.shade400
+                              : AppTheme.accentOrange,
+                          foregroundColor: AppTheme.backgroundWhite,
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          textStyle: const TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        onPressed: (closed || outOfStock) ? null : onAdd,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.shopping_cart_outlined, size: 16),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                (closed || outOfStock)
+                                    ? app.t('out_of_stock')
+                                    : app.t('add_to_cart'),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (hasOptions && firstLabel.isNotEmpty) ...[
+                              const SizedBox(width: 2),
+                              Flexible(
+                                child: Text(
+                                  '· $firstLabel',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                              const Icon(Icons.arrow_drop_down, size: 16),
+                            ] else if (hasOptions)
+                              const Icon(Icons.arrow_drop_down, size: 16),
+                          ],
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),

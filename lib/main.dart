@@ -14,6 +14,11 @@ import 'widgets/splash_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Device-safe image cache: bounded RAM usage, avoids OOM on long browsing.
+  try {
+    PaintingBinding.instance.imageCache.maximumSize = 200;
+    PaintingBinding.instance.imageCache.maximumSizeBytes = 80 << 20; // 80MB
+  } catch (_) {}
   // Background handler registered unconditionally (before runApp) so the OS
   // can wake the app for data-only pushes when fully closed. The handler
   // self-initializes Firebase from native files or cached backend options
@@ -58,6 +63,10 @@ class _BootstrapAppState extends State<BootstrapApp> {
   }
 
   Future<void> _start() async {
+    final splashMin = Future<void>.delayed(
+      // مدة أنيميشن السبلاش المبسط (1400ms) — سريع بدون انتظار زائد
+      const Duration(milliseconds: 1500),
+    );
     await appController.bootstrap();
     // Real FCM token (backend settings.firebase -> Firebase -> fcm_token sync).
     // Gracefully disabled when no Firebase config exists anywhere.
@@ -79,22 +88,41 @@ class _BootstrapAppState extends State<BootstrapApp> {
       PushNotifications.attachRouter(router!);
     }
     setState(() {});
-    // Keep splash visible for animation duration
-    await Future<void>.delayed(const Duration(milliseconds: 1200));
+    // انتظر اكتمال الأنيميشن + انتهاء التحميل، ثم خروج واحد سلس (لا واجهتين)
+    await splashMin;
     if (mounted) setState(() => _showSplash = false);
   }
 
   @override
   Widget build(BuildContext context) {
+    // انتقال واحد متلاشي: سبلاش -> تطبيق (بدون قفزة بين واجهتين)
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 400),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.985, end: 1.0).animate(animation),
+          child: child,
+        ),
+      ),
+      child: _child(),
+    );
+  }
+
+  Widget _child() {
     if (_showSplash || !_bootstrapDone) {
-      return MaterialApp(
+      return const MaterialApp(
+        key: ValueKey('splash'),
         debugShowCheckedModeBanner: false,
-        home: const BrandSplashScreen(),
+        home: BrandSplashScreen(),
       );
     }
 
     if (router == null) {
       return MaterialApp(
+        key: const ValueKey('error'),
         debugShowCheckedModeBanner: false,
         locale: const Locale('ar'),
         supportedLocales: const [Locale('ar'), Locale('en')],
@@ -127,11 +155,27 @@ class _BootstrapAppState extends State<BootstrapApp> {
                 if (appController.bootstrapError != null) ...[
                   const SizedBox(height: 16),
                   Padding(
-                    padding: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
                     child: Text(
-                      appController.bootstrapError!,
+                      appController.t('network_error'),
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: AppTheme.backgroundWhite),
+                      style: const TextStyle(
+                        color: AppTheme.backgroundWhite,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Text(
+                      '${appController.apiUrl}\n${appController.bootstrapError}',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: AppTheme.backgroundWhite.withValues(alpha: 0.65),
+                        fontSize: 12,
+                      ),
                     ),
                   ),
                   if (kDebugMode) ...[
@@ -164,7 +208,7 @@ class _BootstrapAppState extends State<BootstrapApp> {
                         });
                         await _start();
                       },
-                      label: 'إعادة المحاولة',
+                      label: appController.t('retry'),
                     ),
                   ),
                 ],
@@ -174,6 +218,6 @@ class _BootstrapAppState extends State<BootstrapApp> {
         ),
       );
     }
-    return SreamartCustomerApp(router: router!);
+    return SareemartCustomerApp(router: router!);
   }
 }

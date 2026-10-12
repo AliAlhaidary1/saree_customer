@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- لون كحلي سادة فقط — بدون شعار، حتى تكون شاشة البداية واحدة
+         (شعار سريع MART المتحرك يظهر في شاشة Flutter مباشرة) -->
     <item android:drawable="@color/splash_background" />
-    <item>
-        <bitmap android:gravity="center" android:src="@drawable/splash_logo" />
-    </item>
 </layer-list>

@@ -17,8 +17,8 @@ class BrandConfig {
   static const defaults = BrandConfig(
     version: 1,
     identity: {
-      'name_ar': 'سريع مارت',
-      'name_en': 'Sreamart',
+      'name_ar': 'سريع MART',
+      'name_en': 'SAREE MART',
     },
     colors: {
       'primary': '#0A2540',

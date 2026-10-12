@@ -15,6 +15,230 @@ String otpT(String key, String fallback) {
   return v == key ? fallback : v;
 }
 
+/// هيدر كحلي فخم لصفحات الدخول/الحساب: اسم العلامة نصاً بخط كبير
+/// وتوزيع جانبي غير متماثل (بدل الشعار الصوري المتمركز) + علامة البرق.
+class AuthNavyHeader extends StatelessWidget {
+  const AuthNavyHeader({super.key, required this.subtitle, this.badge});
+
+  final String subtitle;
+  final String? badge;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      decoration: const BoxDecoration(
+        color: AppTheme.primaryNavy,
+        borderRadius: BorderRadius.vertical(
+          bottom: Radius.circular(28),
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(
+          bottom: Radius.circular(28),
+        ),
+        child: Stack(
+          children: [
+            // علامة برق ضخمة شفافة في الزاوية للعمق.
+            const Positioned(
+              left: -18,
+              bottom: -28,
+              child: Icon(
+                Icons.bolt_rounded,
+                size: 130,
+                color: Color(0x0DFFFFFF),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(22, 26, 22, 22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'SAREE MART',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 3.2,
+                                color: Color(0x99FFFFFF),
+                              ),
+                            ),
+                            const SizedBox(height: 5),
+                            Text.rich(
+                              TextSpan(
+                                children: const [
+                                  TextSpan(
+                                    text: 'سريع ',
+                                    style: TextStyle(
+                                      fontSize: 32,
+                                      fontWeight: FontWeight.w800,
+                                      height: 1.1,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  TextSpan(
+                                    text: 'مارت',
+                                    style: TextStyle(
+                                      fontSize: 32,
+                                      fontWeight: FontWeight.w800,
+                                      height: 1.1,
+                                      color: AppTheme.accentOrange,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      // علامة البرق بدل الشعار الصوري.
+                      Container(
+                        width: 58,
+                        height: 58,
+                        decoration: BoxDecoration(
+                          color: AppTheme.accentOrange,
+                          borderRadius: BorderRadius.circular(19),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppTheme.accentOrange.withValues(
+                                alpha: 0.35,
+                              ),
+                              blurRadius: 16,
+                              offset: const Offset(0, 6),
+                            ),
+                          ],
+                        ),
+                        child: const Icon(
+                          Icons.bolt_rounded,
+                          size: 32,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  Container(
+                    height: 1,
+                    color: Colors.white.withValues(alpha: 0.14),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      if (badge != null) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.18),
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 7,
+                                height: 7,
+                                decoration: const BoxDecoration(
+                                  color: AppTheme.accentOrange,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 7),
+                              Text(
+                                badge!,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                      ],
+                      Expanded(
+                        child: Text(
+                          subtitle,
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            height: 1.6,
+                            color: Color(0xC4FFFFFF),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+InputDecoration authFieldDec(String label, IconData icon, {Widget? suffix}) {
+  return InputDecoration(
+    labelText: label,
+    prefixIcon: Icon(
+      icon,
+      size: 20,
+      color: AppTheme.primaryNavy.withValues(alpha: 0.7),
+    ),
+    suffixIcon: suffix,
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+  );
+}
+
+class AuthFormCard extends StatelessWidget {
+  const AuthFormCard({super.key, required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: AppTheme.primaryNavy.withValues(alpha: 0.10),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.primaryNavy.withValues(alpha: 0.06),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: children,
+      ),
+    );
+  }
+}
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key, this.next});
   final String? next;
@@ -63,220 +287,459 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     final app = appController;
+    final isLogin = view == 'login';
+    final headerSubtitle = isLogin
+        ? 'مرحباً بعودتك، سجل الدخول لمتابعة تسوقك'
+        : (view == 'forgot'
+              ? app.t('reset_password_via_whatsapp_otp')
+              : 'أدخل رمز التحقق وكلمة المرور الجديدة');
     return Scaffold(
-      appBar: AppBar(title: Text(app.t('login'))),
+      backgroundColor: AppTheme.surfaceGrey,
+      appBar: AppBar(
+        backgroundColor: AppTheme.primaryNavy,
+        foregroundColor: Colors.white,
+        centerTitle: true,
+        title: Text(
+          app.t('login'),
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
       body: SafeArea(
-        child: ListView(
-        padding: EdgeInsets.fromLTRB(20, 20, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
-        children: [
-          Image.asset(
-            'assets/brand/sreamart-logo.png',
-            height: 88,
-            errorBuilder: (_, __, ___) => Image.asset(
-              'assets/brand/sreamart-mark.png',
-              width: 64,
-              height: 64,
-              fit: BoxFit.contain,
-              errorBuilder: (_, __, ___) => Icon(
-                Icons.shopping_cart_rounded,
-                size: 64,
-                color: app.accentColor,
-              ),
-            ),
+        child: SingleChildScrollView(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
           ),
-          const SizedBox(height: 12),
-          Text(
-            AppTheme.brandNameAr,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 28,
-              fontWeight: FontWeight.bold,
-              color: AppTheme.textPrimary,
-            ),
-          ),
-          Text(
-            AppTheme.brandNameEn,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 14,
-              color: AppTheme.accentOrange,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const SizedBox(height: 20),
-          TextField(
-            controller: mobile,
-            keyboardType: TextInputType.phone,
-            decoration: InputDecoration(
-              labelText: app.t('enter_mobile'),
-              prefixText: '+${AppConfig.countryDialCode} ',
-            ),
-          ),
-          if (view == 'login') ...[
-            const SizedBox(height: 12),
-            TextField(
-              controller: password,
-              obscureText: hidePassword,
-              decoration: InputDecoration(
-                labelText: app.t('enter_password'),
-                suffixIcon: IconButton(
-                  onPressed: () =>
-                      setState(() => hidePassword = !hidePassword),
-                  icon: Icon(
-                    hidePassword
-                        ? Icons.visibility_outlined
-                        : Icons.visibility_off_outlined,
-                  ),
-                ),
+          child: Column(
+            children: [
+              AuthNavyHeader(
+                subtitle: headerSubtitle,
+                badge: isLogin ? 'مرحباً بعودتك' : 'استعادة كلمة المرور',
               ),
-            ),
-          ],
-          if (view == 'forgot')
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(app.t('reset_password_via_whatsapp_otp')),
-            ),
-          if (view == 'forgot_reset') ...[
-            const SizedBox(height: 12),
-            TextField(
-              controller: otp,
-              keyboardType: TextInputType.number,
-              maxLength: 6,
-              inputFormatters: [
-                FilteringTextInputFormatter.digitsOnly,
-                LengthLimitingTextInputFormatter(6),
-              ],
-              decoration: InputDecoration(labelText: app.t('enter_otp')),
-            ),
-            TextField(
-              controller: newPassword,
-              obscureText: true,
-              decoration: InputDecoration(labelText: app.t('new_password')),
-            ),
-            TextField(
-              controller: confirm,
-              obscureText: true,
-              decoration: InputDecoration(
-                labelText: app.t('confirm_new_password'),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    mobile.text.trim(),
-                    style: const TextStyle(
-                      fontSize: 13,
-                      color: AppTheme.textSecondary,
-                    ),
-                  ),
-                ),
-                TextButton(
-                  onPressed: () =>
-                      setState(() => _forgotEditOpen = !_forgotEditOpen),
-                  child: Text(app.t('edit')),
-                ),
-              ],
-            ),
-            if (_forgotEditOpen)
-              TextField(
-                controller: mobile,
-                keyboardType: TextInputType.phone,
-                decoration: InputDecoration(
-                  labelText: app.t('enter_mobile'),
-                  prefixText: '+${AppConfig.countryDialCode} ',
-                ),
-                onChanged: (_) => setState(() {
-                  _forgotSuccess = null;
-                }),
-              ),
-            if (_forgotSuccess != null)
-              Container(
-                margin: const EdgeInsets.only(top: 12),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFE8F5E9),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color(0xFFA5D6A7)),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+                child: Column(
                   children: [
-                    const Icon(
-                      Icons.check_circle_outline,
-                      size: 18,
-                      color: Color(0xFF2E7D32),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _forgotSuccess!,
-                        style: const TextStyle(
-                          color: Color(0xFF2E7D32),
-                          fontSize: 13,
-                          height: 1.4,
+                    AuthFormCard(
+                      children: [
+                        // شريط علوي صغير بلمسة كحلية.
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: AppTheme.primaryNavy.withValues(
+                                  alpha: 0.08,
+                                ),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Icon(
+                                isLogin
+                                    ? Icons.login_rounded
+                                    : Icons.lock_reset_rounded,
+                                size: 18,
+                                color: AppTheme.primaryNavy,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    isLogin
+                                        ? 'أدخل بياناتك للمتابعة'
+                                        : 'خطوة واحدة وتستعيد حسابك',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 14,
+                                      color: AppTheme.primaryNavy,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Container(
+                                    width: 36,
+                                    height: 3,
+                                    decoration: BoxDecoration(
+                                      color: AppTheme.accentOrange,
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
+                        const SizedBox(height: 16),
+                        TextField(
+                          controller: mobile,
+                          keyboardType: TextInputType.phone,
+                          decoration:
+                              authFieldDec(
+                                app.t('enter_mobile'),
+                                Icons.phone_outlined,
+                              ).copyWith(
+                                prefixText:
+                                    '+${AppConfig.countryDialCode} ',
+                                prefixStyle: const TextStyle(
+                                  color: AppTheme.textSecondary,
+                                  fontSize: 13,
+                                ),
+                              ),
+                        ),
+                        if (view == 'login') ...[
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: password,
+                            obscureText: hidePassword,
+                            decoration: authFieldDec(
+                              app.t('enter_password'),
+                              Icons.lock_outline_rounded,
+                              suffix: IconButton(
+                                onPressed: () => setState(
+                                  () => hidePassword = !hidePassword,
+                                ),
+                                icon: Icon(
+                                  hidePassword
+                                      ? Icons.visibility_outlined
+                                      : Icons.visibility_off_outlined,
+                                  size: 20,
+                                  color: AppTheme.textSecondary,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                        if (view == 'forgot_reset') ...[
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: otp,
+                            keyboardType: TextInputType.number,
+                            maxLength: 6,
+                            inputFormatters: [
+                              FilteringTextInputFormatter.digitsOnly,
+                              LengthLimitingTextInputFormatter(6),
+                            ],
+                            decoration: authFieldDec(
+                              app.t('enter_otp'),
+                              Icons.pin_outlined,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: newPassword,
+                            obscureText: true,
+                            decoration: authFieldDec(
+                              app.t('new_password'),
+                              Icons.lock_outline_rounded,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: confirm,
+                            obscureText: true,
+                            decoration: authFieldDec(
+                              app.t('confirm_new_password'),
+                              Icons.verified_user_outlined,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppTheme.primaryNavy.withValues(
+                                alpha: 0.05,
+                              ),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: AppTheme.primaryNavy.withValues(
+                                  alpha: 0.12,
+                                ),
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.phone_android_rounded,
+                                  size: 16,
+                                  color: AppTheme.primaryNavy,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    mobile.text.trim(),
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      color: AppTheme.primaryNavy,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () => setState(
+                                    () => _forgotEditOpen = !_forgotEditOpen,
+                                  ),
+                                  child: Text(app.t('edit')),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (_forgotEditOpen) ...[
+                            const SizedBox(height: 12),
+                            TextField(
+                              controller: mobile,
+                              keyboardType: TextInputType.phone,
+                              decoration:
+                                  authFieldDec(
+                                    app.t('enter_mobile'),
+                                    Icons.phone_outlined,
+                                  ).copyWith(
+                                    prefixText:
+                                        '+${AppConfig.countryDialCode} ',
+                                  ),
+                              onChanged: (_) => setState(() {
+                                _forgotSuccess = null;
+                              }),
+                            ),
+                          ],
+                          if (_forgotSuccess != null)
+                            Container(
+                              margin: const EdgeInsets.only(top: 12),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFE8F5E9),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: const Color(0xFFA5D6A7),
+                                ),
+                              ),
+                              child: Row(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  const Icon(
+                                    Icons.check_circle_outline,
+                                    size: 18,
+                                    color: Color(0xFF2E7D32),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      _forgotSuccess!,
+                                      style: const TextStyle(
+                                        color: Color(0xFF2E7D32),
+                                        fontSize: 13,
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          if (_forgotSuccess != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Text(
+                                otpT(
+                                  'otp_not_received_hint',
+                                  'لم يصلك الرمز؟ لا تقلق، قد يتأخر قليلاً وسيصلك',
+                                ),
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: AppTheme.textSecondary,
+                                ),
+                              ),
+                            ),
+                          const SizedBox(height: 8),
+                          TextButton.icon(
+                            onPressed:
+                                (_forgotGate.canSend && !_forgotSending)
+                                ? _resendForgot
+                                : null,
+                            icon: const Icon(Icons.refresh_rounded, size: 16),
+                            label: Text(
+                              otpT('otp_resend_code', 'إعادة إرسال الرمز'),
+                            ),
+                          ),
+                        ],
+                        if (error != null)
+                          Container(
+                            margin: const EdgeInsets.only(top: 12),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 12,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFEBEE),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: const Color(0xFFFFCDD2),
+                              ),
+                            ),
+                            child: Row(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                              children: [
+                                const Icon(
+                                  Icons.error_outline_rounded,
+                                  size: 18,
+                                  color: Color(0xFFC62828),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    error!,
+                                    style: const TextStyle(
+                                      color: Color(0xFFB71C1C),
+                                      fontSize: 13,
+                                      height: 1.4,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        const SizedBox(height: 18),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 52,
+                          child: FilledButton.icon(
+                            onPressed: busy ? null : _submit,
+                            icon: busy
+                                ? const SizedBox.shrink()
+                                : const Icon(
+                                    Icons.arrow_forward_rounded,
+                                    size: 20,
+                                  ),
+                            label: busy
+                                ? const BusySpinner()
+                                : Text(
+                                    _buttonLabel(),
+                                    style: const TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                          ),
+                        ),
+                        if (view != 'forgot_reset')
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: TextButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  view = view == 'login'
+                                      ? 'forgot'
+                                      : 'login';
+                                  error = null;
+                                });
+                              },
+                              icon: Icon(
+                                view == 'login'
+                                    ? Icons.help_outline_rounded
+                                    : Icons.login_rounded,
+                                size: 16,
+                                color: AppTheme.primaryNavy,
+                              ),
+                              label: Text(
+                                view == 'login'
+                                    ? app.t('forgot_password')
+                                    : app.t('login'),
+                                style: const TextStyle(
+                                  color: AppTheme.primaryNavy,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    // بطاقة إنشاء حساب بلمسة كحلية سفلية.
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
                       ),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: AppTheme.primaryNavy.withValues(alpha: 0.10),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppTheme.primaryNavy.withValues(
+                              alpha: 0.04,
+                            ),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            Icons.person_add_alt_rounded,
+                            size: 18,
+                            color: AppTheme.primaryNavy,
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'ليس لديك حساب؟',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: AppTheme.textSecondary,
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () => context.push('/register'),
+                            child: Text(
+                              app.t('register'),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w800,
+                                color: AppTheme.accentOrange,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.verified_user_outlined,
+                          size: 14,
+                          color: AppTheme.primaryNavy,
+                        ),
+                        SizedBox(width: 6),
+                        Text(
+                          'دخول آمن • حماية لبياناتك • دعم متواصل',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: AppTheme.textSecondary,
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
               ),
-            if (_forgotSuccess != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  otpT(
-                    'otp_not_received_hint',
-                    'لم يصلك الرمز؟ لا تقلق، قد يتأخر قليلاً وسيصلك',
-                  ),
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: AppTheme.textSecondary,
-                  ),
-                ),
-              ),
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: (_forgotGate.canSend && !_forgotSending)
-                  ? _resendForgot
-                  : null,
-              child: Text(
-                otpT('otp_resend_code', 'إعادة إرسال الرمز'),
-              ),
-            ),
-          ],
-          if (error != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 12),
-              child: Text(error!, style: const TextStyle(color: Colors.red)),
-            ),
-          const SizedBox(height: 20),
-          FilledButton(
-            onPressed: busy ? null : _submit,
-            child: busy ? const BusySpinner() : Text(_buttonLabel()),
+            ],
           ),
-          if (view != 'forgot_reset')
-            TextButton(
-              onPressed: () {
-                setState(() {
-                  view = view == 'login' ? 'forgot' : 'login';
-                  error = null;
-                });
-              },
-              child: Text(
-                view == 'login' ? app.t('forgot_password') : app.t('login'),
-              ),
-            ),
-          TextButton(
-            onPressed: () => context.push('/register'),
-            child: Text(app.t('register')),
-          ),
-        ],
-      ),
+        ),
       ),
     );
   }
@@ -612,24 +1075,57 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
   }
 
-  Widget _sectionHeader(IconData icon, String title, String subtitle) {
+  Widget _sectionHeader(IconData icon, String step, String title, String subtitle) {
     return Row(
       children: [
         Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: AppTheme.accentOrange.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(10),
+          width: 30,
+          height: 30,
+          alignment: Alignment.center,
+          decoration: const BoxDecoration(
+            color: AppTheme.primaryNavy,
+            shape: BoxShape.circle,
           ),
-          child: Icon(icon, size: 18, color: AppTheme.accentOrange),
+          child: Text(
+            step,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+              fontSize: 13,
+            ),
+          ),
         ),
         const SizedBox(width: 10),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppTheme.primaryNavy)),
-            Text(subtitle, style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
-          ],
+        Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: AppTheme.primaryNavy.withValues(alpha: 0.07),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: AppTheme.primaryNavy.withValues(alpha: 0.10),
+            ),
+          ),
+          child: Icon(icon, size: 18, color: AppTheme.primaryNavy),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppTheme.primaryNavy)),
+              const SizedBox(height: 2),
+              Container(
+                width: 28,
+                height: 2.5,
+                decoration: BoxDecoration(
+                  color: AppTheme.accentOrange,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(subtitle, style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+            ],
+          ),
         ),
       ],
     );
@@ -650,54 +1146,24 @@ class _RegisterScreenState extends State<RegisterScreen> {
         centerTitle: true,
       ),
       body: SafeArea(
-        child: ListView(
-          padding: EdgeInsets.fromLTRB(16, 16, 16, 16 + MediaQuery.of(context).viewInsets.bottom),
-          children: [
-            // Brand header
-            Container(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
-              decoration: BoxDecoration(
-                color: AppTheme.primaryNavy,
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: [BoxShadow(color: AppTheme.primaryNavy.withValues(alpha: 0.18), blurRadius: 16, offset: const Offset(0, 6))],
+        child: SingleChildScrollView(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
+          ),
+          child: Column(
+            children: [
+              const AuthNavyHeader(
+                subtitle: 'أنشئ حسابك للتسوق ومتابعة طلباتك بسهولة',
+                badge: 'حساب جديد',
               ),
-              child: Column(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
-                    child: Image.asset(
-                      'assets/brand/sreamart-logo.png',
-                      height: 42,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => Image.asset('assets/brand/sreamart-mark.png', height: 42),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(AppTheme.brandNameAr, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: 0.3)),
-                  Text(AppTheme.brandNameEn, style: TextStyle(color: AppTheme.accentOrange, fontSize: 12, fontWeight: FontWeight.w600, letterSpacing: 1.1)),
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withValues(alpha: 0.18))),
-                    child: Text('إنشاء حساب جديد', style: TextStyle(color: Colors.white.withValues(alpha: 0.95), fontSize: 12, fontWeight: FontWeight.w600)),
-                  ),
-                  const SizedBox(height: 8),
-                  Text('أنشئ حسابك للتسوق ومتابعة طلباتك بسهولة', textAlign: TextAlign.center, style: TextStyle(color: Colors.white.withValues(alpha: 0.72), fontSize: 12, height: 1.4)),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            // Personal info card
-            Card(
-              elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: AppTheme.primaryNavy.withValues(alpha: 0.08))),
-              child: Padding(
+              Padding(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _sectionHeader(Icons.person_outline_rounded, 'المعلومات الشخصية', 'الاسم ورقم الجوال'),
+            // Personal info section
+            AuthFormCard(
+              children: [
+                    _sectionHeader(Icons.person_outline_rounded, '1', 'المعلومات الشخصية', 'الاسم ورقم الجوال'),
                     const SizedBox(height: 14),
                     TextField(
                       controller: name,
@@ -759,19 +1225,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     ),
                   ],
                 ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            // Security card
-            Card(
-              elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: AppTheme.primaryNavy.withValues(alpha: 0.08))),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _sectionHeader(Icons.lock_outline_rounded, 'الأمان', 'كلمة المرور • 6 أحرف على الأقل'),
+            const SizedBox(height: 14),
+            // Security section — بطاقة بيضاء بلمسة كحلية.
+            AuthFormCard(
+              children: [
+                    _sectionHeader(Icons.lock_outline_rounded, '2', 'الأمان', 'كلمة المرور • 6 أحرف على الأقل'),
                     const SizedBox(height: 14),
                     TextField(
                       controller: password,
@@ -800,19 +1258,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     ),
                   ],
                 ),
-              ),
-            ),
             if (needOtp) ...[
-              const SizedBox(height: 12),
-              Card(
-                elevation: 0,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: AppTheme.primaryNavy.withValues(alpha: 0.08))),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _sectionHeader(Icons.verified_outlined, 'التحقق', 'رمز يُرسل إلى جوالك'),
+              const SizedBox(height: 14),
+              AuthFormCard(
+                children: [
+                      _sectionHeader(Icons.verified_outlined, '3', 'التحقق', 'رمز يُرسل إلى جوالك'),
                       const SizedBox(height: 14),
                       if (otpMethods.length > 1)
                         DropdownButtonFormField<String>(
@@ -903,11 +1353,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           ),
                         ),
                     ],
-                  ),
                 ),
-              ),
-            ],
-            const SizedBox(height: 12),
+              ],
+            const SizedBox(height: 16),
             // Terms
             Container(
               decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppTheme.primaryNavy.withValues(alpha: 0.08))),
@@ -964,7 +1412,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ],
             ),
             const SizedBox(height: 8),
-          ],
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1236,51 +1688,170 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
   @override
   Widget build(BuildContext context) {
     final app = appController;
-    InputDecoration dec(String label, bool hide, VoidCallback toggle) =>
-        InputDecoration(
-          labelText: label,
-          suffixIcon: IconButton(
+    InputDecoration dec(String label, IconData icon, bool hide, VoidCallback toggle) =>
+        authFieldDec(
+          label,
+          icon,
+          suffix: IconButton(
             onPressed: toggle,
-            icon: Icon(hide ? Icons.visibility_outlined : Icons.visibility_off_outlined),
+            icon: Icon(
+              hide ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+              size: 20,
+              color: AppTheme.textSecondary,
+            ),
           ),
         );
     return Scaffold(
-      appBar: AppBar(title: Text(app.t('change_password'))),
+      backgroundColor: AppTheme.surfaceGrey,
+      appBar: AppBar(
+        backgroundColor: AppTheme.primaryNavy,
+        foregroundColor: Colors.white,
+        centerTitle: true,
+        title: Text(
+          app.t('change_password'),
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
       body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
-          children: [
-            TextField(
-              controller: current,
-              obscureText: hideCurrent,
-              decoration: dec(app.t('current_password'), hideCurrent,
-                  () => setState(() => hideCurrent = !hideCurrent)),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: fresh,
-              obscureText: hideFresh,
-              decoration: dec(app.t('new_password'), hideFresh,
-                  () => setState(() => hideFresh = !hideFresh)),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: confirm,
-              obscureText: hideConfirm,
-              decoration: dec(app.t('confirm_new_password'), hideConfirm,
-                  () => setState(() => hideConfirm = !hideConfirm)),
-            ),
-            if (error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Text(error!, style: const TextStyle(color: Colors.red)),
+        child: SingleChildScrollView(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
+          ),
+          child: Column(
+            children: [
+              const AuthNavyHeader(
+                subtitle: 'اختر كلمة مرور قوية من 6 أحرف على الأقل',
+                badge: 'الأمان',
               ),
-            const SizedBox(height: 20),
-            FilledButton(
-              onPressed: busy ? null : _submit,
-              child: busy ? const BusySpinner() : Text(app.t('change_password')),
-            ),
-          ],
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+                child: AuthFormCard(
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: AppTheme.primaryNavy.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(
+                            Icons.lock_outline_rounded,
+                            size: 18,
+                            color: AppTheme.primaryNavy,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        const Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'حدث كلمة مرورك بخطوة واحدة',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 14,
+                                  color: AppTheme.primaryNavy,
+                                ),
+                              ),
+                              SizedBox(height: 4),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    Container(
+                      width: 36,
+                      height: 3,
+                      margin: const EdgeInsets.only(top: 8),
+                      decoration: BoxDecoration(
+                        color: AppTheme.accentOrange,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: current,
+                      obscureText: hideCurrent,
+                      decoration: dec(app.t('current_password'), Icons.vpn_key_outlined, hideCurrent,
+                          () => setState(() => hideCurrent = !hideCurrent)),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: fresh,
+                      obscureText: hideFresh,
+                      decoration: dec(app.t('new_password'), Icons.lock_outline_rounded, hideFresh,
+                          () => setState(() => hideFresh = !hideFresh)),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: confirm,
+                      obscureText: hideConfirm,
+                      decoration: dec(app.t('confirm_new_password'), Icons.verified_user_outlined, hideConfirm,
+                          () => setState(() => hideConfirm = !hideConfirm)),
+                    ),
+                    if (error != null)
+                      Container(
+                        margin: const EdgeInsets.only(top: 12),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFEBEE),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: const Color(0xFFFFCDD2),
+                          ),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(
+                              Icons.error_outline_rounded,
+                              size: 18,
+                              color: Color(0xFFC62828),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                error!,
+                                style: const TextStyle(
+                                  color: Color(0xFFB71C1C),
+                                  fontSize: 13,
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    const SizedBox(height: 18),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 52,
+                      child: FilledButton.icon(
+                        onPressed: busy ? null : _submit,
+                        icon: const Icon(Icons.save_outlined, size: 20),
+                        label: busy
+                            ? const BusySpinner()
+                            : Text(
+                                app.t('change_password'),
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

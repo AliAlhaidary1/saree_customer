@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
 import '../../core/notification_read.dart';
+import '../../widgets/app_image.dart';
 import '../../widgets/ui_helpers.dart';
 
 /// Parity with front Notification.js + notificationRead.js + Header polling:
@@ -149,7 +150,16 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       );
     }
     return Scaffold(
-      appBar: AppBar(title: Text(app.t('notification'))),
+      appBar: AppBar(
+        title: Text(app.t('notification')),
+        actions: [
+          if (items.any(_isUnread))
+            TextButton(
+              onPressed: _markAllRead,
+              child: Text(app.t('mark_all_read')),
+            ),
+        ],
+      ),
       body: loading
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
@@ -170,30 +180,90 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                         final item = items[i];
                         final unread = _isUnread(item);
                         final link = J.str(item['link_url'] ?? item['link']);
+                        final img = J.str(
+                            item['image_url'] ?? item['image'] ?? '');
+                        final date = J.str(item['date_sent'] ??
+                            item['date'] ??
+                            item['created_at'] ??
+                            '');
                         return Card(
+                          color: unread
+                              ? app.accentColor.withValues(alpha: 0.05)
+                              : null,
                           child: ListTile(
-                            leading: unread
-                                ? Container(
-                                    width: 10,
-                                    height: 10,
-                                    decoration: const BoxDecoration(
-                                      color: Colors.orange,
+                            leading: Stack(
+                              alignment: Alignment.topRight,
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: SizedBox(
+                                    width: 52,
+                                    height: 52,
+                                    child: img.isNotEmpty
+                                        ? AppImage(img,
+                                            placeholder:
+                                                app.placeholder)
+                                        : Container(
+                                            color: app.accentColor
+                                                .withValues(alpha: 0.12),
+                                            child: Icon(
+                                                Icons.notifications_outlined,
+                                                color: app.accentColor),
+                                          ),
+                                  ),
+                                ),
+                                if (unread)
+                                  Container(
+                                    width: 12,
+                                    height: 12,
+                                    decoration: BoxDecoration(
+                                      color: app.accentColor,
                                       shape: BoxShape.circle,
+                                      border: Border.all(
+                                          color: Colors.white, width: 2),
                                     ),
-                                  )
-                                : null,
+                                  ),
+                              ],
+                            ),
                             title: Text(
-                              J.str(item['title'] ?? item['message'] ?? item['id']),
+                              J.str(item['title'] ??
+                                  item['message'] ??
+                                  item['id']),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                fontWeight: unread ? FontWeight.bold : FontWeight.normal,
+                                fontWeight: unread
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
                               ),
                             ),
-                            subtitle: Text(J.str(
-                              item['message'] != null && item['title'] != null
-                                  ? item['message']
-                                  : (item['date'] ?? item['created_at'] ?? item['type']),
-                            )),
-                            trailing: Text(J.str(item['amount'] ?? item['latest_message'] ?? '')),
+                            subtitle: Column(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                              children: [
+                                if (item['message'] != null &&
+                                    item['title'] != null)
+                                  Text(
+                                    J.str(item['message']),
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                if (date.isNotEmpty)
+                                  Padding(
+                                    padding:
+                                        const EdgeInsets.only(top: 4),
+                                    child: Text(
+                                      date,
+                                      style: const TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            trailing: link.isNotEmpty
+                                ? const Icon(Icons.chevron_left, size: 18)
+                                : null,
                             onTap: link.isNotEmpty
                                 ? () => _openLink(context, link)
                                 : null,
@@ -203,6 +273,16 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                     ),
             ),
     );
+  }
+
+  Future<void> _markAllRead() async {
+    final uid = appController.user?['id'];
+    final ids = items
+        .map((e) => '${e['id']}')
+        .where((e) => e.isNotEmpty)
+        .toList();
+    final updated = await NotificationRead.markAsRead(uid, ids);
+    if (mounted) setState(() => readIds = updated);
   }
 }
 

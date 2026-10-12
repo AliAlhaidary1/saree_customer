@@ -8,11 +8,16 @@ class AppImage extends StatelessWidget {
     super.key,
     this.fit = BoxFit.cover,
     this.placeholder,
+    this.thumb = false,
   });
 
   final String? url;
   final BoxFit fit;
   final String? placeholder;
+
+  /// Set true for small avatars/logos: decodes a tiny bitmap instead of the
+  /// full-resolution image (major jank + data saver on strips/grids).
+  final bool thumb;
 
   Widget _iconFallback() {
     return ColoredBox(
@@ -25,12 +30,22 @@ class AppImage extends StatelessWidget {
     return CachedNetworkImage(
       imageUrl: src,
       fit: fit,
+      // Downscale decode: grid ~400px, thumb ~128px. Disk cache bounded by
+      // cached_network_image defaults; fade disabled to avoid shimmer jank.
+      memCacheWidth: thumb ? 128 : 400,
+      memCacheHeight: thumb ? 128 : null,
+      cacheKey: '${thumb ? 't' : 'f'}:$src',
+      fadeInDuration: Duration.zero,
+      fadeOutDuration: Duration.zero,
       placeholder: (_, __) => ColoredBox(color: Colors.grey.shade100),
       errorWidget: (_, __, ___) {
         if (fallback != null && fallback.isNotEmpty && fallback != src) {
           return CachedNetworkImage(
             imageUrl: fallback,
             fit: fit,
+            memCacheWidth: thumb ? 128 : 400,
+            fadeInDuration: Duration.zero,
+            fadeOutDuration: Duration.zero,
             errorWidget: (_, __, ___) => _iconFallback(),
           );
         }
@@ -63,7 +78,7 @@ class SellerAvatar extends StatelessWidget {
         child: SizedBox(
           width: radius * 2,
           height: radius * 2,
-          child: AppImage(url, placeholder: placeholder),
+          child: AppImage(url, placeholder: placeholder, thumb: true),
         ),
       ),
     );

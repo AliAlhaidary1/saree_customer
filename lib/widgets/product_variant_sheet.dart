@@ -8,18 +8,27 @@ import '../core/promo_price.dart';
 import 'app_image.dart';
 import 'closed_store_badge.dart';
 
+/// Variant picker as a centered dialog (web parity with ProductVariantModal).
+/// A dialog (not a bottom sheet) so the page never looks dimmed-and-empty:
+/// fixed max size, explicit close button, and an empty-state fallback.
 Future<void> showProductVariantSheet(
   BuildContext context,
   Map<String, dynamic> product,
 ) {
-  return showModalBottomSheet<void>(
+  return showDialog<void>(
     context: context,
-    isScrollControlled: true,
-    backgroundColor: Colors.white,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    barrierDismissible: true,
+    builder: (ctx) => Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: 420,
+          maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+        ),
+        child: ProductVariantSheet(product: product, inDialog: true),
+      ),
     ),
-    builder: (_) => ProductVariantSheet(product: product),
   );
 }
 
@@ -111,8 +120,9 @@ Future<void> addProductFromCatalog(
 }
 
 class ProductVariantSheet extends StatefulWidget {
-  const ProductVariantSheet({super.key, required this.product});
+  const ProductVariantSheet({super.key, required this.product, this.inDialog = false});
   final Map<String, dynamic> product;
+  final bool inDialog;
 
   @override
   State<ProductVariantSheet> createState() => _ProductVariantSheetState();
@@ -173,20 +183,33 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(4),
+            if (!widget.inDialog)
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              app.t('productVariants'),
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            if (!widget.inDialog) const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    app.t('productVariants'),
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                if (widget.inDialog)
+                  IconButton(
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.close),
+                    tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+                  ),
+              ],
             ),
             const SizedBox(height: 12),
             Container(
@@ -224,6 +247,23 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
               ),
             ),
             const SizedBox(height: 16),
+            if (variants.isEmpty)
+              // List APIs sometimes omit variants: fall back to a single
+              // explicit add instead of showing an empty dimmed sheet.
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: busy
+                      ? null
+                      : () => _add({
+                            'id': widget.product['product_variant_id'] ??
+                                widget.product['id'],
+                          }),
+                  icon: const Icon(Icons.shopping_cart_outlined, size: 18),
+                  label: Text(app.t('add_to_cart')),
+                ),
+              )
+            else
             ConstrainedBox(
               constraints: BoxConstraints(
                 maxHeight: MediaQuery.of(context).size.height * 0.5,
