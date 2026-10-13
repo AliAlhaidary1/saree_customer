@@ -130,13 +130,13 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
     final isAr = app.i18n.code == 'ar';
     if (loading) {
       return Scaffold(
-        appBar: AppBar(title: Text(app.t('akhdimni'))),
+        appBar: null,
         body: const Center(child: CircularProgressIndicator()),
       );
     }
     if (!enabled) {
       return Scaffold(
-        appBar: AppBar(title: Text(app.t('akhdimni'))),
+        appBar: null,
         body: Center(child: Text(app.t('akhdimni_disabled'))),
       );
     }
@@ -146,151 +146,178 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
       (Icons.local_shipping_outlined, app.t('akhdimni_step_delivered'), app.t('akhdimni_step_delivered_hint')),
     ];
     return Scaffold(
-      appBar: AppBar(title: Text(app.t('akhdimni'))),
+      appBar: null,
       body: RefreshIndicator(
         onRefresh: _load,
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            Card(
-              color: AppTheme.primaryNavy,
-              child: Padding(
-                padding: const EdgeInsets.all(20),
+            _sectionHeader(app.t('akhdimni_choose_service'),
+                app.t('akhdimni_choose_service_hint')),
+            const SizedBox(height: 12),
+            if (categories.isEmpty)
+              EmptyState(message: app.t('no_categories'))
+            else
+              ...categories.map((cat) => _categoryCard(cat, isAr, app)),
+            const SizedBox(height: 22),
+            _sectionHeader(app.t('akhdimni_how_it_works')),
+            const SizedBox(height: 12),
+            _steps(steps, app),
+            const SizedBox(height: 14),
+            Text(app.t('akhdimni_home_footer'),
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    color: AppTheme.textSecondary, fontSize: 12)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _sectionHeader(String title, [String? hint]) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 4,
+              height: 20,
+              decoration: BoxDecoration(
+                color: AppTheme.accentOrange,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(title,
+                  style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.textPrimary)),
+            ),
+          ],
+        ),
+        if (hint != null && hint.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(hint,
+              style: const TextStyle(
+                  color: AppTheme.textSecondary, fontSize: 12.5)),
+        ],
+      ],
+    );
+  }
+
+  Widget _categoryCard(
+      Map<String, dynamic> cat, bool isAr, AppController app) {
+    final name = _catName(cat, isAr);
+    final desc = _catDesc(cat, isAr);
+    final img = J.str(cat['image_url']);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: InkWell(
+        onTap: () =>
+            context.push('/akhdimni/create?category_id=${cat['id']}'),
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: SizedBox(
+                  width: 72,
+                  height: 72,
+                  child:
+                      AppImage(img.isNotEmpty ? img : null, placeholder: app.placeholder),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.bolt, color: Colors.amber),
-                        const SizedBox(width: 6),
-                        Text(app.t('akhdimni'),
-                            style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(app.t('akhdimni_what_do_you_need'),
-                        style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w800)),
-                    const SizedBox(height: 6),
-                    Text(app.t('akhdimni_home_hint'),
-                        style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                    const SizedBox(height: 14),
-                    Row(
-                      children: [
-                        FilledButton(
-                          onPressed: categories.isEmpty
-                              ? null
-                              : () => context.push('/akhdimni/create?category_id=${categories.first['id']}'),
-                          child: Text(app.t('akhdimni_order_now')),
-                        ),
-                        const SizedBox(width: 8),
-                        OutlinedButton(
-                          onPressed: () => context.push('/akhdimni/orders'),
-                          style: OutlinedButton.styleFrom(foregroundColor: Colors.white),
-                          child: Text(app.t('akhdimni_my_orders')),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Text('${categories.length} ${app.t('store_types')}',
-                            style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                        const SizedBox(width: 12),
-                        Text('✓ ${app.t('akhdimni_fulfillment_on_us')}',
-                            style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                      ],
-                    ),
+                    Text(name,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w700, fontSize: 15.5)),
+                    if (desc.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(desc,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 12.5)),
+                    ],
                   ],
                 ),
               ),
-            ),
-            const SizedBox(height: 16),
-            if (categories.isEmpty)
-              EmptyState(message: app.t('no_categories'))
-            else ...[
-              Text(app.t('akhdimni_choose_service'),
-                  style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
-              Text(app.t('akhdimni_choose_service_hint'),
-                  style: const TextStyle(color: Colors.grey, fontSize: 12)),
-              const SizedBox(height: 10),
-              ...categories.map((cat) {
-                final name = _catName(cat, isAr);
-                final desc = _catDesc(cat, isAr);
-                final img = J.str(cat['image_url']);
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  child: InkWell(
-                    onTap: () => context.push('/akhdimni/create?category_id=${cat['id']}'),
-                    borderRadius: BorderRadius.circular(12),
-                    child: Row(
-                      children: [
-                        ClipRRect(
-                          borderRadius: const BorderRadiusDirectional.only(
-                            topStart: Radius.circular(12),
-                            bottomStart: Radius.circular(12),
-                          ),
-                          child: SizedBox(
-                            width: 96,
-                            height: 96,
-                            child: AppImage(img.isNotEmpty ? img : null, placeholder: app.placeholder),
-                          ),
-                        ),
-                        Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(name, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
-                                if (desc.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 4),
-                                    child: Text(desc, maxLines: 2, overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                                  ),
-                                const SizedBox(height: 6),
-                                Text(app.t('akhdimni_order_btn'),
-                                    style: TextStyle(color: app.accentColor, fontWeight: FontWeight.w700, fontSize: 13)),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: app.accentColor.withValues(alpha: 0.1),
+                  shape: BoxShape.circle,
+                ),
+                child:
+                    Icon(Icons.arrow_forward, size: 18, color: app.accentColor),
+              ),
             ],
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                for (var i = 0; i < steps.length; i++)
-                  Expanded(
-                    child: Card(
-                      margin: EdgeInsetsDirectional.only(end: i < 2 ? 8 : 0),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 6),
-                        child: Column(
-                          children: [
-                            Icon(steps[i].$1, color: app.accentColor),
-                            const SizedBox(height: 6),
-                            Text(steps[i].$2, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
-                            Text(steps[i].$3,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(color: Colors.grey, fontSize: 11)),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Text(app.t('akhdimni_home_footer'),
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.grey, fontSize: 12)),
-          ],
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _steps(
+      List<(IconData, String, String)> steps, AppController app) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 8),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceGrey,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        children: [
+          for (var i = 0; i < steps.length; i++) ...[
+            if (i > 0)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 30),
+                child: Icon(Icons.chevron_left,
+                    size: 20,
+                    color: AppTheme.accentOrange.withValues(alpha: 0.4)),
+              ),
+            Expanded(
+              child: Column(
+                children: [
+                  Container(
+                    width: 46,
+                    height: 46,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                          color: app.accentColor.withValues(alpha: 0.18),
+                          width: 1.5),
+                    ),
+                    child: Icon(steps[i].$1, color: app.accentColor, size: 22),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(steps[i].$2,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w700, fontSize: 13)),
+                  const SizedBox(height: 3),
+                  Text(steps[i].$3,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: AppTheme.textSecondary, fontSize: 11)),
+                ],
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }

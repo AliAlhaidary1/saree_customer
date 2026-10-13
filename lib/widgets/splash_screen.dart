@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../core/app_theme.dart';
+
 /// شاشة بداية واحدة فقط — خلفية كحلية سادة (نفس لون الـ Native)
 /// أنيميشن بسيط وسريع: خطوط سرعة + ومضة برق + ظهور اسم سريع MART.
 class BrandSplashScreen extends StatefulWidget {
@@ -80,7 +82,7 @@ class _BrandSplashScreenState extends State<BrandSplashScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0A2540),
+      backgroundColor: AppTheme.primaryNavy,
       body: Center(
         child: AnimatedBuilder(
           animation: _c,

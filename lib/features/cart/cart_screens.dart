@@ -3,11 +3,66 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/app_controller.dart';
+import '../../core/app_theme.dart';
 import '../../core/business_hours.dart';
 import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/ui_helpers.dart';
+
+/// Variant unit label for a cart line (e.g. "1 كيلو", "2 نفر").
+/// Server cart items don't always carry the unit flat — it may live inside
+/// a nested variant map or under alternate keys — so every known location
+/// is checked before falling back to a variant display name.
+String _cartLineUnit(Map<String, dynamic> item) {
+  // Label captured at add time is the most reliable (server cart items
+  // often omit the unit type, leaving only the number).
+  final remembered = J.str(item['variant_label']);
+  if (remembered.isNotEmpty) return remembered;
+  final nested = item['variant'] is Map
+      ? J.map(item['variant'])
+      : item['product_variant'] is Map
+          ? J.map(item['product_variant'])
+          : J.map(item['variant_info']);
+  String pick(List<dynamic> keys, [Map<String, dynamic>? from]) {
+    final src = from ?? item;
+    for (final k in keys) {
+      final v = J.str(src[k]);
+      if (v.isNotEmpty) return v;
+    }
+    return '';
+  }
+
+  var measure = pick(const ['measurement']);
+  if (measure.isEmpty) measure = pick(const ['measurement'], nested);
+  var type = pick(const [
+    'stock_unit_name',
+    'unit',
+    'unit_name',
+    'uom',
+    'unit_type',
+  ]);
+  if (type.isEmpty) {
+    type = pick(const [
+      'stock_unit_name',
+      'unit',
+      'unit_name',
+      'uom',
+      'unit_type',
+    ], nested);
+  }
+  if (type.isEmpty) {
+    type = pick(const ['variant_name', 'variant_label', 'variant_title']);
+  }
+  if (type.isEmpty && nested.isNotEmpty) {
+    final fallback = J.str(nested['name']);
+    // Only accept a nested name that adds info (not the product name again).
+    if (fallback.isNotEmpty && fallback != J.str(item['name'])) {
+      type = fallback;
+    }
+  }
+  return [measure, type].where((e) => e.isNotEmpty).join(' ');
+}
 
 class CartScreen extends StatefulWidget {
   const CartScreen({super.key});
@@ -156,10 +211,6 @@ class _CartScreenState extends State<CartScreen> {
               final image = J.str(item['image_url'] ?? item['image']);
               final price = variantDisplayPrice(item);
               final outOfStock = _lineOutOfStock(item);
-              final unit = [
-                J.str(item['measurement']),
-                J.str(item['stock_unit_name'] ?? item['unit']),
-              ].where((e) => e.isNotEmpty).join(' ');
               final stock = J.i(
                 item['stock'] ?? item['total_stock'] ?? -1,
                 -1,
@@ -184,10 +235,46 @@ class _CartScreenState extends State<CartScreen> {
                 subtitle: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    if (unit.isNotEmpty)
-                      Text(unit,
-                          style: const TextStyle(
-                              fontSize: 11, color: Colors.grey)),
+                    Builder(builder: (_) {
+                      final unit = _cartLineUnit(item);
+                      if (unit.isEmpty) return const SizedBox.shrink();
+                      return Container(
+                        margin: const EdgeInsets.only(top: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppTheme.accentOrange.withValues(
+                            alpha: 0.12,
+                          ),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.scale_outlined,
+                              size: 12,
+                              color: AppTheme.accentOrange,
+                            ),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                unit,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w800,
+                                  color: AppTheme.accentOrange,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
                     Text(
                       '${money(price.finalPrice, app.currency, app.decimals)} × $qty = ${money(price.finalPrice * qty, app.currency, app.decimals)}',
                       style: const TextStyle(fontSize: 12),
@@ -219,7 +306,12 @@ class _CartScreenState extends State<CartScreen> {
                                   variantId:
                                       item['product_variant_id'] ?? item['id'],
                                 )
-                                .then((_) {
+                                .then((err) {
+                                  if (err != null && context.mounted) {
+                                    ScaffoldMessenger.of(context)
+                                        .showSnackBar(
+                                            SnackBar(content: Text(err)));
+                                  }
                                   if (mounted) setState(() {});
                                 })
                           : () => app
@@ -230,6 +322,7 @@ class _CartScreenState extends State<CartScreen> {
                                   qty: qty - 1,
                                   sellerId:
                                       item['seller_id'] ?? J.sellerId(item),
+                                  variantLabel: _cartLineUnit(item),
                                 )
                                 .then((_) {
                                   if (mounted) setState(() {});
@@ -257,6 +350,7 @@ class _CartScreenState extends State<CartScreen> {
                                 sellerId:
                                     item['seller_id'] ?? J.sellerId(item),
                                 storeName: app.storeNameOf(item),
+                                variantLabel: _cartLineUnit(item),
                               );
                               if (!context.mounted) return;
                               if (err != null) {
@@ -276,7 +370,11 @@ class _CartScreenState extends State<CartScreen> {
                             variantId:
                                 item['product_variant_id'] ?? item['id'],
                           )
-                          .then((_) {
+                          .then((err) {
+                        if (err != null && context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(err)));
+                        }
                         if (mounted) setState(() {});
                       }),
                     ),

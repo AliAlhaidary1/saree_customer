@@ -225,67 +225,295 @@ class ProductCard extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 6),
-                  // Explicit web-parity button (not an icon): opens the
-                  // variant dialog when the product has multiple options.
+                  // Simple product: Add button turns into a [- qty +]
+                  // stepper synced with the cart (same pattern as the
+                  // product page). Multi-variant products keep opening
+                  // the variant dialog.
                   if (onAdd != null)
                     SizedBox(
                       width: double.infinity,
                       height: 38,
-                      child: FilledButton(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: (closed || outOfStock)
-                              ? Colors.grey.shade400
-                              : AppTheme.accentOrange,
-                          foregroundColor: AppTheme.backgroundWhite,
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          textStyle: const TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        onPressed: (closed || outOfStock) ? null : onAdd,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.shopping_cart_outlined, size: 16),
-                            const SizedBox(width: 4),
-                            Flexible(
-                              child: Text(
-                                (closed || outOfStock)
-                                    ? app.t('out_of_stock')
-                                    : app.t('add_to_cart'),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            if (hasOptions && firstLabel.isNotEmpty) ...[
-                              const SizedBox(width: 2),
-                              Flexible(
-                                child: Text(
-                                  '· $firstLabel',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w500,
-                                  ),
+                      child: (!hasOptions && !closed && !outOfStock)
+                          ? _CardAddControl(
+                              product: product,
+                              variant: variant,
+                              price: price.finalPrice,
+                            )
+                          : FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: (closed || outOfStock)
+                                    ? Colors.grey.shade400
+                                    : AppTheme.accentOrange,
+                                foregroundColor:
+                                    AppTheme.backgroundWhite,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                textStyle: const TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w700,
                                 ),
                               ),
-                              const Icon(Icons.arrow_drop_down, size: 16),
-                            ] else if (hasOptions)
-                              const Icon(Icons.arrow_drop_down, size: 16),
-                          ],
-                        ),
-                      ),
+                              onPressed:
+                                  (closed || outOfStock) ? null : onAdd,
+                              child: Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.center,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.shopping_cart_outlined,
+                                    size: 16,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Flexible(
+                                    child: Text(
+                                      (closed || outOfStock)
+                                          ? app.t('out_of_stock')
+                                          : app.t('add_to_cart'),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  if (hasOptions &&
+                                      firstLabel.isNotEmpty) ...[
+                                    const SizedBox(width: 2),
+                                    Flexible(
+                                      child: Text(
+                                        '· $firstLabel',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ),
+                                    const Icon(
+                                      Icons.arrow_drop_down,
+                                      size: 16,
+                                    ),
+                                  ] else if (hasOptions)
+                                    const Icon(
+                                      Icons.arrow_drop_down,
+                                      size: 16,
+                                    ),
+                                ],
+                              ),
+                            ),
                     ),
                 ],
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact add/stepper control for simple products on cards.
+/// Plain Add first; after the first tap it becomes [- qty +] synced with
+/// the cart. Optimistic: updates instantly, request runs in background.
+class _CardAddControl extends StatefulWidget {
+  const _CardAddControl({
+    required this.product,
+    required this.variant,
+    required this.price,
+  });
+
+  final Map<String, dynamic> product;
+  final Map<String, dynamic> variant;
+  final double price;
+
+  @override
+  State<_CardAddControl> createState() => _CardAddControlState();
+}
+
+class _CardAddControlState extends State<_CardAddControl> {
+  int? _optimistic;
+  int _seq = 0;
+
+  dynamic get _variantId =>
+      widget.variant['id'] ??
+      widget.product['product_variant_id'] ??
+      widget.product['id'];
+
+  Future<void> _setQty(int next) async {
+    final app = appController;
+    final mySeq = ++_seq;
+    setState(() => _optimistic = next);
+    try {
+      if (next <= 0) {
+        final err = await app.removeCartLine(
+          productId: widget.product['id'],
+          variantId: _variantId,
+        );
+        if (mySeq != _seq || !mounted) return;
+        setState(() => _optimistic = null);
+        if (err != null && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(err)),
+          );
+        }
+        return;
+      }
+      final err = await app.addToCart(
+        productId: widget.product['id'],
+        variantId: _variantId,
+        qty: next,
+        productPrice: widget.price,
+        sellerId: J.sellerId(widget.product),
+        storeName: app.storeNameOf(widget.product),
+            variantLabel: AppController.variantLabelOf(widget.variant, J.str(widget.product['name'])),
+      );
+      if (mySeq != _seq || !mounted) return;
+      setState(() => _optimistic = null);
+      if (err == 'same_seller' && mounted) {
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            content: Text(app.t('same_seller_cart_prompt')),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: Text(app.t('cancel')),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: Text(app.t('confirm')),
+              ),
+            ],
+          ),
+        );
+        if (ok == true && mounted) {
+          final retry = await app.addToCart(
+            productId: widget.product['id'],
+            variantId: _variantId,
+            qty: next,
+            productPrice: widget.price,
+            sellerId: J.sellerId(widget.product),
+            storeName: app.storeNameOf(widget.product),
+            variantLabel: AppController.variantLabelOf(widget.variant, J.str(widget.product['name'])),
+            replaceSeller: true,
+          );
+          if (mounted && retry != null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(retry)),
+            );
+          }
+        }
+      } else if (err != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(err)),
+        );
+      }
+    } catch (_) {
+      if (mySeq != _seq || !mounted) return;
+      setState(() => _optimistic = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(appController.t('network_error'))),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = appController;
+    return ListenableBuilder(
+      listenable: app,
+      builder: (_, __) {
+        final qty = _optimistic ?? app.cartQtyFor(_variantId);
+        if (qty <= 0) {
+          return FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: AppTheme.accentOrange,
+              foregroundColor: AppTheme.backgroundWhite,
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+              textStyle: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            onPressed: () => _setQty(1),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.shopping_cart_outlined, size: 16),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(
+                    app.t('add_to_cart'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: AppTheme.primaryNavy.withValues(alpha: 0.1),
+            ),
+          ),
+          child: Row(
+            children: [
+              _outlineBtn(
+                Icons.remove_rounded,
+                () => _setQty(qty - 1),
+              ),
+              Expanded(
+                child: Text(
+                  '$qty',
+                  textAlign: TextAlign.center,
+                  maxLines: 1,
+                  style: const TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              _outlineBtn(
+                Icons.add_rounded,
+                () => _setQty(qty + 1),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Outlined step button: white with an orange frame, no fill.
+  Widget _outlineBtn(IconData icon, VoidCallback onTap) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(5),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: AppTheme.accentOrange,
+              width: 1.4,
+            ),
+          ),
+          child: Icon(icon, size: 15, color: AppTheme.accentOrange),
         ),
       ),
     );

@@ -54,6 +54,60 @@ class AppController extends ChangeNotifier {
   bool busy = false;
   BrandConfig brand = BrandConfig.defaults;
 
+  /// Variant unit labels captured at add time (e.g. variantId -> "1 كيلو").
+  /// The server cart response often omits the unit type, so the label the
+  /// user saw when adding is carried with the line instead.
+  final Map<String, String> _variantLabels = {};
+
+  /// Display label for a variant map ("1 كيلو"). Empty when unknown.
+  /// [productName] guards against echoing the product name itself when the
+  /// variant map carries no distinctive info.
+  static String variantLabelOf(Map<String, dynamic>? v,
+      [String productName = '']) {
+    if (v == null) return '';
+    final m = J.str(v['measurement']);
+    final u = J.str(
+      v['stock_unit_name'] ?? v['unit'] ?? v['unit_name'] ?? v['uom'],
+    );
+    var name = J.str(
+      v['variant_name'] ?? v['variant_label'] ?? v['variant_title'],
+    );
+    if (name.isEmpty) {
+      final vn = J.str(v['name'] ?? v['title']);
+      if (vn.isNotEmpty && vn != productName) name = vn;
+    }
+    final parts = <String>[];
+    for (final p in [m, u, name]) {
+      if (p.isNotEmpty && !parts.contains(p)) parts.add(p);
+    }
+    return parts.join(' ');
+  }
+
+  String variantLabelFor(dynamic variantId) =>
+      _variantLabels['$variantId'] ?? '';
+
+  Future<void> rememberVariantLabel(dynamic variantId, String label) async {
+    if (variantId == null || label.trim().isEmpty) return;
+    _variantLabels['$variantId'] = label.trim();
+    try {
+      await _prefs.setString('variant_labels', jsonEncode(_variantLabels));
+    } catch (_) {}
+  }
+
+  void _attachVariantLabels(List<Map<String, dynamic>> lines) {
+    if (_variantLabels.isEmpty) return;
+    for (final line in lines) {
+      final key =
+          '${line['product_variant_id'] ?? line['id']}';
+      final label = _variantLabels[key];
+      if (label != null &&
+          label.isNotEmpty &&
+          J.str(line['variant_label']).isEmpty) {
+        line['variant_label'] = label;
+      }
+    }
+  }
+
   // === Checkout parity with front ===
   CheckoutConfig checkoutConfig = CheckoutConfig.defaults();
   MultiSellerCheckout? multiSellerCheckout;
@@ -118,7 +172,17 @@ class AppController extends ChangeNotifier {
   String get currency => J.str(settings['currency'], 'ر.ي');
   int get decimals => J.i(settings['decimal_point'], 2);
   String get placeholder => J.str(webSettings['placeholder_image']);
-  int get cartCount => isLoggedIn ? cartProducts.length : guestCart.length;
+
+  /// Total units in cart (sum of quantities), so the badge moves with every
+  /// +/- tap — not just when a new line appears.
+  int get cartCount {
+    final lines = isLoggedIn ? cartProducts : guestCart;
+    var total = 0;
+    for (final item in lines) {
+      total += J.i(item['qty'] ?? item['quantity']);
+    }
+    return total;
+  }
   bool get oneSellerCart => J.flag(settings['one_seller_cart']);
   int get maxSellersPerCheckout {
     final fromSettings = J.i(settings['max_sellers_per_checkout']);
@@ -163,6 +227,18 @@ class AppController extends ChangeNotifier {
       guestCart = [];
       await _prefs.remove('guest_cart');
     }
+    try {
+      final labelsRaw = _prefs.getString('variant_labels');
+      if (labelsRaw != null && labelsRaw.isNotEmpty) {
+        final decoded = jsonDecode(labelsRaw);
+        if (decoded is Map) {
+          decoded.forEach((k, v) {
+            final label = '$v'.trim();
+            if (label.isNotEmpty) _variantLabels['$k'] = label;
+          });
+        }
+      }
+    } catch (_) {}
     try {
       final cityRaw = _prefs.getString('city');
       if (cityRaw != null && cityRaw.isNotEmpty) {
@@ -440,6 +516,9 @@ class AppController extends ChangeNotifier {
     return _qtyInCart(variantId) > 0;
   }
 
+  /// Public cart quantity for a variant (0 when not in cart).
+  int cartQtyFor(dynamic variantId) => _qtyInCart(variantId);
+
   int _qtyInCart(dynamic variantId) {
     if (variantId == null) return 0;
     final key = '$variantId';
@@ -450,6 +529,42 @@ class AppController extends ChangeNotifier {
       }
     }
     return 0;
+  }
+
+  /// Instant local cart mutation + notify, so badges and steppers move the
+  /// moment the user taps. The following server refresh reconciles truth.
+  void _optimisticSetQty(
+    dynamic variantId,
+    int qty, {
+    dynamic productId,
+    dynamic sellerId,
+    double? productPrice,
+    bool clearFirst = false,
+  }) {
+    final lines = isLoggedIn ? cartProducts : guestCart;
+    if (clearFirst) lines.clear();
+    if (variantId == null) {
+      notifyListeners();
+      return;
+    }
+    final key = '$variantId';
+    final i = lines.indexWhere(
+      (e) => '${e['product_variant_id'] ?? e['id']}' == key,
+    );
+    if (qty <= 0) {
+      if (i >= 0) lines.removeAt(i);
+    } else if (i >= 0) {
+      lines[i] = {...lines[i], 'qty': qty};
+    } else {
+      lines.add({
+        if (productId != null) 'product_id': productId,
+        'product_variant_id': variantId,
+        'qty': qty,
+        if (sellerId != null) 'seller_id': sellerId,
+        if (productPrice != null) 'productPrice': productPrice,
+      });
+    }
+    notifyListeners();
   }
 
   bool wouldExceedStoreLimit({dynamic sellerId, dynamic variantId}) {
@@ -674,7 +789,12 @@ class AppController extends ChangeNotifier {
 
   Future<ApiResult> refreshCart({int checkout = 0}) async {
     final point = _cartCoords(checkout: checkout == 1);
-    if (point == null) return ApiResult({'status': 0});
+    if (point == null) {
+      // No coordinates (no city yet): local cart is the truth — still
+      // notify so badges/steppers reflect optimistic updates.
+      notifyListeners();
+      return ApiResult({'status': 0});
+    }
     if (isLoggedIn) {
       final result = await api.cart(
         latitude: point.latitude,
@@ -684,6 +804,7 @@ class AppController extends ChangeNotifier {
       if (result.ok) {
         cart = result.dataMap;
         cartProducts = J.maps(cart?['cart'] ?? cart?['items'] ?? result.data);
+        _attachVariantLabels(cartProducts);
         cartSubTotal = J.d(cart?['sub_total'] ?? cart?['total']);
         // parity: enrich sellerGroups etc when is_checkout=1
         if (checkout == 1) {
@@ -733,7 +854,23 @@ class AppController extends ChangeNotifier {
       );
       final priced = J.maps(result.dataMap['cart'] ?? result.data);
       if (priced.isNotEmpty) {
+        // Keep local quantities: the server prices the lines, but the
+        // user's taps are the truth for qty until the server confirms.
+        final localQty = <String, int>{};
+        for (final item in guestCart) {
+          localQty['${item['product_variant_id']}'] =
+              J.i(item['qty'] ?? item['quantity']);
+        }
+        for (final p in priced) {
+          final key = '${p['product_variant_id'] ?? p['id']}';
+          final serverQty = J.i(p['qty'] ?? p['quantity']);
+          final keep = localQty[key];
+          if ((serverQty <= 0) && keep != null && keep > 0) {
+            p['qty'] = keep;
+          }
+        }
         guestCart = priced;
+        _attachVariantLabels(guestCart);
       }
     }
     notifyListeners();
@@ -758,6 +895,7 @@ class AppController extends ChangeNotifier {
     dynamic sellerId,
     bool replaceSeller = false,
     String storeName = '',
+    String variantLabel = '',
   }) async {
     if (!replaceSeller) {
       if (maxCartItemsCount > 0 && qty > maxCartItemsCount) {
@@ -783,17 +921,38 @@ class AppController extends ChangeNotifier {
       if (closed != null && closed.isNotEmpty) return closed;
     }
     if (isLoggedIn) {
-      if (replaceSeller) await api.clearCart();
+      if (replaceSeller) {
+        await api.clearCart();
+        cartProducts = [];
+      }
+      if (variantLabel.trim().isNotEmpty) {
+        await rememberVariantLabel(variantId, variantLabel);
+      }
+      // Optimistic: badge + steppers move instantly, server confirms after.
+      _optimisticSetQty(
+        variantId,
+        qty,
+        productId: productId,
+        sellerId: sellerId,
+        productPrice: productPrice,
+        clearFirst: replaceSeller,
+      );
       final result = await api.addToCart(
         productId: productId,
         variantId: variantId,
         qty: qty,
       );
-      if (result.oneSellerError == 1) return 'same_seller';
-      if (!result.ok)
+      if (result.oneSellerError == 1) {
+        await refreshCart();
+        return 'same_seller';
+      }
+      if (!result.ok) {
+        // Reconcile: drop the optimistic change, show the real error.
+        await refreshCart();
         return result.message.isEmpty
             ? t('something_went_wrong')
             : result.message;
+      }
       await refreshCart();
       return null;
     }
@@ -810,8 +969,14 @@ class AppController extends ChangeNotifier {
     final existingIndex = guestCart.indexWhere(
       (item) => '${item['product_variant_id']}' == '$variantId',
     );
+    if (variantLabel.trim().isNotEmpty) {
+      await rememberVariantLabel(variantId, variantLabel);
+    }
     if (existingIndex >= 0) {
       guestCart[existingIndex]['qty'] = qty;
+      if (variantLabel.trim().isNotEmpty) {
+        guestCart[existingIndex]['variant_label'] = variantLabel.trim();
+      }
     } else {
       guestCart.add({
         'product_id': productId,
@@ -819,6 +984,8 @@ class AppController extends ChangeNotifier {
         'qty': qty,
         if (sellerId != null) 'seller_id': sellerId,
         if (productPrice != null) 'productPrice': productPrice,
+        if (variantLabel.trim().isNotEmpty)
+          'variant_label': variantLabel.trim(),
       });
     }
     await _prefs.setString('guest_cart', jsonEncode(guestCart));
@@ -826,20 +993,35 @@ class AppController extends ChangeNotifier {
     return null;
   }
 
-  Future<void> removeCartLine({
+  /// Removes one cart line. Returns an error message when the server
+  /// refuses (logged-in), so callers can surface it instead of failing
+  /// silently with a stepper that never moves.
+  Future<String?> removeCartLine({
     required dynamic productId,
     required dynamic variantId,
   }) async {
     if (isLoggedIn) {
-      await api.removeFromCart(productId: productId, variantId: variantId);
+      // Optimistic: line disappears instantly, server confirms after.
+      _optimisticSetQty(variantId, 0);
+      final result = await api.removeFromCart(
+        productId: productId,
+        variantId: variantId,
+      );
+      if (!result.ok) {
+        await refreshCart();
+        return result.message.isEmpty
+            ? t('something_went_wrong')
+            : result.message;
+      }
       await refreshCart();
-      return;
+      return null;
     }
     guestCart.removeWhere(
       (item) => '${item['product_variant_id']}' == '$variantId',
     );
     await _prefs.setString('guest_cart', jsonEncode(guestCart));
     await refreshCart();
+    return null;
   }
 
   Future<void> clearAllCart() async {

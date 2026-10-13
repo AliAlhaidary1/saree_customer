@@ -39,6 +39,8 @@ Future<void> handleCartAddResult(
   required dynamic variantId,
   required int qty,
   double? productPrice,
+  bool silentSuccess = false,
+  String variantLabel = '',
 }) async {
   final app = appController;
   if (!context.mounted) return;
@@ -68,6 +70,7 @@ Future<void> handleCartAddResult(
         sellerId: J.sellerId(product),
         storeName: app.storeNameOf(product),
         replaceSeller: true,
+        variantLabel: variantLabel,
       );
       if (!context.mounted) return;
       if (retry != null) {
@@ -84,6 +87,7 @@ Future<void> handleCartAddResult(
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
     return;
   }
+  if (silentSuccess) return;
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(content: Text(app.t('add_to_cart'))),
   );
@@ -107,6 +111,10 @@ Future<void> addProductFromCatalog(
     productPrice: price.finalPrice,
     sellerId: J.sellerId(product),
     storeName: appController.storeNameOf(product),
+    variantLabel: AppController.variantLabelOf(
+      variants.isNotEmpty ? variants.first : null,
+      J.str(product['name']),
+    ),
   );
   if (!context.mounted) return;
   await handleCartAddResult(
@@ -116,6 +124,10 @@ Future<void> addProductFromCatalog(
     variantId: variant['id'] ?? product['product_variant_id'],
     qty: 1,
     productPrice: price.finalPrice,
+    variantLabel: AppController.variantLabelOf(
+      variants.isNotEmpty ? variants.first : null,
+      J.str(product['name']),
+    ),
   );
 }
 
@@ -129,31 +141,110 @@ class ProductVariantSheet extends StatefulWidget {
 }
 
 class _ProductVariantSheetState extends State<ProductVariantSheet> {
-  bool busy = false;
+  /// Optimistic quantities per variant: shown instantly, request runs in
+  /// background. No spinners anywhere — errors revert with a snackbar.
+  final Map<String, int> _optimistic = {};
+  int _seq = 0;
 
-  Future<void> _add(Map<String, dynamic> variant) async {
-    if (busy) return;
-    setState(() => busy = true);
-    final price = variantDisplayPrice(variant);
-    final qty = _qtyFor(variant);
-    final error = await appController.addToCart(
-      productId: widget.product['id'],
-      variantId: variant['id'],
-      qty: qty <= 0 ? 1 : qty,
-      productPrice: price.finalPrice,
-      sellerId: J.sellerId(widget.product),
-      storeName: appController.storeNameOf(widget.product),
-    );
-    if (!mounted) return;
-    setState(() => busy = false);
-    await handleCartAddResult(
-      context,
-      error: error,
-      product: widget.product,
-      variantId: variant['id'],
-      qty: qty <= 0 ? 1 : qty,
-      productPrice: price.finalPrice,
-    );
+  int _shownQty(Map<String, dynamic> variant) {
+    final key = '${variant['id']}';
+    if (_optimistic.containsKey(key)) return _optimistic[key]!;
+    return _qtyFor(variant);
+  }
+
+  Future<void> _setQty(
+    Map<String, dynamic> variant,
+    int next,
+    double unitPrice,
+  ) async {
+    final app = appController;
+    final key = '${variant['id']}';
+    final mySeq = ++_seq;
+    setState(() => _optimistic[key] = next);
+    try {
+      if (next <= 0) {
+        final err = await app.removeCartLine(
+          productId: widget.product['id'],
+          variantId: variant['id'],
+        );
+        if (mySeq != _seq || !mounted) return;
+        setState(() => _optimistic.remove(key));
+        if (err != null && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(err)),
+          );
+        }
+        return;
+      }
+      final err = await app.addToCart(
+        productId: widget.product['id'],
+        variantId: variant['id'],
+        qty: next,
+        productPrice: unitPrice,
+        sellerId: J.sellerId(widget.product),
+        storeName: appController.storeNameOf(widget.product),
+        variantLabel: AppController.variantLabelOf(variant, J.str(widget.product['name'])),
+      );
+      if (mySeq != _seq || !mounted) return;
+      if (err == 'same_seller' && mounted) {
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            content: Text(app.t('same_seller_cart_prompt')),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: Text(app.t('cancel')),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: Text(app.t('confirm')),
+              ),
+            ],
+          ),
+        );
+        if (ok == true && mounted) {
+          final retry = await app.addToCart(
+            productId: widget.product['id'],
+            variantId: variant['id'],
+            qty: next,
+            productPrice: unitPrice,
+            sellerId: J.sellerId(widget.product),
+            storeName: appController.storeNameOf(widget.product),
+            replaceSeller: true,
+            variantLabel: AppController.variantLabelOf(variant, J.str(widget.product['name'])),
+          );
+          if (mySeq != _seq || !mounted) return;
+          setState(() => _optimistic.remove(key));
+          if (retry != null && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(retry)),
+            );
+          }
+        } else if (mounted) {
+          setState(() => _optimistic.remove(key));
+        }
+        return;
+      }
+      if (err != null) {
+        if (!mounted) return;
+        setState(() => _optimistic.remove(key));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(err)),
+          );
+        }
+      } else {
+        // Silent success.
+        setState(() => _optimistic.remove(key));
+      }
+    } catch (_) {
+      if (mySeq != _seq || !mounted) return;
+      setState(() => _optimistic.remove(key));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(appController.t('network_error'))),
+      );
+    }
   }
 
   int _qtyFor(Map<String, dynamic> variant) {
@@ -253,12 +344,14 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
-                  onPressed: busy
-                      ? null
-                      : () => _add({
-                            'id': widget.product['product_variant_id'] ??
-                                widget.product['id'],
-                          }),
+                  onPressed: () => _setQty(
+                    {
+                      'id': widget.product['product_variant_id'] ??
+                          widget.product['id'],
+                    },
+                    1,
+                    0,
+                  ),
                   icon: const Icon(Icons.shopping_cart_outlined, size: 18),
                   label: Text(app.t('add_to_cart')),
                 ),
@@ -281,16 +374,20 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
                         variant['is_unlimited_stock'],
                   );
                   final out = !unlimited && stock <= 0;
-                  final qty = _qtyFor(variant);
-                  final label = [
-                    J.str(variant['measurement']),
-                    J.str(variant['stock_unit_name']),
-                  ].where((e) => e.isNotEmpty).join(' ');
+                  final qty = _shownQty(variant);
+                  final rowLabel = AppController.variantLabelOf(
+                    variant,
+                    J.str(widget.product['name']),
+                  );
+                  final label = rowLabel.isEmpty
+                      ? J.str(variant['name'] ??
+                          variant['id'])
+                      : rowLabel;
                   return Row(
                     children: [
                       Expanded(
                         child: Text(
-                          label.isEmpty ? J.str(variant['name'] ?? variant['id']) : label,
+                          label,
                           style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
                       ),
@@ -315,38 +412,23 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             IconButton(
-                              onPressed: busy
-                                  ? null
-                                  : () async {
-                                      if (qty <= 1) {
-                                        await app.removeCartLine(
-                                          productId: widget.product['id'],
-                                          variantId: variant['id'],
-                                        );
-                                      } else {
-                                        await app.addToCart(
-                                          productId: widget.product['id'],
-                                          variantId: variant['id'],
-                                          qty: qty - 1,
-                                          productPrice: price.finalPrice,
-                                          sellerId: J.sellerId(widget.product),
-                                          storeName: app.storeNameOf(widget.product),
-                                        );
-                                      }
-                                      if (mounted) setState(() {});
-                                    },
-                              icon: const Icon(Icons.remove_circle_outline),
+                              onPressed: () =>
+                                  _setQty(variant, qty - 1, price.finalPrice),
+                              icon:
+                                  const Icon(Icons.remove_circle_outline),
                             ),
                             Text('$qty'),
                             IconButton(
-                              onPressed: busy ? null : () => _add(variant),
+                              onPressed: () =>
+                                  _setQty(variant, qty + 1, price.finalPrice),
                               icon: const Icon(Icons.add_circle_outline),
                             ),
                           ],
                         )
                       else
                         FilledButton.tonal(
-                          onPressed: busy ? null : () => _add(variant),
+                          onPressed: () =>
+                              _setQty(variant, 1, price.finalPrice),
                           child: Text(app.t('add_to_cart')),
                         ),
                     ],

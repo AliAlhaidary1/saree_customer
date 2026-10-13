@@ -1042,16 +1042,16 @@ class _UnderlineTabs extends StatelessWidget {
                       color: active
                           ? AppTheme.accentOrange
                           : AppTheme.textSecondary,
-                      fontWeight: active ? FontWeight.w800 : FontWeight.w600,
-                      fontSize: 15,
+                      fontWeight: active ? FontWeight.w700 : FontWeight.w600,
+                      fontSize: 14,
                     ),
                   ),
                   const SizedBox(height: 6),
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 220),
                     curve: Curves.easeOut,
-                    height: active ? 5 : 0,
-                    width: active ? 56 : 0,
+                    height: 3,
+                    width: active ? 36 : 0,
                     decoration: BoxDecoration(
                       color: AppTheme.accentOrange,
                       borderRadius: BorderRadius.circular(3),

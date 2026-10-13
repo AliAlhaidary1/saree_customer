@@ -530,7 +530,10 @@ class _OrdersScreenState extends State<OrdersScreen>
           indicatorWeight: 3,
           labelColor: Colors.white,
           unselectedLabelColor: Colors.white70,
-          labelStyle: const TextStyle(fontWeight: FontWeight.w700),
+          labelStyle:
+              const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+          unselectedLabelStyle:
+              const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
           tabs: [
             Tab(text: app.t('active_orders')),
             Tab(text: app.t('previous_orders')),
@@ -1500,7 +1503,30 @@ class _WishlistScreenState extends State<WishlistScreen> {
   Widget build(BuildContext context) {
     final app = appController;
     return Scaffold(
-      appBar: AppBar(title: Text(app.t('wishlist'))),
+      appBar: AppBar(
+        title: Text(app.t('wishlist')),
+        actions: [
+          ListenableBuilder(
+            listenable: appController,
+            builder: (_, __) => IconButton(
+              onPressed: () => context.push('/cart'),
+              icon: Badge(
+                isLabelVisible: appController.cartCount > 0,
+                backgroundColor: AppTheme.accentOrange,
+                label: Text(
+                  '${appController.cartCount}',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: Colors.white,
+                  ),
+                ),
+                child: const Icon(Icons.shopping_cart_outlined),
+              ),
+              tooltip: appController.t('cart'),
+            ),
+          ),
+        ],
+      ),
       body: !app.isLoggedIn
           ? const LoginRequired()
           : loading

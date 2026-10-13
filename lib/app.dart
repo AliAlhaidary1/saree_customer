@@ -443,10 +443,9 @@ class AppShell extends StatelessWidget {
     return AppTheme.brandNameAr;
   }
 
-  /// Haraj & Orders render their own AppBar (title + actions), so the brand
-  /// header must not stack on top of them.
-  bool get _hasOwnAppBar =>
-      location == '/haraj' || location == '/orders';
+  /// Orders renders its own AppBar (title + actions), so the brand header
+  /// must not stack on top of it. Haraj now uses the shared brand header.
+  bool get _hasOwnAppBar => location == '/orders';
 
   @override
   Widget build(BuildContext context) {
@@ -502,8 +501,9 @@ class _Tab {
 /// The single page-aware search field (under the app header).
 /// Visible only on home + products; searches the page you are on.
 class _HeaderSearchBar extends StatefulWidget {
-  const _HeaderSearchBar({required this.onProducts});
+  const _HeaderSearchBar({required this.onProducts, this.onHaraj = false});
   final bool onProducts;
+  final bool onHaraj;
 
   @override
   State<_HeaderSearchBar> createState() => _HeaderSearchBarState();
@@ -524,6 +524,8 @@ class _HeaderSearchBarState extends State<_HeaderSearchBar> {
     final q = raw.trim();
     if (widget.onProducts) {
       headerSearch.submitProducts(q);
+    } else if (widget.onHaraj) {
+      headerSearch.submitHaraj(q);
     } else if (q.isNotEmpty) {
       context.push('/products?search=${Uri.encodeComponent(q)}');
     }
@@ -553,8 +555,8 @@ class _HeaderSearchBarState extends State<_HeaderSearchBar> {
               textInputAction: TextInputAction.search,
               onSubmitted: _submit,
               onChanged: (_) {
-                // Debounced live search while on the products page.
-                if (!widget.onProducts) return;
+                // Debounced live search while on the products/haraj page.
+                if (!widget.onProducts && !widget.onHaraj) return;
                 _deb?.cancel();
                 _deb = Timer(
                   const Duration(milliseconds: 450),
@@ -562,12 +564,20 @@ class _HeaderSearchBarState extends State<_HeaderSearchBar> {
                 );
               },
               decoration: InputDecoration(
-                hintText: app.t('i_am_looking_for'),
+                hintText: widget.onHaraj
+                    ? app.t('search_in_haraj')
+                    : app.t('i_am_looking_for'),
                 hintStyle: TextStyle(
                   color: AppTheme.textSecondary,
                   fontSize: 14,
                 ),
+                filled: false,
+                isDense: true,
+                contentPadding: EdgeInsets.zero,
                 border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                disabledBorder: InputBorder.none,
               ),
             ),
           ),
@@ -611,12 +621,16 @@ class _BrandHeader extends StatelessWidget {
   final String title;
   final String location;
 
-  /// Search exists only on searchable pages (home + products).
-  /// Cart/account/orders/checkout never show it — like the web header.
+  /// Search exists only on searchable pages (home, products, haraj).
+  /// Cart/account/orders never show it — like the web header.
   bool get _searchable =>
-      location == '/' || location.startsWith('/products');
+      location == '/' ||
+      location.startsWith('/products') ||
+      location == '/haraj';
 
   bool get _onProducts => location.startsWith('/products');
+
+  bool get _onHaraj => location == '/haraj';
 
   @override
   Widget build(BuildContext context) {
@@ -687,23 +701,27 @@ class _BrandHeader extends StatelessWidget {
                   ),
                   // Notification bell with unread count (parity with front Header)
                   const NotificationBell(),
-                  // Cart shortcut in the header.
-                  IconButton(
-                    onPressed: () => context.push('/cart'),
-                    icon: Badge(
-                      isLabelVisible: app.cartCount > 0,
-                      backgroundColor: AppTheme.accentOrange,
-                      label: Text(
-                        '${app.cartCount}',
-                        style: const TextStyle(
-                            fontSize: 10, color: Colors.white),
+                  // Cart shortcut in the header. Wrapped in its own listener
+                  // so the badge updates on every cart change.
+                  ListenableBuilder(
+                    listenable: app,
+                    builder: (_, __) => IconButton(
+                      onPressed: () => context.push('/cart'),
+                      icon: Badge(
+                        isLabelVisible: app.cartCount > 0,
+                        backgroundColor: AppTheme.accentOrange,
+                        label: Text(
+                          '${app.cartCount}',
+                          style: const TextStyle(
+                              fontSize: 10, color: Colors.white),
+                        ),
+                        child: const Icon(
+                          Icons.shopping_cart_outlined,
+                          color: AppTheme.backgroundWhite,
+                        ),
                       ),
-                      child: const Icon(
-                        Icons.shopping_cart_outlined,
-                        color: AppTheme.backgroundWhite,
-                      ),
+                      tooltip: app.t('cart'),
                     ),
-                    tooltip: app.t('cart'),
                   ),
                   // My-account lives here now (bottom bar hosts Akhdimni).
                   IconButton(
@@ -719,7 +737,8 @@ class _BrandHeader extends StatelessWidget {
               // Single page-aware search bar: only on home/products,
               // searching the page you are on.
               if (_searchable) const SizedBox(height: 10),
-              if (_searchable) _HeaderSearchBar(onProducts: _onProducts),
+              if (_searchable)
+                _HeaderSearchBar(onProducts: _onProducts, onHaraj: _onHaraj),
             ],
           ),
         ),

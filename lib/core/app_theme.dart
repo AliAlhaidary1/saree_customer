@@ -114,7 +114,7 @@ abstract final class AppTheme {
         style: FilledButton.styleFrom(
           backgroundColor: orange,
           foregroundColor: backgroundWhite,
-          minimumSize: const Size.fromHeight(48),
+          minimumSize: const Size(0, 48),
           elevation: 0,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
@@ -126,7 +126,7 @@ abstract final class AppTheme {
         style: ElevatedButton.styleFrom(
           backgroundColor: orange,
           foregroundColor: backgroundWhite,
-          minimumSize: const Size.fromHeight(48),
+          minimumSize: const Size(0, 48),
           elevation: 0,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),

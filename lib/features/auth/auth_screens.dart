@@ -219,7 +219,7 @@ class AuthFormCard extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: AppTheme.primaryNavy.withValues(alpha: 0.10),
         ),
@@ -298,7 +298,7 @@ class _LoginScreenState extends State<LoginScreen> {
       appBar: AppBar(
         backgroundColor: AppTheme.primaryNavy,
         foregroundColor: Colors.white,
-        centerTitle: true,
+        centerTitle: false,
         title: Text(
           app.t('login'),
           style: const TextStyle(
@@ -1143,7 +1143,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
         title: Text(app.t('register'), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-        centerTitle: true,
+        centerTitle: false,
       ),
       body: SafeArea(
         child: SingleChildScrollView(
@@ -1706,7 +1706,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
       appBar: AppBar(
         backgroundColor: AppTheme.primaryNavy,
         foregroundColor: Colors.white,
-        centerTitle: true,
+        centerTitle: false,
         title: Text(
           app.t('change_password'),
           style: const TextStyle(

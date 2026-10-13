@@ -5,8 +5,10 @@ import 'package:dio/dio.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/app_controller.dart';
+import '../../core/app_theme.dart';
 import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
+import '../../core/search_scope.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/ui_helpers.dart';
 
@@ -34,22 +36,35 @@ class _HarajListScreenState extends State<HarajListScreen> {
   @override
   void initState() {
     super.initState();
+    if (!widget.mine) {
+      headerSearch.addListener(_onHeaderSearch);
+      search.text = headerSearch.harajQuery;
+    }
     _load(reset: true);
   }
 
   @override
   void dispose() {
+    if (!widget.mine) headerSearch.removeListener(_onHeaderSearch);
     search.dispose();
     super.dispose();
   }
 
+  /// The shared header owns the search field on `/haraj` (like home).
+  void _onHeaderSearch() {
+    if (headerSearch.harajQuery == search.text) return;
+    search.text = headerSearch.harajQuery;
+    _load(reset: true);
+  }
+
   Map<String, dynamic> _params(int p) {
     final app = appController;
+    final currentCityId = app.city?['id'];
     return {
       'page': p,
       'per_page': 20,
-      if (cityFilter == 'current' && app.city?['id'] != null)
-        'city_id': app.city!['id'],
+      if (cityFilter == 'current' && currentCityId != null)
+        'city_id': currentCityId,
       if (cityFilter != 'current' && cityFilter != 'all')
         'city_id': cityFilter,
       if (categoryId != null) 'category_id': categoryId,
@@ -130,6 +145,313 @@ class _HarajListScreenState extends State<HarajListScreen> {
     _load(reset: true);
   }
 
+  /// Home-style grey band: search + circular category tiles + condition pills.
+  /// The city selector is intentionally hidden (always the current city).
+  Widget _topSection(AppController app) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+      padding: const EdgeInsets.only(top: 14, bottom: 14),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceGrey,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!widget.mine)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(start: 16, end: 12),
+              child: Row(
+                children: [
+                  _accentBar(20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      app.t('haraj'),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: AppTheme.textPrimary,
+                      ),
+                    ),
+                  ),
+                  FilledButton.icon(
+                    onPressed: () => app.isLoggedIn
+                        ? context.push('/haraj/create')
+                        : context.push(
+                            '/login?next=${Uri.encodeComponent('/haraj/create')}'),
+                    icon: const Icon(Icons.add, size: 18),
+                    label: Text(app.t('add_post')),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: AppTheme.accentOrange,
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size(0, 38),
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      textStyle: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (widget.mine)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: TextField(
+                controller: search,
+                onSubmitted: (_) => _load(reset: true),
+                decoration: InputDecoration(
+                  hintText: app.t('search_in_haraj'),
+                  prefixIcon:
+                      const Icon(Icons.search, color: AppTheme.accentOrange),
+                  filled: true,
+                  fillColor: AppTheme.backgroundWhite,
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(
+                      color: AppTheme.accentOrange,
+                      width: 1.5,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          const SizedBox(height: 16),
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 16, end: 8),
+            child: Row(
+              children: [
+                _accentBar(20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    app.t('categories').trim(),
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.textPrimary,
+                    ),
+                  ),
+                ),
+                if (_hasActiveFilters)
+                  TextButton.icon(
+                    onPressed: _clearFilters,
+                    icon: const Icon(Icons.restart_alt, size: 16),
+                    label: Text(app.t('haraj_clear_filters')),
+                    style: TextButton.styleFrom(
+                      foregroundColor: AppTheme.accentOrange,
+                      textStyle: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(height: 96, child: _categoryTiles(app)),
+          const SizedBox(height: 16),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: [
+                _accentBar(16),
+                const SizedBox(width: 8),
+                Text(
+                  app.t('haraj_condition'),
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _pill(app.t('all_conditions'), condition == null, () {
+                  setState(() => condition = null);
+                  _load(reset: true);
+                }),
+                _pill(app.t('condition_new'), condition == 'new', () {
+                  setState(() => condition = 'new');
+                  _load(reset: true);
+                }),
+                _pill(app.t('condition_like_new'), condition == 'like_new', () {
+                  setState(() => condition = 'like_new');
+                  _load(reset: true);
+                }),
+                _pill(app.t('condition_used'), condition == 'used', () {
+                  setState(() => condition = 'used');
+                  _load(reset: true);
+                }),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _accentBar(double height) {
+    return Container(
+      width: 4,
+      height: height,
+      decoration: BoxDecoration(
+        color: AppTheme.accentOrange,
+        borderRadius: BorderRadius.circular(2),
+      ),
+    );
+  }
+
+  Widget _categoryTiles(AppController app) {
+    return ListView.separated(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      scrollDirection: Axis.horizontal,
+      cacheExtent: 600,
+      itemCount: categories.length + 1,
+      separatorBuilder: (_, _) => const SizedBox(width: 14),
+      itemBuilder: (_, i) {
+        final isAll = i == 0;
+        final cat = isAll ? null : categories[i - 1];
+        final selected =
+            isAll ? categoryId == null : '$categoryId' == '${cat!['id']}';
+        return GestureDetector(
+          onTap: () {
+            setState(() => categoryId = isAll ? null : '${cat!['id']}');
+            _load(reset: true);
+          },
+          child: SizedBox(
+            width: 74,
+            child: Column(
+              children: [
+                Container(
+                  width: 62,
+                  height: 62,
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: selected
+                        ? AppTheme.accentOrange
+                        : AppTheme.backgroundWhite,
+                    border: Border.all(
+                      color: selected
+                          ? AppTheme.accentOrange
+                          : AppTheme.primaryNavy.withValues(alpha: 0.06),
+                      width: 1.5,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppTheme.primaryNavy.withValues(alpha: 0.06),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: isAll
+                      ? Icon(
+                          Icons.apps_rounded,
+                          size: 26,
+                          color: selected
+                              ? Colors.white
+                              : AppTheme.accentOrange,
+                        )
+                      : ClipOval(
+                          child: AppImage(
+                            J.str(cat!['image_url'] ?? cat['image']),
+                            placeholder: app.placeholder,
+                            thumb: true,
+                          ),
+                        ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  isAll ? app.t('all').trim() : _catName(cat!),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: selected
+                        ? AppTheme.accentOrange
+                        : AppTheme.textPrimary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _pill(String label, bool selected, VoidCallback onTap) {
+    return Material(
+      color: selected ? AppTheme.accentOrange : AppTheme.backgroundWhite,
+      borderRadius: BorderRadius.circular(999),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: selected
+                  ? AppTheme.accentOrange
+                  : AppTheme.primaryNavy.withValues(alpha: 0.10),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (selected)
+                const Padding(
+                  padding: EdgeInsetsDirectional.only(end: 5),
+                  child: Icon(
+                    Icons.check_rounded,
+                    size: 15,
+                    color: Colors.white,
+                  ),
+                ),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                  color: selected ? Colors.white : AppTheme.textPrimary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _deletePost(dynamic id) async {
     final app = appController;
     final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: Text(app.t('confirm_delete_post')), actions: [TextButton(onPressed: ()=>Navigator.pop(ctx,false), child: Text(app.t('cancel'))), FilledButton(onPressed: ()=>Navigator.pop(ctx,true), child: Text(app.t('delete')))]));
@@ -162,180 +484,92 @@ class _HarajListScreenState extends State<HarajListScreen> {
       );
     }
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.mine ? app.t('my_posts') : app.t('haraj')),
-        actions: [
-          if (!widget.mine)
-            IconButton(
-              onPressed: () => app.isLoggedIn
-                  ? context.push('/haraj/create')
-                  : context.push('/login?next=${Uri.encodeComponent('/haraj/create')}'),
-              icon: const Icon(Icons.add),
-            ),
-        ],
-      ),
-      body: Column(
-        children: [
+      // When opened from the shell (`/haraj`) the shared brand header is
+      // shown by AppShell (logo, cart, notifications, search) — like home.
+      // The "my posts" route is standalone, so it keeps its own AppBar.
+      appBar: widget.mine
+          ? AppBar(
+              title: Text(app.t('my_posts')),
+              actions: [
+                IconButton(
+                  onPressed: () => app.isLoggedIn
+                      ? context.push('/haraj/create')
+                      : context.push(
+                          '/login?next=${Uri.encodeComponent('/haraj/create')}'),
+                  icon: const Icon(Icons.add),
+                ),
+              ],
+            )
+          : null,
+      body: CustomScrollView(
+        slivers: [
           if (widget.mine)
-            Padding(
+            SliverPadding(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-              child: SegmentedButton<int>(
-                segments: [
-                  ButtonSegment(value: 0, label: Text(app.t('haraj_tab_all'))),
-                  ButtonSegment(value: 1, label: Text(app.t('haraj_tab_active'))),
-                  ButtonSegment(value: 2, label: Text(app.t('haraj_tab_sold'))),
-                ],
-                selected: {mineTab},
-                onSelectionChanged: (s) {
-                  setState(() => mineTab = s.first);
-                  _load(reset: true);
-                },
-              ),
-            ),
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: TextField(
-              controller: search,
-              onSubmitted: (_) => _load(reset: true),
-              decoration: InputDecoration(
-                hintText: app.t('search_in_haraj'),
-                prefixIcon: const Icon(Icons.search),
-              ),
-            ),
-          ),
-          SizedBox(
-            height: 40,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              children: [
-                ChoiceChip(
-                  label: Text(app.t('all')),
-                  selected: categoryId == null,
-                  onSelected: (_) {
-                    categoryId = null;
+              sliver: SliverToBoxAdapter(
+                child: SegmentedButton<int>(
+                  segments: [
+                    ButtonSegment(
+                        value: 0, label: Text(app.t('haraj_tab_all'))),
+                    ButtonSegment(
+                        value: 1, label: Text(app.t('haraj_tab_active'))),
+                    ButtonSegment(
+                        value: 2, label: Text(app.t('haraj_tab_sold'))),
+                  ],
+                  selected: {mineTab},
+                  onSelectionChanged: (s) {
+                    setState(() => mineTab = s.first);
                     _load(reset: true);
                   },
                 ),
-                ...categories.map(
-                  (cat) => Padding(
-                    padding: const EdgeInsetsDirectional.only(start: 8),
-                    child: ChoiceChip(
-                      label: Text(_catName(cat)),
-                      selected: '$categoryId' == '${cat['id']}',
-                      onSelected: (_) {
-                        categoryId = '${cat['id']}';
-                        _load(reset: true);
-                      },
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    initialValue: cityFilter,
-                    decoration: InputDecoration(labelText: app.t('haraj_city')),
-                    items: [
-                      DropdownMenuItem(
-                        value: 'current',
-                        child: Text(app.t('haraj_current_city')),
-                      ),
-                      DropdownMenuItem(
-                        value: 'all',
-                        child: Text(app.t('haraj_all_cities')),
-                      ),
-                      ...app.cities.map(
-                        (c) => DropdownMenuItem(
-                          value: '${c['id']}',
-                          child: Text(J.str(c['name'])),
-                        ),
-                      ),
-                    ],
-                    onChanged: (v) {
-                      if (v == null) return;
-                      setState(() => cityFilter = v);
-                      _load(reset: true);
-                    },
+          SliverToBoxAdapter(child: _topSection(app)),
+          if (loading)
+            const SliverFillRemaining(
+              hasScrollBody: false,
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (items.isEmpty)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: EmptyState(
+                icon: Icons.campaign_outlined,
+                message: widget.mine
+                    ? app.t('haraj_my_posts_hint')
+                    : app.t('no_haraj_posts'),
+                actionLabel: app.isLoggedIn ? app.t('new_haraj') : null,
+                onAction: app.isLoggedIn
+                    ? () => context.push('/haraj/create')
+                    : null,
+              ),
+            )
+          else
+            SliverLayoutBuilder(builder: (ctx, c) {
+              final count = c.crossAxisExtent >= 900
+                  ? 4
+                  : c.crossAxisExtent >= 600
+                      ? 3
+                      : 2;
+              return SliverPadding(
+                padding: const EdgeInsets.all(12),
+                sliver: SliverGrid(
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: count,
+                    mainAxisSpacing: 10,
+                    crossAxisSpacing: 10,
+                    childAspectRatio: 0.68,
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    initialValue: condition,
-                    decoration:
-                        InputDecoration(labelText: app.t('haraj_condition')),
-                    items: [
-                      DropdownMenuItem(
-                        value: null,
-                        child: Text(app.t('all_conditions')),
-                      ),
-                      DropdownMenuItem(
-                        value: 'new',
-                        child: Text(app.t('condition_new')),
-                      ),
-                      DropdownMenuItem(
-                        value: 'like_new',
-                        child: Text(app.t('condition_like_new')),
-                      ),
-                      DropdownMenuItem(
-                        value: 'used',
-                        child: Text(app.t('condition_used')),
-                      ),
-                    ],
-                    onChanged: (v) {
-                      setState(() => condition = v);
-                      _load(reset: true);
-                    },
-                  ),
-                ),
-                if (_hasActiveFilters)
-                  TextButton(
-                    onPressed: _clearFilters,
-                    child: Text(app.t('haraj_clear_filters')),
-                  ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: loading
-                ? const Center(child: CircularProgressIndicator())
-                : items.isEmpty
-                ? EmptyState(
-                    icon: Icons.campaign_outlined,
-                    message: widget.mine
-                        ? app.t('haraj_my_posts_hint')
-                        : app.t('no_haraj_posts'),
-                    actionLabel: app.isLoggedIn ? app.t('new_haraj') : null,
-                    onAction: app.isLoggedIn
-                        ? () => context.push('/haraj/create')
-                        : null,
-                  )
-                : LayoutBuilder(builder: (ctx, c){
-                    final count = c.maxWidth >= 900 ? 4 : c.maxWidth >= 600 ? 3 : 2;
-                    return GridView.builder(
-                    padding: const EdgeInsets.all(12),
-                    gridDelegate:
-                        SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: count,
-                          mainAxisSpacing: 10,
-                          crossAxisSpacing: 10,
-                          childAspectRatio: 0.68,
-                        ),
-                    itemCount: items.length + (page < lastPage ? 1 : 0),
-                    itemBuilder: (_, i) {
+                  delegate: SliverChildBuilderDelegate(
+                    (_, i) {
                       if (i >= items.length) {
                         if (!loadingMore) {
                           WidgetsBinding.instance.addPostFrameCallback((_) {
                             if (mounted) _loadMore();
                           });
                         }
-                        return const Center(child: CircularProgressIndicator());
+                        return const Center(
+                            child: CircularProgressIndicator());
                       }
                       final post = items[i];
                       final sold = '${post['status']}' == '2';
@@ -417,9 +651,12 @@ class _HarajListScreenState extends State<HarajListScreen> {
                             ),
                             Text(
                               [
-                                J.str(post['city'] ?? post['cityRef']?['name'] ?? post['city_ref']?['name']),
+                                J.str(post['city'] ??
+                                    post['cityRef']?['name'] ??
+                                    post['city_ref']?['name']),
                                 _catNameOf(post),
-                                timeAgo(J.str(post['created_at'] ?? post['date'])),
+                                timeAgo(J.str(
+                                    post['created_at'] ?? post['date'])),
                               ].where((p) => p.isNotEmpty).join(' • '),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -428,31 +665,34 @@ class _HarajListScreenState extends State<HarajListScreen> {
                             ),
                             if (widget.mine)
                               Row(
-                              children: [
-                                IconButton(
-                                    icon: const Icon(Icons.edit, size: 16),
-                                    tooltip: app.t('edit'),
-                                    onPressed: () => context.push(
-                                        '/haraj/edit/${post['id']}')),
-                                IconButton(
-                                    icon: const Icon(Icons.delete, size: 16),
-                                    tooltip: app.t('delete'),
-                                    onPressed: () =>
-                                        _deletePost(post['id'])),
-                                if (!sold)
+                                children: [
                                   IconButton(
-                                      icon: const Icon(Icons.check, size: 16),
-                                      tooltip: app.t('mark_as_sold'),
+                                      icon: const Icon(Icons.edit, size: 16),
+                                      tooltip: app.t('edit'),
+                                      onPressed: () => context.push(
+                                          '/haraj/edit/${post['id']}')),
+                                  IconButton(
+                                      icon: const Icon(Icons.delete, size: 16),
+                                      tooltip: app.t('delete'),
                                       onPressed: () =>
-                                          _markSold(post['id'])),
-                              ],
-                            ),
+                                          _deletePost(post['id'])),
+                                  if (!sold)
+                                    IconButton(
+                                        icon: const Icon(Icons.check, size: 16),
+                                        tooltip: app.t('mark_as_sold'),
+                                        onPressed: () =>
+                                            _markSold(post['id'])),
+                                ],
+                              ),
                           ],
                         ),
                       );
                     },
-                  );}),
-          ),
+                    childCount: items.length + (page < lastPage ? 1 : 0),
+                  ),
+                ),
+              );
+            }),
         ],
       ),
     );
