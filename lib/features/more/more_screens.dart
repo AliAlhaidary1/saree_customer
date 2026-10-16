@@ -10,6 +10,7 @@ import '../../core/device_location.dart';
 import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
+import '../../widgets/offline_banner.dart';
 import '../../widgets/product_card.dart';
 import '../../widgets/product_variant_sheet.dart';
 import '../../core/app_theme.dart';
@@ -38,6 +39,10 @@ class _SellersScreenState extends State<SellersScreen> {
   int total = 0;
   int offset = 0;
   static const _limit = 24;
+  bool _servedFromCache = false;
+  // Generation counter: search/type/sort changes and load-more races must
+  // never let a stale response overwrite newer results or corrupt offsets.
+  int _seq = 0;
   ({double latitude, double longitude}) origin = (latitude: 0, longitude: 0);
   final _searchC = TextEditingController();
   Timer? _searchDeb;
@@ -65,6 +70,21 @@ class _SellersScreenState extends State<SellersScreen> {
     }
   }
 
+  /// Location resolution must never break the list: a failing provider
+  /// (or a test environment without platform plugins) falls back to the
+  /// controller's browse coordinates. The lookup is additionally bounded:
+  /// a wedged provider that never answers must not hold the list hostage.
+  Future<({double latitude, double longitude})?> _devicePoint() async {
+    try {
+      return await currentDevicePoint().timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => null,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   double? _distanceKm(Map<String, dynamic> seller) {
     final stored = seller['distance'];
     if (stored != null) {
@@ -84,16 +104,47 @@ class _SellersScreenState extends State<SellersScreen> {
         1000;
   }
 
+  List<Map<String, dynamic>> _applyLocalSearch(
+    List<Map<String, dynamic>> rows,
+  ) {
+    final q = search.trim().toLowerCase();
+    if (q.isEmpty) return rows;
+    return rows.where((s) {
+      final name = J.str(s['name'] ?? s['store_name']).toLowerCase();
+      return name.contains(q);
+    }).toList();
+  }
+
   /// Parity with front ShopBySellersPage + useShopBySellers:
   /// GET /sellers?lat,lng,limit=24,offset,sort,search,type — total displayed.
   Future<void> _load({bool more = false}) async {
+    if (more && loadingMore) return;
+    // Resets start a new generation (cancelling in-flight continuations);
+    // load-more joins the current generation so a concurrent reset drops it.
+    final mySeq = more ? _seq : ++_seq;
     if (more) {
-      if (loadingMore) return;
       setState(() => loadingMore = true);
     } else {
       setState(() => loading = true);
+      // Local-first: synchronized stores paint instantly offline.
+      final local = await appController.catalogStoresLocal(limit: _limit);
+      if (!mounted) return;
+      if (mySeq != _seq) {
+        // Superseded (only possible for load-more vs a newer reset): release
+        // the spinner so a fresh continuation can fire.
+        if (more) setState(() => loadingMore = false);
+        return;
+      }
+      if (local.isNotEmpty) {
+        setState(() {
+          items = _applyLocalSearch(local);
+          total = items.length;
+          loading = false;
+          _servedFromCache = true;
+        });
+      }
     }
-    final device = await currentDevicePoint();
+    final device = await _devicePoint();
     origin = device ?? appController.browseCoords;
     // Front falls back to rating sort when no precise address/GPS.
     var effectiveSort = sort;
@@ -112,6 +163,42 @@ class _SellersScreenState extends State<SellersScreen> {
       minRating: minRating > 0 ? minRating : null,
     );
     if (!mounted) return;
+    if (mySeq != _seq) {
+      if (more) setState(() => loadingMore = false);
+      return;
+    }
+    if (!res.ok) {
+      // Refresh failed: fall back to the synchronized store catalog, then
+      // keep existing rows instead of clearing them.
+      final local = await appController.catalogStoresLocal(
+        limit: _limit,
+        offset: more ? items.length : 0,
+      );
+      if (!mounted) return;
+      if (mySeq != _seq) {
+        if (more) setState(() => loadingMore = false);
+        return;
+      }
+      final filtered = _applyLocalSearch(local);
+      if (!mounted) return;
+      if (mySeq != _seq) {
+        if (more) setState(() => loadingMore = false);
+        return;
+      }
+      setState(() {
+        if (filtered.isNotEmpty) {
+          items = more && search.trim().isEmpty
+              ? J.appendUnique(items, filtered)
+              : filtered;
+          total = items.length;
+          _servedFromCache = true;
+        }
+        loading = false;
+        loadingMore = false;
+      });
+      return;
+    }
+    _servedFromCache = false;
     var rows = res.dataMaps;
     var serverTotal = J.i(res.raw['total'] ?? res.dataMap['total']);
     final dataNode = res.raw['data'];
@@ -121,7 +208,7 @@ class _SellersScreenState extends State<SellersScreen> {
     }
     setState(() {
       offset = nextOffset;
-      items = more ? [...items, ...rows] : rows;
+      items = more ? J.appendUnique(items, rows) : rows;
       total = serverTotal > 0 ? serverTotal : items.length;
       loading = false;
       loadingMore = false;
@@ -147,11 +234,11 @@ class _SellersScreenState extends State<SellersScreen> {
   }
 
   int get _activeFilterCount => [
-        selectedType?.isNotEmpty == true,
-        search.isNotEmpty,
-        sort != 'nearest' && sort.isNotEmpty,
-        minRating > 0,
-      ].where((e) => e).length;
+    selectedType?.isNotEmpty == true,
+    search.isNotEmpty,
+    sort != 'nearest' && sort.isNotEmpty,
+    minRating > 0,
+  ].where((e) => e).length;
 
   String _sortLabel(AppController app) {
     switch (sort) {
@@ -442,7 +529,9 @@ class _SellersScreenState extends State<SellersScreen> {
                       Icons.arrow_back,
                       color: AppTheme.backgroundWhite,
                     ),
-                    tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+                    tooltip: MaterialLocalizations.of(
+                      context,
+                    ).backButtonTooltip,
                   ),
                   Container(
                     padding: const EdgeInsets.all(4),
@@ -456,7 +545,7 @@ class _SellersScreenState extends State<SellersScreen> {
                         'assets/brand/sareemart-logo.png',
                         width: 32,
                         height: 32,
-                        errorBuilder: (_, __, ___) => const Icon(
+                        errorBuilder: (_, _, _) => const Icon(
                           Icons.shopping_cart_rounded,
                           color: AppTheme.accentOrange,
                           size: 26,
@@ -495,7 +584,7 @@ class _SellersScreenState extends State<SellersScreen> {
                   ),
                   ListenableBuilder(
                     listenable: app,
-                    builder: (_, __) => IconButton(
+                    builder: (_, _) => IconButton(
                       onPressed: () => context.push('/cart'),
                       icon: Badge(
                         isLabelVisible: app.cartCount > 0,
@@ -615,10 +704,11 @@ class _SellersScreenState extends State<SellersScreen> {
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color: (selected
-                                ? AppTheme.accentOrange
-                                : AppTheme.primaryNavy)
-                            .withValues(alpha: selected ? 0.25 : 0.07),
+                        color:
+                            (selected
+                                    ? AppTheme.accentOrange
+                                    : AppTheme.primaryNavy)
+                                .withValues(alpha: selected ? 0.25 : 0.07),
                         blurRadius: 10,
                         offset: const Offset(0, 3),
                       ),
@@ -637,18 +727,18 @@ class _SellersScreenState extends State<SellersScreen> {
                             ),
                           )
                         : (imageUrl != null && imageUrl.isNotEmpty
-                            ? AppImage(
-                                imageUrl,
-                                placeholder: appController.placeholder,
-                                thumb: true,
-                              )
-                            : Container(
-                                color: AppTheme.surfaceGrey,
-                                child: const Icon(
-                                  Icons.store_outlined,
-                                  color: AppTheme.textSecondary,
-                                ),
-                              )),
+                              ? AppImage(
+                                  imageUrl,
+                                  placeholder: appController.placeholder,
+                                  thumb: true,
+                                )
+                              : Container(
+                                  color: AppTheme.surfaceGrey,
+                                  child: const Icon(
+                                    Icons.store_outlined,
+                                    color: AppTheme.textSecondary,
+                                  ),
+                                )),
                   ),
                 ),
                 if (selected)
@@ -682,9 +772,7 @@ class _SellersScreenState extends State<SellersScreen> {
                 fontSize: 11.5,
                 height: 1.2,
                 fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
-                color: selected
-                    ? AppTheme.accentOrange
-                    : AppTheme.textPrimary,
+                color: selected ? AppTheme.accentOrange : AppTheme.textPrimary,
               ),
             ),
           ],
@@ -693,10 +781,7 @@ class _SellersScreenState extends State<SellersScreen> {
     );
   }
 
-  Widget _buildFilterBar(
-    AppController app,
-    List<Map<String, dynamic>> types,
-  ) {
+  Widget _buildFilterBar(AppController app, List<Map<String, dynamic>> types) {
     final typeName = _selectedTypeName(types);
     final chips = <Widget>[];
     if (typeName != null) {
@@ -828,11 +913,7 @@ class _SellersScreenState extends State<SellersScreen> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(
-                              Icons.tune,
-                              size: 17,
-                              color: Colors.white,
-                            ),
+                            Icon(Icons.tune, size: 17, color: Colors.white),
                             SizedBox(width: 4),
                           ],
                         ),
@@ -851,10 +932,7 @@ class _SellersScreenState extends State<SellersScreen> {
                         decoration: BoxDecoration(
                           color: AppTheme.primaryNavy,
                           borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: Colors.white,
-                            width: 1.5,
-                          ),
+                          border: Border.all(color: Colors.white, width: 1.5),
                         ),
                         child: Text(
                           '$_activeFilterCount',
@@ -904,13 +982,16 @@ class _SellersScreenState extends State<SellersScreen> {
     required VoidCallback onDeleted,
   }) {
     return Container(
-      padding: const EdgeInsetsDirectional.only(start: 10, end: 6, top: 6, bottom: 6),
+      padding: const EdgeInsetsDirectional.only(
+        start: 10,
+        end: 6,
+        top: 6,
+        bottom: 6,
+      ),
       decoration: BoxDecoration(
         color: AppTheme.accentOrange.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: AppTheme.accentOrange.withValues(alpha: 0.3),
-        ),
+        border: Border.all(color: AppTheme.accentOrange.withValues(alpha: 0.3)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -972,13 +1053,25 @@ class _SellersScreenState extends State<SellersScreen> {
                 ? ListView.separated(
                     padding: const EdgeInsets.all(16),
                     itemCount: 6,
-                    separatorBuilder: (_, __) => const SizedBox(height: 10),
-                    itemBuilder: (_, __) => const SellerCardSkeleton(),
+                    separatorBuilder: (_, _) => const SizedBox(height: 10),
+                    itemBuilder: (_, _) => const SellerCardSkeleton(),
                   )
-                : RefreshIndicator(
-                    onRefresh: () => _load(),
-                    child: CustomScrollView(
-                      slivers: [
+                : NotificationListener<ScrollNotification>(
+                    onNotification: (n) {
+                      if (n.metrics.pixels >
+                              n.metrics.maxScrollExtent - 400 &&
+                          !loadingMore &&
+                          !loading &&
+                          total > visible.length &&
+                          visible.isNotEmpty) {
+                        _load(more: true);
+                      }
+                      return false;
+                    },
+                    child: RefreshIndicator(
+                      onRefresh: () => _load(),
+                      child: CustomScrollView(
+                        slivers: [
                         if (types.isNotEmpty)
                           SliverToBoxAdapter(
                             child: Container(
@@ -1005,13 +1098,13 @@ class _SellersScreenState extends State<SellersScreen> {
                                   ),
                                   scrollDirection: Axis.horizontal,
                                   itemCount: types.length + 1,
-                                  separatorBuilder: (_, __) =>
+                                  separatorBuilder: (_, _) =>
                                       const SizedBox(width: 10),
                                   itemBuilder: (_, i) {
                                     if (i == 0) {
                                       final selected =
                                           selectedType == null ||
-                                              selectedType!.isEmpty;
+                                          selectedType!.isEmpty;
                                       return _typeCard(
                                         selected: selected,
                                         isAll: true,
@@ -1036,8 +1129,9 @@ class _SellersScreenState extends State<SellersScreen> {
                               ),
                             ),
                           ),
+                        SliverToBoxAdapter(child: _buildFilterBar(app, types)),
                         SliverToBoxAdapter(
-                          child: _buildFilterBar(app, types),
+                          child: OfflineBanner(stale: _servedFromCache),
                         ),
                         if (visible.isEmpty)
                           SliverFillRemaining(
@@ -1053,24 +1147,33 @@ class _SellersScreenState extends State<SellersScreen> {
                             padding: const EdgeInsets.all(12),
                             sliver: SliverList.separated(
                               itemCount:
-                                  visible.length + (total > visible.length ? 1 : 0),
-                              separatorBuilder: (_, __) =>
+                                  visible.length +
+                                  (total > visible.length ? 1 : 0),
+                              separatorBuilder: (_, _) =>
                                   const SizedBox(height: 10),
                               itemBuilder: (_, i) {
                                 if (i >= visible.length) {
-                                  return OutlinedButton(
-                                    onPressed: loadingMore
-                                        ? null
-                                        : () => _load(more: true),
-                                    child: loadingMore
-                                        ? const SizedBox(
-                                            width: 18,
-                                            height: 18,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
-                                            ),
-                                          )
-                                        : Text(app.t('load_more')),
+                                  if (!loadingMore) {
+                                    WidgetsBinding.instance
+                                        .addPostFrameCallback((_) {
+                                      if (mounted &&
+                                          !loadingMore &&
+                                          total > visible.length) {
+                                        _load(more: true);
+                                      }
+                                    });
+                                  }
+                                  return const Center(
+                                    child: Padding(
+                                      padding: EdgeInsets.all(12),
+                                      child: SizedBox(
+                                        width: 22,
+                                        height: 22,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      ),
+                                    ),
                                   );
                                 }
                                 final seller = visible[i];
@@ -1091,6 +1194,7 @@ class _SellersScreenState extends State<SellersScreen> {
                             ),
                           ),
                       ],
+                      ),
                     ),
                   ),
           ),
@@ -1120,13 +1224,35 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
     _load();
   }
 
+  bool _servedFromCache = false;
+
   Future<void> _load() async {
+    // Local-first: synchronized store header paints offline. Sections below
+    // load their products from the local catalog when available.
+    final local = await appController.catalogStoreLocal(
+      id: int.tryParse(widget.id ?? ''),
+      slug: widget.slug ?? '',
+    );
+    if (local != null && mounted) {
+      setState(() {
+        seller = local;
+        loading = false;
+        _servedFromCache = true;
+      });
+    }
     final result = widget.slug != null
         ? await appController.api.sellerBySlug(widget.slug!)
         : await appController.api.sellerById('${widget.id}');
     if (!mounted) return;
     setState(() {
-      seller = result.dataMap;
+      if (result.ok && result.dataMap.isNotEmpty) {
+        seller = result.dataMap;
+        _servedFromCache = false;
+      } else if (seller == null || seller!.isEmpty) {
+        seller = result.dataMap;
+      } else {
+        _servedFromCache = true;
+      }
       loading = false;
     });
   }
@@ -1154,26 +1280,34 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
     }
     final id = '${seller?['id'] ?? widget.id}';
     final sections = J.maps(seller?['sections']);
-    final cover = J.str(seller?['cover_url'] ?? seller?['cover'] ?? seller?['banner_url']);
+    final cover = J.str(
+      seller?['cover_url'] ?? seller?['cover'] ?? seller?['banner_url'],
+    );
     final avg = double.tryParse(
-        '${seller?['average_rating'] ?? seller?['rating'] ?? ''}');
-    final ratingCount =
-        J.str(seller?['rating_count'] ?? seller?['ratings_count']);
+      '${seller?['average_rating'] ?? seller?['rating'] ?? ''}',
+    );
+    final ratingCount = J.str(
+      seller?['rating_count'] ?? seller?['ratings_count'],
+    );
     final productCount = J.str(seller?['product_count']);
     final hours = BusinessHoursSlot.from(
-        seller?['business_hours'] ?? seller?['seller_business_hours']);
-    final closedByFlag = seller?['seller_is_open'] == false ||
+      seller?['business_hours'] ?? seller?['seller_business_hours'],
+    );
+    final closedByFlag =
+        seller?['seller_is_open'] == false ||
         seller?['seller_is_open'] == 0 ||
         seller?['seller_is_open'] == '0' ||
         seller?['is_open'] == false ||
         seller?['is_open'] == 0 ||
         seller?['is_open'] == '0';
-    final isClosed = (hours != null && !hours.isOpen) || (hours == null && closedByFlag);
+    final isClosed =
+        (hours != null && !hours.isOpen) || (hours == null && closedByFlag);
     final storeName = J.str(seller?['store_name'] ?? seller?['name']);
     final storeDesc = J.str(
       seller?['store_description'] ?? seller?['description'],
     );
-    final hasDelivery = J.flag(seller?['delivery']) ||
+    final hasDelivery =
+        J.flag(seller?['delivery']) ||
         J.str(seller?['delivery_type']).isNotEmpty ||
         J.flag(seller?['can_deliver']);
     return Scaffold(
@@ -1183,17 +1317,14 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
         actions: [
           ListenableBuilder(
             listenable: appController,
-            builder: (_, __) => IconButton(
+            builder: (_, _) => IconButton(
               onPressed: () => context.push('/cart'),
               icon: Badge(
                 isLabelVisible: appController.cartCount > 0,
                 backgroundColor: AppTheme.accentOrange,
                 label: Text(
                   '${appController.cartCount}',
-                  style: const TextStyle(
-                    fontSize: 10,
-                    color: Colors.white,
-                  ),
+                  style: const TextStyle(fontSize: 10, color: Colors.white),
                 ),
                 child: const Icon(Icons.shopping_cart_outlined),
               ),
@@ -1204,6 +1335,7 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
       ),
       body: Column(
         children: [
+          OfflineBanner(stale: _servedFromCache),
           // ---- Premium store header: cover + overlapping info card ----
           Stack(
             clipBehavior: Clip.none,
@@ -1213,10 +1345,7 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
                 width: double.infinity,
                 color: AppTheme.primaryNavy,
                 child: cover.isNotEmpty
-                    ? AppImage(
-                        cover,
-                        placeholder: appController.placeholder,
-                      )
+                    ? AppImage(cover, placeholder: appController.placeholder)
                     : Container(
                         decoration: BoxDecoration(
                           gradient: LinearGradient(
@@ -1350,9 +1479,7 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
                                   width: 8,
                                   height: 8,
                                   decoration: BoxDecoration(
-                                    color: isClosed
-                                        ? Colors.red
-                                        : Colors.green,
+                                    color: isClosed ? Colors.red : Colors.green,
                                     shape: BoxShape.circle,
                                   ),
                                 ),
@@ -1477,10 +1604,7 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
             Container(
               width: double.infinity,
               margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              padding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 9,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
               decoration: BoxDecoration(
                 color: Colors.red.shade50,
                 borderRadius: BorderRadius.circular(12),
@@ -1488,11 +1612,7 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
               ),
               child: Row(
                 children: [
-                  Icon(
-                    Icons.schedule,
-                    size: 15,
-                    color: Colors.red.shade700,
-                  ),
+                  Icon(Icons.schedule, size: 15, color: Colors.red.shade700),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -1524,18 +1644,14 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
                 ],
                 selectedIndex: sectionId == null
                     ? 0
-                    : (sections.indexWhere(
-                              (s) => '${s['id']}' == sectionId,
-                            ) +
-                        1),
+                    : (sections.indexWhere((s) => '${s['id']}' == sectionId) +
+                          1),
                 onChanged: (i) {
                   if (i == 0) {
                     setState(() => sectionId = null);
                   } else {
                     final sid = '${sections[i - 1]['id']}';
-                    setState(
-                      () => sectionId = sectionId == sid ? null : sid,
-                    );
+                    setState(() => sectionId = sectionId == sid ? null : sid);
                   }
                 },
               ),
@@ -1568,6 +1684,7 @@ class _OffersScreenState extends State<OffersScreen> {
   List<Map<String, dynamic>> offers = [];
   Map<String, dynamic> campaigns = {};
   bool loading = true;
+  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -1576,6 +1693,18 @@ class _OffersScreenState extends State<OffersScreen> {
   }
 
   Future<void> _load() async {
+    // Local-first: last offers/campaigns snapshot paints offline.
+    final snap = appController.readPublicSnapshot('offers_page') as Map?;
+    if (snap != null && mounted) {
+      final m = J.map(snap);
+      setState(() {
+        flash = J.maps(m['flash']);
+        offers = J.maps(m['offers']);
+        campaigns = J.map(m['campaigns']);
+        loading = false;
+        _servedFromCache = true;
+      });
+    }
     final point = appController.browseCoords;
     final f = await appController.api.flashSales();
     final o = await appController.api.productsOffers(
@@ -1585,12 +1714,23 @@ class _OffersScreenState extends State<OffersScreen> {
     );
     final c = await appController.api.campaigns();
     if (!mounted) return;
-    setState(() {
-      flash = f.dataMaps;
-      offers = o.dataMaps;
-      campaigns = c.dataMap;
-      loading = false;
-    });
+    if (f.ok || o.ok || c.ok) {
+      final next = {
+        'flash': f.ok ? f.dataMaps : flash,
+        'offers': o.ok ? o.dataMaps : offers,
+        'campaigns': c.ok ? c.dataMap : campaigns,
+      };
+      await appController.cachePublicSnapshot('offers_page', next);
+      setState(() {
+        flash = J.maps(next['flash']);
+        offers = J.maps(next['offers']);
+        campaigns = J.map(next['campaigns']);
+        loading = false;
+        _servedFromCache = false;
+      });
+    } else if (mounted) {
+      setState(() => loading = flash.isEmpty && offers.isEmpty);
+    }
   }
 
   @override
@@ -1610,17 +1750,14 @@ class _OffersScreenState extends State<OffersScreen> {
         actions: [
           ListenableBuilder(
             listenable: appController,
-            builder: (_, __) => IconButton(
+            builder: (_, _) => IconButton(
               onPressed: () => context.push('/cart'),
               icon: Badge(
                 isLabelVisible: appController.cartCount > 0,
                 backgroundColor: AppTheme.accentOrange,
                 label: Text(
                   '${appController.cartCount}',
-                  style: const TextStyle(
-                    fontSize: 10,
-                    color: Colors.white,
-                  ),
+                  style: const TextStyle(fontSize: 10, color: Colors.white),
                 ),
                 child: const Icon(Icons.shopping_cart_outlined),
               ),
@@ -1634,6 +1771,7 @@ class _OffersScreenState extends State<OffersScreen> {
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
+                OfflineBanner(stale: _servedFromCache),
                 if (categoryCards.isNotEmpty ||
                     bxgyCards.isNotEmpty ||
                     promoCards.isNotEmpty ||
@@ -1653,9 +1791,8 @@ class _OffersScreenState extends State<OffersScreen> {
                       subtitle: Text(
                         '${item['discount']}${J.str(item['discount_type']) == 'percentage' ? '%' : ''}',
                       ),
-                      onTap: () => context.push(
-                        '/sellers?type=${item['category_id']}',
-                      ),
+                      onTap: () =>
+                          context.push('/sellers?type=${item['category_id']}'),
                     ),
                   ),
                 ),
@@ -1710,28 +1847,34 @@ class _OffersScreenState extends State<OffersScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  LayoutBuilder(builder: (ctx,c){
-                    final count = c.maxWidth >= 900 ? 4 : c.maxWidth >= 600 ? 3 : 2;
-                    return GridView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    gridDelegate:
-                        SliverGridDelegateWithFixedCrossAxisCount(
+                  LayoutBuilder(
+                    builder: (ctx, c) {
+                      final count = c.maxWidth >= 900
+                          ? 4
+                          : c.maxWidth >= 600
+                          ? 3
+                          : 2;
+                      return GridView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: count,
                           mainAxisSpacing: 12,
                           crossAxisSpacing: 12,
                           childAspectRatio: count > 2 ? 0.6 : 0.55,
                         ),
-                    itemCount: products.length,
-                    itemBuilder: (_, i) => ProductCard(
-                      product: products[i],
-                      onTap: () => context.push(
-                        '/product/${products[i]['slug'] ?? products[i]['id']}',
-                      ),
-                      onAdd: () =>
-                          addProductFromCatalog(context, products[i]),
-                    ),
-                  );}),
+                        itemCount: products.length,
+                        itemBuilder: (_, i) => ProductCard(
+                          product: products[i],
+                          onTap: () => context.push(
+                            '/product/${products[i]['slug'] ?? products[i]['id']}',
+                          ),
+                          onAdd: () =>
+                              addProductFromCatalog(context, products[i]),
+                        ),
+                      );
+                    },
+                  ),
                 ],
               ],
             ),
@@ -1758,7 +1901,18 @@ class _SearchScreenState extends State<SearchScreen> {
     super.dispose();
   }
 
+  bool _servedFromCache = false;
+
+  /// False when the last search never reached the server (offline). Used to
+  /// distinguish "no results" from "not synchronized yet".
+  bool _lastSearchOk = true;
+
+  /// Generation counter: rapid successive submits must never let an older
+  /// query's late response overwrite the latest query's results.
+  int _seq = 0;
+
   Future<void> _search(String q) async {
+    final mySeq = ++_seq;
     if (q.trim().isEmpty) {
       setState(() {
         items = [];
@@ -1767,18 +1921,47 @@ class _SearchScreenState extends State<SearchScreen> {
       return;
     }
     setState(() => loading = true);
+    // Local FTS first: instant offline results over synchronized rows.
+    final local = await appController.catalogProductsLocal(
+      search: q.trim(),
+      limit: 20,
+    );
+    if (local.isNotEmpty && mounted && mySeq == _seq) {
+      setState(() {
+        items = local;
+        searched = true;
+        loading = false;
+        _servedFromCache = true;
+      });
+    }
     final point = appController.browseCoords;
     final result = await appController.api.products(
       latitude: point.latitude,
       longitude: point.longitude,
       filters: {'search': q, 'limit': 20, 'offset': 0},
     );
-    if (!mounted) return;
-    setState(() {
-      items = result.dataMaps;
-      searched = true;
-      loading = false;
-    });
+    if (!mounted || mySeq != _seq) return;
+    if (result.ok) {
+      setState(() {
+        items = result.dataMaps;
+        searched = true;
+        loading = false;
+        _servedFromCache = false;
+        _lastSearchOk = true;
+      });
+      await appController.addRecentSearch(q);
+    } else if (local.isEmpty) {
+      // Offline with nothing synchronized: keep the "not synced" state.
+      setState(() {
+        items = [];
+        searched = true;
+        loading = false;
+        _servedFromCache = false;
+        _lastSearchOk = false;
+      });
+    } else {
+      setState(() => _lastSearchOk = false);
+    }
   }
 
   @override
@@ -1799,11 +1982,18 @@ class _SearchScreenState extends State<SearchScreen> {
       body: loading
           ? const Center(child: CircularProgressIndicator())
           : !searched
-          ? EmptyState(icon: Icons.search, message: app.t('search'))
+          ? _RecentSearches(onTap: _search)
           : items.isEmpty
-          ? EmptyState(message: app.t('no_search_results'))
+          ? EmptyState(
+              message: app.t(
+                _lastSearchOk ? 'no_search_results' : 'not_synced_yet',
+              ),
+              actionLabel: app.t('retry'),
+              onAction: () => _search(controller.text),
+            )
           : ListView(
               children: [
+                OfflineBanner(stale: _servedFromCache),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
                   child: Row(
@@ -1812,7 +2002,9 @@ class _SearchScreenState extends State<SearchScreen> {
                         child: Text(
                           '${items.length} • ${app.t('search')}',
                           style: const TextStyle(
-                              color: Colors.grey, fontSize: 12),
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
                         ),
                       ),
                       TextButton(
@@ -1845,13 +2037,46 @@ class _SearchScreenState extends State<SearchScreen> {
                         fontWeight: FontWeight.w700,
                       ),
                     ),
-                    onTap: () => context.push(
-                      '/product/${item['slug'] ?? item['id']}',
-                    ),
+                    onTap: () =>
+                        context.push('/product/${item['slug'] ?? item['id']}'),
                   ),
                 ),
               ],
             ),
+    );
+  }
+}
+
+/// Recent searches (local, non-sensitive) shown before the first search.
+class _RecentSearches extends StatelessWidget {
+  const _RecentSearches({required this.onTap});
+
+  final void Function(String) onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = appController;
+    final recent = app.recentSearches();
+    if (recent.isEmpty) {
+      return EmptyState(icon: Icons.search, message: app.t('search'));
+    }
+    return ListView(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: Text(
+            app.t('recent_searches'),
+            style: const TextStyle(color: Colors.grey, fontSize: 12),
+          ),
+        ),
+        ...recent.map(
+          (q) => ListTile(
+            leading: const Icon(Icons.history),
+            title: Text(q),
+            onTap: () => onTap(q),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1876,24 +2101,48 @@ class _CmsScreenState extends State<CmsScreen> {
     _load();
   }
 
+  bool _servedFromCache = false;
+
   Future<void> _load() async {
-    setState(() {
-      loading = true;
-      error = null;
-    });
+    // Local-first: last CMS snapshot paints offline with a stale badge.
+    final snap = appController.readPublicSnapshot('cms_${widget.settingKey}');
+    if (snap is String && snap.trim().isNotEmpty && mounted) {
+      setState(() {
+        html = snap;
+        loading = false;
+        _servedFromCache = true;
+      });
+    } else {
+      setState(() {
+        loading = true;
+        error = null;
+      });
+    }
     try {
       final content = await appController.cmsHtml(widget.settingKey);
       if (!mounted) return;
+      if (content.trim().isNotEmpty) {
+        await appController.cachePublicSnapshot(
+          'cms_${widget.settingKey}',
+          content,
+        );
+      }
       setState(() {
         html = content;
         loading = false;
-        if (content.trim().isEmpty) error = appController.t('no_content_yet');
+        _servedFromCache = false;
+        if (content.trim().isEmpty) {
+          error = html.trim().isNotEmpty
+              ? null
+              : appController.t('no_content_yet');
+        }
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         loading = false;
-        error = appController.t('network_error');
+        _servedFromCache = html.isNotEmpty;
+        if (html.isEmpty) error = appController.t('not_synced_yet');
       });
     }
   }
@@ -1923,7 +2172,13 @@ class _CmsScreenState extends State<CmsScreen> {
             )
           : SingleChildScrollView(
               padding: const EdgeInsets.all(16),
-              child: HtmlText(html),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  OfflineBanner(stale: _servedFromCache),
+                  HtmlText(html),
+                ],
+              ),
             ),
     );
   }
@@ -1935,6 +2190,15 @@ class CityPickerSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = appController;
+    if (app.cities.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Text(
+          app.t('no_content_yet'),
+          textAlign: TextAlign.center,
+        ),
+      );
+    }
     return ListView(
       children: app.cities
           .map(

@@ -3,7 +3,38 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
+import '../json_util.dart';
+
 enum ApiRequestKind { public, private, mutation }
+
+/// Stable error categories used for retry and sync decisions.
+/// Do NOT rely on user-visible [ClassifiedApiError.userMessage] for logic.
+enum ApiErrorCategory {
+  /// Network unreachable / timeout / DNS. Safe to retry for idempotent reads.
+  network,
+
+  /// Server 5xx. Safe to retry for idempotent reads.
+  server,
+
+  /// 401/403. Authentication/authorization failure; do not retry blindly.
+  auth,
+
+  /// 422 / validation / business-rule failure. Do not retry the same payload.
+  validation,
+
+  /// 404 / not found. Treat as permanent for mutations, retryable for reads
+  /// only when the resource is expected to exist later.
+  notFound,
+
+  /// 429 rate limited. Retry after [retryAfter] if provided.
+  rateLimit,
+
+  /// Response could not be parsed. Usually transient.
+  malformed,
+
+  /// Unknown / unexpected. Conservative: do not retry mutations.
+  unknown,
+}
 
 class ApiErrorPolicy {
   const ApiErrorPolicy({required this.release});
@@ -22,9 +53,11 @@ class ClassifiedApiError {
     required this.originalMessage,
     required this.userMessage,
     required this.release,
+    required this.category,
     this.httpStatus,
     this.cause,
     this.details,
+    this.retryAfter,
   });
 
   final String code;
@@ -35,6 +68,11 @@ class ClassifiedApiError {
   final int? httpStatus;
   final String? cause;
   final Object? details;
+  final ApiErrorCategory category;
+
+  /// Seconds to wait before retrying when the server returns 429 or a
+  /// Retry-After header. Null when not applicable.
+  final int? retryAfter;
 
   Map<String, dynamic> toResultMap() {
     if (!release) {
@@ -57,6 +95,27 @@ class ClassifiedApiError {
   }
 }
 
+/// Extracts the classified error produced by [CustomerApi._guard].
+extension ApiResultErrorX on ApiResult {
+  ClassifiedApiError? get classifiedError {
+    final err = raw['error'];
+    if (err is! Map) return null;
+    final httpStatus = err['httpStatus'] is int ? err['httpStatus'] as int : null;
+    final code = '${err['code'] ?? 'UNKNOWN'}';
+    return ClassifiedApiError(
+      code: code,
+      publicCode: '${err['publicCode'] ?? _publicCodes[code] ?? 'UNAVAILABLE'}',
+      originalMessage: '${raw['message'] ?? ''}',
+      userMessage: '${raw['message'] ?? _userMessages[code] ?? _userMessages['UNKNOWN']!}',
+      release: true,
+      category: _categoryFor(code: code, httpStatus: httpStatus),
+      httpStatus: httpStatus,
+      details: err['details'],
+      retryAfter: err['retryAfter'] is int ? err['retryAfter'] as int : null,
+    );
+  }
+}
+
 final _sensitive = RegExp(
   r'(sqlstate|stack trace|Bearer\s+\S+|access_token|mysql_|postgres|Illuminate\\|PDOException|/var/www|/home/|APP_KEY|localhost:\d+|127\.0\.0\.1)',
   caseSensitive: false,
@@ -67,6 +126,7 @@ const _userMessages = <String, String>{
   'TIMEOUT': 'انتهت مهلة الطلب. حاول مرة أخرى.',
   'HTTP_500': 'حدث خطأ في الخادم. حاول لاحقاً.',
   'HTTP_422': 'تحقق من البيانات المدخلة وحاول مرة أخرى.',
+  'HTTP_429': 'الخدمة مشغولة. حاول مرة أخرى بعد قليل.',
   'HTTP_401': 'انتهت الجلسة. سجّل الدخول مجدداً.',
   'HTTP_403': 'ليست لديك صلاحية لهذا الإجراء.',
   'HTTP_404': 'العنصر المطلوب غير موجود.',
@@ -82,6 +142,7 @@ const _publicCodes = <String, String>{
   'TIMEOUT': 'TIMEOUT',
   'HTTP_500': 'UNAVAILABLE',
   'HTTP_422': 'VALIDATION',
+  'HTTP_429': 'RATE_LIMIT',
   'HTTP_401': 'AUTH',
   'HTTP_403': 'FORBIDDEN',
   'HTTP_404': 'NOT_FOUND',
@@ -106,12 +167,19 @@ bool looksLikeLaravelException(dynamic data) {
 
 ApiRequestKind inferRequestKind(String path, {String method = 'GET'}) {
   final value = path.toLowerCase();
+  // Non-idempotent / financial operations: never auto-retried.
   if (RegExp(
-    r'place_order|add_transaction|initiate_transaction|update_status|update_order_status|akhdimni/place|payment',
+    r'place_order|place_multi_seller|checkout|add_transaction|initiate_transaction|update_status|update_order_status|akhdimni/place|payment|cart/add|cart/remove|cart/bulk|favorites/add|favorites/remove|address/add|address/update|address/delete|login|register|haraj/posts/create|complaints',
   ).hasMatch(value)) {
     return ApiRequestKind.mutation;
   }
-  if (method.toUpperCase() == 'GET') return ApiRequestKind.private;
+  if (method.toUpperCase() != 'GET') return ApiRequestKind.private;
+  // Idempotent public catalog reads: safe for one bounded retry in release.
+  if (RegExp(
+    r'^(sliders|offers|brands|countries|sellers|seller/|categories|shop|sections|flash_sales|campaigns|managed-campaigns|cities|settings|faqs|countries)',
+  ).hasMatch(value)) {
+    return ApiRequestKind.public;
+  }
   return ApiRequestKind.private;
 }
 
@@ -130,6 +198,7 @@ bool shouldRetryApi({
 }
 
 void logApiFailure(ClassifiedApiError error, {String? path}) {
+  if (const bool.fromEnvironment('dart.vm.product')) return;
   debugPrint(
     '[backend] code=${error.code} status=${error.httpStatus} path=$path message=${error.originalMessage}',
   );
@@ -170,6 +239,23 @@ ClassifiedApiError classifyDio(DioException error, {required bool release}) {
     );
   }
 
+  if (status == 429) {
+    final retryAfterRaw = error.response?.headers.value('retry-after') ??
+        (data is Map ? data['retry_after'] ?? data['retryAfter'] : null);
+    int? retryAfter;
+    if (retryAfterRaw != null) {
+      retryAfter = int.tryParse('$retryAfterRaw');
+    }
+    return _build(
+      'HTTP_429',
+      _messageFromBody(data, 'HTTP 429'),
+      release,
+      httpStatus: 429,
+      details: data,
+      retryAfter: retryAfter,
+    );
+  }
+
   if (status == 401 || status == 403) {
     return _build(
       status == 401 ? 'HTTP_401' : 'HTTP_403',
@@ -202,6 +288,24 @@ ClassifiedApiError classifyDio(DioException error, {required bool release}) {
   }
 
   if (type == DioExceptionType.badResponse) {
+    if (status == 404) {
+      return _build(
+        'HTTP_404',
+        _messageFromBody(data, message),
+        release,
+        httpStatus: 404,
+        details: data,
+      );
+    }
+    if (status != null && status >= 400 && status < 500) {
+      return _build(
+        'HTTP_422',
+        _messageFromBody(data, message),
+        release,
+        httpStatus: status,
+        details: data,
+      );
+    }
     return _build(
       'HTTP_500',
       _messageFromBody(data, message),
@@ -225,6 +329,36 @@ ClassifiedApiError classifyUnknown(Object error, {required bool release}) {
   return _build('UNKNOWN', message, release);
 }
 
+ApiErrorCategory _categoryFor({required String code, int? httpStatus}) {
+  switch (code) {
+    case 'ECONNREFUSED':
+    case 'TIMEOUT':
+    case 'NETWORK':
+      return ApiErrorCategory.network;
+    case 'HTTP_500':
+    case 'LARAVEL_EXCEPTION':
+      return ApiErrorCategory.server;
+    case 'HTTP_401':
+    case 'HTTP_403':
+      return ApiErrorCategory.auth;
+    case 'HTTP_422':
+      return ApiErrorCategory.validation;
+    case 'HTTP_404':
+      return ApiErrorCategory.notFound;
+    case 'MALFORMED_RESPONSE':
+      return ApiErrorCategory.malformed;
+    case 'HTTP_429':
+      return ApiErrorCategory.rateLimit;
+    default:
+      if (httpStatus == 429) return ApiErrorCategory.rateLimit;
+      if (httpStatus != null && httpStatus >= 500) return ApiErrorCategory.server;
+      if (httpStatus == 401 || httpStatus == 403) return ApiErrorCategory.auth;
+      if (httpStatus == 422) return ApiErrorCategory.validation;
+      if (httpStatus == 404) return ApiErrorCategory.notFound;
+      return ApiErrorCategory.unknown;
+  }
+}
+
 ClassifiedApiError _build(
   String code,
   String original,
@@ -232,6 +366,7 @@ ClassifiedApiError _build(
   int? httpStatus,
   String? cause,
   Object? details,
+  int? retryAfter,
 }) {
   var userMessage = _userMessages[code] ?? _userMessages['UNKNOWN']!;
   if (code == 'HTTP_422' && !containsSensitive(original)) {
@@ -243,9 +378,11 @@ ClassifiedApiError _build(
     originalMessage: original,
     userMessage: userMessage,
     release: release,
+    category: _categoryFor(code: code, httpStatus: httpStatus),
     httpStatus: httpStatus,
     cause: cause,
     details: release ? _sanitizeDetails(details) : details,
+    retryAfter: retryAfter,
   );
 }
 

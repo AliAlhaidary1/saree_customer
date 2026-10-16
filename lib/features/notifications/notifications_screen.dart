@@ -7,6 +7,7 @@ import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
 import '../../core/notification_read.dart';
 import '../../widgets/app_image.dart';
+import '../../widgets/offline_banner.dart';
 import '../../widgets/ui_helpers.dart';
 
 /// Parity with front Notification.js + notificationRead.js + Header polling:
@@ -24,11 +25,16 @@ class NotificationsScreen extends StatefulWidget {
 class _NotificationsScreenState extends State<NotificationsScreen> {
   List<Map<String, dynamic>> items = [];
   bool loading = true;
+  bool loadingMore = false;
   int offset = 0;
   int total = 0;
   List<String> readIds = [];
+  bool _servedFromCache = false;
   static const _limit = 10;
   Timer? _markTimer;
+  // Generation counter: a refresh (or account switch) invalidates in-flight
+  // load-more continuations so stale pages can't append to the new list.
+  int _seq = 0;
 
   @override
   void initState() {
@@ -47,9 +53,38 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       if (mounted) setState(() => loading = false);
       return;
     }
+    // Resets start a new generation; load-more joins the current one.
+    final mySeq = more ? _seq : ++_seq;
+    if (more && loadingMore) return;
     if (!more && mounted) setState(() => loading = true);
+    if (more && mounted) setState(() => loadingMore = true);
+    // Owning account: late responses after logout/switch are dropped.
+    final scope = appController.accountScope;
+    // Offline-first: paint the last known page instantly (account-scoped).
+    if (!more && items.isEmpty) {
+      final cached = appController.readCachedNotifications();
+      if (cached.isNotEmpty && mounted) {
+        setState(() {
+          items = cached;
+          total = cached.length;
+          loading = false;
+          _servedFromCache = true;
+        });
+      }
+    }
     final nextOffset = more ? offset + _limit : 0;
     final res = await appController.api.notifications(limit: _limit, offset: nextOffset);
+    if (!res.ok) {
+      // Refresh failed: keep existing/cached rows with a stale badge instead
+      // of replacing them with an empty list.
+      if (!mounted) return;
+      setState(() {
+        loading = false;
+        loadingMore = false;
+        _servedFromCache = items.isNotEmpty;
+      });
+      return;
+    }
     final uid = appController.user?['id'];
     var rows = res.dataMaps;
     var serverTotal = J.i(res.raw['total'] ?? res.dataMap['total']);
@@ -62,13 +97,23 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     var reads = await NotificationRead.getReadIds(uid);
     reads = await NotificationRead.prune(uid, serverTotal > 0 ? serverTotal : reads.length);
     if (!mounted) return;
+    if (mySeq != _seq) return;
+    if (!appController.isLoggedIn || appController.accountScope != scope) {
+      return;
+    }
     setState(() {
       offset = nextOffset;
-      items = more ? [...items, ...rows] : rows;
+      items = more ? J.appendUnique(items, rows) : rows;
       total = serverTotal > 0 ? serverTotal : items.length;
       readIds = reads;
       loading = false;
+      loadingMore = false;
+      _servedFromCache = false;
     });
+    // Persist only confirmed first-page rows (account-scoped fallback).
+    if (!more && rows.isNotEmpty) {
+      await appController.cacheNotifications(rows);
+    }
     // Front marks the viewed page as read after 1200ms.
     _markTimer?.cancel();
     _markTimer = Timer(const Duration(milliseconds: 1200), () async {
@@ -166,15 +211,47 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
               onRefresh: () => _load(),
               child: items.isEmpty
                   ? ListView(children: [EmptyState(message: app.t('no_notifications'))])
-                  : ListView.separated(
+                  : Column(
+                      children: [
+                        if (_servedFromCache) OfflineBanner(stale: true),
+                        Expanded(
+                          child: NotificationListener<ScrollNotification>(
+                            onNotification: (n) {
+                              if (n.metrics.pixels >
+                                      n.metrics.maxScrollExtent - 400 &&
+                                  !loading &&
+                                  total > items.length &&
+                                  items.isNotEmpty) {
+                                _load(more: true);
+                              }
+                              return false;
+                            },
+                            child: ListView.separated(
                       padding: const EdgeInsets.all(12),
                       itemCount: items.length + (total > items.length ? 1 : 0),
-                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
                       itemBuilder: (_, i) {
                         if (i >= items.length) {
-                          return OutlinedButton(
-                            onPressed: () => _load(more: true),
-                            child: Text(app.t('load_more')),
+                          if (!loadingMore) {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (mounted &&
+                                  !loadingMore &&
+                                  total > items.length) {
+                                _load(more: true);
+                              }
+                            });
+                          }
+                          return const Center(
+                            child: Padding(
+                              padding: EdgeInsets.all(12),
+                              child: SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            ),
                           );
                         }
                         final item = items[i];
@@ -271,6 +348,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                         );
                       },
                     ),
+                          ),
+                        ),
+                      ],
+                    ),
             ),
     );
   }
@@ -294,21 +375,54 @@ class NotificationBell extends StatefulWidget {
   State<NotificationBell> createState() => _NotificationBellState();
 }
 
-class _NotificationBellState extends State<NotificationBell> {
+class _NotificationBellState extends State<NotificationBell>
+    with WidgetsBindingObserver {
   int unread = 0;
   Timer? _timer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    appController.addListener(_onAuth);
+    _ensureTimer();
     _refresh();
-    _timer = Timer.periodic(const Duration(seconds: 60), (_) => _refresh());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    appController.removeListener(_onAuth);
     _timer?.cancel();
     super.dispose();
+  }
+
+  void _onAuth() => _ensureTimer();
+
+  /// Lifecycle-aware polling: runs only when logged in AND resumed.
+  /// Stops on logout/background to save battery/network/server load.
+  void _ensureTimer() {
+    final want = appController.isLoggedIn;
+    if (!want) {
+      _timer?.cancel();
+      _timer = null;
+      if (mounted && unread != 0) setState(() => unread = 0);
+      return;
+    }
+    _timer ??= Timer.periodic(const Duration(seconds: 120), (_) => _refresh());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _ensureTimer();
+      _refresh();
+    } else {
+      // Pause/inactive/detached: stop polling immediately so background work
+      // does not run after the widget or app is no longer visible.
+      _timer?.cancel();
+      _timer = null;
+    }
   }
 
   Future<void> _refresh() async {

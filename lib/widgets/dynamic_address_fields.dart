@@ -127,10 +127,15 @@ class _DynamicAddressFieldsState extends State<DynamicAddressFields> {
                 })
                 .where((item) => item.value != null && item.value!.isNotEmpty)
                 .toList();
+            final current = _values[key]?.toString();
+            final validValues = items.map((e) => e.value).toSet();
             input = DropdownButtonFormField<String>(
               key: ValueKey('select-$key'),
-              value: _values[key]?.toString().isNotEmpty == true
-                  ? _values[key]?.toString()
+              initialValue:
+                  current != null &&
+                      current.isNotEmpty &&
+                      validValues.contains(current)
+                  ? current
                   : null,
               decoration: InputDecoration(
                 labelText: required ? '$label *' : label,

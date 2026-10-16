@@ -10,6 +10,7 @@ import '../../core/config.dart';
 import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
+import '../../widgets/offline_banner.dart';
 import '../../widgets/product_card.dart';
 import '../../widgets/product_filter_drawer.dart';
 import '../../widgets/product_variant_sheet.dart';
@@ -31,6 +32,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Map<String, dynamic>> flash = [];
   List<Map<String, dynamic>> haraj = [];
   bool loading = true;
+  bool _heroServedFromCache = false;
   String? loadError;
   String? _cityKey;
   bool _popupShown = false;
@@ -39,6 +41,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Map<String, dynamic>> _catalog = [];
   bool _catalogLoading = false;
   bool _catalogLoadingMore = false;
+  bool _catalogServedFromCache = false;
   bool _hasMore = true;
   int _offset = 0;
   int _seq = 0;
@@ -47,6 +50,7 @@ class _HomeScreenState extends State<HomeScreen> {
   ProductFilterValue _filter = ProductFilterValue();
 
   final _scaffoldKey = GlobalKey<ScaffoldState>();
+  final _scrollCtrl = ScrollController();
   static const _pageSize = AppConfig.productPageSize;
 
   @override
@@ -54,6 +58,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _view = appController.isStoresOnly ? 'stores' : 'products';
     appController.addListener(_onApp);
+    _scrollCtrl.addListener(_onScroll);
     _load();
     _loadCatalog(reset: true);
   }
@@ -61,7 +66,30 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     appController.removeListener(_onApp);
+    _scrollCtrl.removeListener(_onScroll);
+    _scrollCtrl.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollCtrl.hasClients) return;
+    final m = _scrollCtrl.position;
+    if (m.pixels > m.maxScrollExtent - 600 &&
+        !_catalogLoading &&
+        !_catalogLoadingMore &&
+        _hasMore &&
+        _catalog.isNotEmpty) {
+      _loadCatalog();
+    }
+  }
+
+  void _pumpMoreIfShort() {
+    if (!_hasMore || _catalogLoading || _catalogLoadingMore) return;
+    if (!_scrollCtrl.hasClients) return;
+    if (_scrollCtrl.position.maxScrollExtent <=
+        _scrollCtrl.position.pixels + 80) {
+      _loadCatalog();
+    }
   }
 
   void _onApp() {
@@ -79,6 +107,28 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _load() async {
     final app = appController;
     _cityKey = '${app.city?['id']}-${app.city?['latitude']}';
+
+    // Local-first hero: show cached sliders/shop from earlier visits instantly.
+    if (sliders.isEmpty && app.shop?['sliders'] is List) {
+      setState(() {
+        sliders = J.maps(app.shop?['sliders']);
+        _heroServedFromCache = true;
+      });
+    }
+    if (sliders.isEmpty || flash.isEmpty || haraj.isEmpty) {
+      final snap = app.readPublicSnapshot('home_hero') as Map?;
+      if (snap != null) {
+        final m = J.map(snap);
+        setState(() {
+          if (sliders.isEmpty) {
+            sliders = J.maps(m['sliders']);
+            if (sliders.isNotEmpty) _heroServedFromCache = true;
+          }
+          if (flash.isEmpty) flash = J.maps(m['flash']);
+          if (haraj.isEmpty) haraj = J.maps(m['haraj']);
+        });
+      }
+    }
     setState(() {
       loading = true;
       loadError = null;
@@ -91,12 +141,13 @@ class _HomeScreenState extends State<HomeScreen> {
         withTimeout(app.api.sliders(), ApiResult({'status': 0})),
         withTimeout(app.api.flashSales(), ApiResult({'status': 0})),
         withTimeout(
-            app.api.harajPosts({
-              'page': 1,
-              'per_page': 4,
-              if (app.city?['id'] != null) 'city_id': app.city!['id'],
-            }),
-            ApiResult({'status': 0})),
+          app.api.harajPosts({
+            'page': 1,
+            'per_page': 4,
+            if (app.city?['id'] != null) 'city_id': app.city!['id'],
+          }),
+          ApiResult({'status': 0}),
+        ),
         if (needCats)
           withTimeout(app.loadRootCategories().then((_) => true), false),
       ]);
@@ -104,14 +155,30 @@ class _HomeScreenState extends State<HomeScreen> {
       final flashRes = results[1] as ApiResult;
       final harajRes = results[2] as ApiResult;
       if (!mounted) return;
+      // When the refresh fails the fallback rows are still the saved ones:
+      // keep the stale badge instead of presenting them as current.
+      final slidersFresh = sliderRes.ok && sliderRes.dataMaps.isNotEmpty;
       setState(() {
-        sliders = sliderRes.dataMaps.isNotEmpty
+        sliders = slidersFresh
             ? sliderRes.dataMaps
             : J.maps(app.shop?['sliders']);
-        flash = flashRes.dataMaps;
-        haraj = harajRes.dataMaps;
+        flash = flashRes.ok ? flashRes.dataMaps : flash;
+        haraj = harajRes.ok ? harajRes.dataMaps : haraj;
         loading = false;
+        _heroServedFromCache = !slidersFresh && sliders.isNotEmpty;
       });
+      // Always cache home_hero when we have data, regardless of freshness.
+      // This ensures sliders/flash persist across offline app restarts.
+      // Previously only cached when slidersFresh || flashRes.ok, which meant
+      // on API failure the snapshot was never written, causing data loss
+      // on subsequent offline runs.
+      if (sliders.isNotEmpty || flash.isNotEmpty || haraj.isNotEmpty) {
+        await app.cachePublicSnapshot('home_hero', {
+          'sliders': sliders,
+          'flash': flash,
+          'haraj': haraj,
+        });
+      }
       _maybeShowPopup();
     } catch (error) {
       if (!mounted) return;
@@ -130,19 +197,85 @@ class _HomeScreenState extends State<HomeScreen> {
     if (reset) {
       _offset = 0;
       _hasMore = true;
-      setState(() {
-        _catalogLoading = true;
-        _catalog = [];
-      });
+      final catId = _filter.categoryId?.isNotEmpty == true
+          ? int.tryParse('${_filter.categoryId}')
+          : null;
+      var local = <Map<String, dynamic>>[];
+      var localTotal = 0;
+      if (_view == 'stores') {
+        local = await appController.catalogStoresLocal(limit: _pageSize);
+        localTotal = local.length >= _pageSize ? _pageSize + 1 : local.length;
+      } else {
+        local = await appController.catalogProductsLocal(
+          categoryId: catId,
+          search: '',
+          sort: _sort,
+          priceMin: _filter.priceMin,
+          priceMax: _filter.priceMax,
+          minRating: _filter.minRating,
+          inStock: _filter.inStock,
+          onlyOffers: _filter.onlyOffers,
+          limit: _pageSize,
+        );
+        localTotal = await appController.catalogFilteredCountLocal(
+          categoryId: catId,
+          search: '',
+          priceMin: _filter.priceMin,
+          priceMax: _filter.priceMax,
+          minRating: _filter.minRating,
+          inStock: _filter.inStock,
+          onlyOffers: _filter.onlyOffers,
+        );
+      }
+      if (!mounted || mySeq != _seq) return;
+      if (local.isNotEmpty) {
+        setState(() {
+          _catalog = local;
+          _offset = local.length;
+          _hasMore = local.length < localTotal;
+          _catalogServedFromCache = true;
+          _catalogLoading = false;
+        });
+      } else {
+        final cached = appController.readCachedProductPage({
+          'limit': _pageSize,
+          'offset': 0,
+          'latitude': point.latitude,
+          'longitude': point.longitude,
+          if (_sort.isNotEmpty) 'sort': _sort,
+          if (_filter.categoryId?.isNotEmpty == true)
+            'category_ids': _filter.categoryId,
+          if (_filter.inStock) 'in_stock': 1,
+          if (_filter.onlyOffers) 'has_offer': 1,
+          if (_filter.priceMin.isNotEmpty) 'price_min': _filter.priceMin,
+          if (_filter.priceMax.isNotEmpty) 'price_max': _filter.priceMax,
+          if (_filter.minRating.isNotEmpty)
+            'min_seller_rating': _filter.minRating,
+          if (_filter.isReturnable) 'is_returnable': 1,
+        }, view: _view);
+        if (!mounted || mySeq != _seq) return;
+        if (cached.isNotEmpty) {
+          setState(() {
+            _catalog = cached;
+            _offset = cached.length;
+            _hasMore = cached.length >= _pageSize;
+            _catalogServedFromCache = true;
+            _catalogLoading = false;
+          });
+        } else {
+          setState(() {
+            _catalogLoading = true;
+            _catalog = [];
+          });
+        }
+      }
     } else {
       setState(() => _catalogLoadingMore = true);
     }
 
     if (_view == 'stores') {
       var sort = (_sort == 'nearest' || _sort == 'rating') ? _sort : 'rating';
-      if (sort == 'nearest' &&
-          point.latitude == 0 &&
-          point.longitude == 0) {
+      if (sort == 'nearest' && point.latitude == 0 && point.longitude == 0) {
         sort = 'rating';
       }
       final res = await app.api.sellers(
@@ -166,13 +299,58 @@ class _HomeScreenState extends State<HomeScreen> {
         rows = J.maps(dataNode['data']);
         total = J.i(dataNode['total'] ?? total);
       }
+      if (!res.ok) {
+        final page = await appController.catalogStoresLocal(
+          limit: _pageSize,
+          offset: reset ? 0 : _catalog.length,
+        );
+        if (!mounted || mySeq != _seq) return;
+        setState(() {
+          if (page.isNotEmpty) {
+            _catalog = reset ? page : J.appendUnique(_catalog, page);
+            _offset = _catalog.length;
+            _hasMore = page.length >= _pageSize;
+            _catalogServedFromCache = true;
+          } else if (_catalog.isEmpty) {
+            _catalogServedFromCache = false;
+          } else {
+            _hasMore = false;
+          }
+          _catalogLoading = false;
+          _catalogLoadingMore = false;
+        });
+        _pumpMoreIfShort();
+        return;
+      }
+      if (reset && rows.isNotEmpty) {
+        await appController.cacheProductPage(
+          {
+            'limit': _pageSize,
+            'offset': 0,
+            'latitude': point.latitude,
+            'longitude': point.longitude,
+            if (_sort.isNotEmpty) 'sort': _sort,
+            if (_filter.categoryId?.isNotEmpty == true)
+              'category_ids': _filter.categoryId,
+            if (_filter.inStock) 'in_stock': 1,
+            if (_filter.onlyOffers) 'has_offer': 1,
+            if (_filter.priceMin.isNotEmpty) 'price_min': _filter.priceMin,
+            if (_filter.priceMax.isNotEmpty) 'price_max': _filter.priceMax,
+            if (_filter.minRating.isNotEmpty)
+              'min_seller_rating': _filter.minRating,
+            if (_filter.isReturnable) 'is_returnable': 1,
+          },
+          rows,
+          view: _view,
+        );
+      }
       setState(() {
-        _catalog = reset ? rows : [..._catalog, ...rows];
+        _catalog = reset ? rows : J.appendUnique(_catalog, rows);
         _offset = _catalog.length;
-        _hasMore =
-            total > 0 ? _catalog.length < total : rows.length >= 20;
+        _hasMore = total > 0 ? _catalog.length < total : rows.length >= 20;
         _catalogLoading = false;
         _catalogLoadingMore = false;
+        _catalogServedFromCache = false;
       });
       return;
     }
@@ -197,12 +375,77 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     if (!mounted || mySeq != _seq) return;
     final rows = res.dataMaps;
+    if (!res.ok) {
+      final catId = _filter.categoryId?.isNotEmpty == true
+          ? int.tryParse('${_filter.categoryId}')
+          : null;
+      final start = reset ? 0 : _catalog.length;
+      final page = await appController.catalogProductsLocal(
+        categoryId: catId,
+        search: '',
+        sort: _sort,
+        priceMin: _filter.priceMin,
+        priceMax: _filter.priceMax,
+        minRating: _filter.minRating,
+        inStock: _filter.inStock,
+        onlyOffers: _filter.onlyOffers,
+        limit: _pageSize,
+        offset: start,
+      );
+      final total = await appController.catalogFilteredCountLocal(
+        categoryId: catId,
+        search: '',
+        priceMin: _filter.priceMin,
+        priceMax: _filter.priceMax,
+        minRating: _filter.minRating,
+        inStock: _filter.inStock,
+        onlyOffers: _filter.onlyOffers,
+      );
+      if (!mounted || mySeq != _seq) return;
+      setState(() {
+        if (page.isNotEmpty) {
+          _catalog = reset ? page : J.appendUnique(_catalog, page);
+          _catalogServedFromCache = true;
+        } else if (_catalog.isEmpty) {
+          _catalogServedFromCache = false;
+        }
+        _offset = _catalog.length;
+        _hasMore = _catalog.length < total;
+        _catalogLoading = false;
+        _catalogLoadingMore = false;
+      });
+      _pumpMoreIfShort();
+      return;
+    }
+    if (reset && rows.isNotEmpty) {
+      await appController.cacheProductPage(
+        {
+          'limit': _pageSize,
+          'offset': 0,
+          'latitude': point.latitude,
+          'longitude': point.longitude,
+          if (_sort.isNotEmpty) 'sort': _sort,
+          if (_filter.categoryId?.isNotEmpty == true)
+            'category_ids': _filter.categoryId,
+          if (_filter.inStock) 'in_stock': 1,
+          if (_filter.onlyOffers) 'has_offer': 1,
+          if (_filter.priceMin.isNotEmpty) 'price_min': _filter.priceMin,
+          if (_filter.priceMax.isNotEmpty) 'price_max': _filter.priceMax,
+          if (_filter.minRating.isNotEmpty)
+            'min_seller_rating': _filter.minRating,
+          if (_filter.isReturnable) 'is_returnable': 1,
+        },
+        rows,
+        view: _view,
+      );
+    }
     setState(() {
-      _catalog = reset ? rows : [..._catalog, ...rows];
+      _catalog = reset ? rows : J.appendUnique(_catalog, rows);
       _offset = _catalog.length;
       _hasMore = rows.length >= _pageSize;
       _catalogLoading = false;
       _catalogLoadingMore = false;
+      _catalogServedFromCache = false;
     });
   }
 
@@ -265,7 +508,9 @@ class _HomeScreenState extends State<HomeScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ClipRRect(
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(12),
+              ),
               child: AppImage(image, placeholder: app.placeholder),
             ),
             Row(
@@ -280,8 +525,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     onPressed: () {
                       Navigator.pop(ctx);
                       if (url.isNotEmpty && type == 'url') {
-                        launchUrl(Uri.parse(url),
-                            mode: LaunchMode.externalApplication);
+                        launchUrl(
+                          Uri.parse(url),
+                          mode: LaunchMode.externalApplication,
+                        );
                       } else if (category.isNotEmpty) {
                         openCategory(context, category);
                       } else if (url.isNotEmpty) {
@@ -337,15 +584,16 @@ class _HomeScreenState extends State<HomeScreen> {
     final ads = sliders
         .where((s) => J.str(s['image_url'] ?? s['image']).isNotEmpty)
         .toList();
-    final offers = _offers('top')
-        .where((o) => J.str(o['image_url'] ?? o['image']).isNotEmpty)
-        .toList();
+    final offers = _offers(
+      'top',
+    ).where((o) => J.str(o['image_url'] ?? o['image']).isNotEmpty).toList();
     return [...ads, ...offers];
   }
 
   @override
   Widget build(BuildContext context) {
     final app = appController;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _pumpMoreIfShort());
     final shopCategories = J.maps(app.shop?['categories']);
     final categories = !app.isCategorySectionEnabled
         ? <Map<String, dynamic>>[]
@@ -356,7 +604,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final storesOnly = app.isStoresOnly;
     final showCatalog = !storesOnly;
     final hero = _heroSlides;
-    final hasContent = hero.isNotEmpty ||
+    final hasContent =
+        hero.isNotEmpty ||
         flash.isNotEmpty ||
         categories.isNotEmpty ||
         haraj.isNotEmpty ||
@@ -372,10 +621,12 @@ class _HomeScreenState extends State<HomeScreen> {
           await app.loadRootCategories();
           await _load();
           await _loadCatalog(reset: true);
+          // Opportunistic catalog sync refresh (debounced, best-effort).
+          await app.syncCatalogSoon();
         },
         child: CustomScrollView(
-          cacheExtent: 800,
-          slivers: [
+          controller: _scrollCtrl,
+          cacheExtent: 800, slivers: [
             if (app.city == null)
               SliverToBoxAdapter(
                 child: ListTile(
@@ -400,13 +651,18 @@ class _HomeScreenState extends State<HomeScreen> {
                         style: const TextStyle(color: Colors.red),
                       ),
                       const SizedBox(height: 8),
-                      FilledButton(onPressed: _load, child: Text(app.t('retry'))),
+                      FilledButton(
+                        onPressed: _load,
+                        child: Text(app.t('retry')),
+                      ),
                     ],
                   ),
                 ),
               ),
             if (loading && !hasContent)
               const SliverToBoxAdapter(child: HomeLoadingSkeleton()),
+            if (_heroServedFromCache)
+              const SliverToBoxAdapter(child: OfflineBanner(stale: true)),
             if (hero.isNotEmpty)
               SliverToBoxAdapter(
                 child: _HeroSlider(slides: hero, onOpen: _openOffer),
@@ -426,13 +682,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     .toList(),
               ),
             ],
-            if (categories.isNotEmpty)
-              _shopByTypeSection(context, categories),
+            if (categories.isNotEmpty) _shopByTypeSection(context, categories),
             if (belowCategory.isNotEmpty) _bannerPage(belowCategory, 140),
 
             // === Unified catalog: tabs + view toggle + grid/list ===
             if (showCatalog || storesOnly) ...[
               SliverToBoxAdapter(child: _catalogHeader(context)),
+              if (_catalogServedFromCache)
+                const SliverToBoxAdapter(child: OfflineBanner(stale: true)),
               if (_catalogLoading)
                 const SliverToBoxAdapter(
                   child: Padding(
@@ -457,21 +714,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 _storeList(_catalog)
               else
                 _productGrid(_catalog),
-              if (!_catalogLoading && _hasMore && _catalog.isNotEmpty)
-                SliverToBoxAdapter(
+              if (!_catalogLoading &&
+                  _catalog.isNotEmpty &&
+                  _catalogLoadingMore)
+                const SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-                    child: OutlinedButton(
-                      onPressed: _catalogLoadingMore
-                          ? null
-                          : () => _loadCatalog(),
-                      child: _catalogLoadingMore
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : Text(app.t('load_more')),
+                    padding: EdgeInsets.fromLTRB(16, 4, 16, 16),
+                    child: Center(
+                      child: SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
                     ),
                   ),
                 ),
@@ -495,8 +749,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(16),
                     ),
-                    leading:
-                        Icon(Icons.delivery_dining, color: app.accentColor),
+                    leading: Icon(
+                      Icons.delivery_dining,
+                      color: app.accentColor,
+                    ),
                     title: Text(app.t('akhdimni')),
                     subtitle: Text(app.t('akhdimni_home_hint')),
                     trailing: const Icon(Icons.chevron_left),
@@ -547,13 +803,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   int get _activeFilterCount => [
-        _filter.categoryId?.isNotEmpty == true,
-        _filter.minRating.isNotEmpty,
-        _filter.priceMin.isNotEmpty || _filter.priceMax.isNotEmpty,
-        _filter.inStock,
-        _filter.onlyOffers,
-        _filter.isReturnable,
-      ].where((e) => e).length;
+    _filter.categoryId?.isNotEmpty == true,
+    _filter.minRating.isNotEmpty,
+    _filter.priceMin.isNotEmpty || _filter.priceMax.isNotEmpty,
+    _filter.inStock,
+    _filter.onlyOffers,
+    _filter.isReturnable,
+  ].where((e) => e).length;
 
   /// "تسوق حسب نوع المتجر": one grey band (web parity) holding the header and
   /// the circular category tiles. The filter button replaces "see all".
@@ -658,9 +914,8 @@ class _HomeScreenState extends State<HomeScreen> {
             SizedBox(
               height: 96,
               child: ListView.separated(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                cacheExtent: 600, padding: const EdgeInsets.symmetric(horizontal: 16),
                 scrollDirection: Axis.horizontal,
-                cacheExtent: 600,
                 addRepaintBoundaries: true,
                 itemCount: categories.length,
                 separatorBuilder: (_, _) => const SizedBox(width: 14),
@@ -742,7 +997,7 @@ class _HomeScreenState extends State<HomeScreen> {
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
       sliver: SliverList.separated(
         itemCount: sellers.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 10),
+        separatorBuilder: (_, _) => const SizedBox(height: 10),
         itemBuilder: (_, i) {
           final seller = sellers[i];
           final distance = double.tryParse(
@@ -791,18 +1046,18 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _productStrip(List<Map<String, dynamic>> items) {
-    if (items.isEmpty)
+    if (items.isEmpty) {
       return const SliverToBoxAdapter(child: SizedBox.shrink());
+    }
     return SliverToBoxAdapter(
       child: SizedBox(
         height: 262,
         child: ListView.separated(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          cacheExtent: 600, padding: const EdgeInsets.symmetric(horizontal: 16),
           scrollDirection: Axis.horizontal,
-          cacheExtent: 600,
           addRepaintBoundaries: true,
           itemCount: items.length,
-          separatorBuilder: (_, __) => const SizedBox(width: 10),
+          separatorBuilder: (_, _) => const SizedBox(width: 10),
           itemBuilder: (_, i) => SizedBox(
             width: 158,
             child: RepaintBoundary(
@@ -826,7 +1081,7 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 16),
           scrollDirection: Axis.horizontal,
           itemCount: posts.length,
-          separatorBuilder: (_, __) => const SizedBox(width: 10),
+          separatorBuilder: (_, _) => const SizedBox(width: 10),
           itemBuilder: (_, i) {
             final post = posts[i];
             return GestureDetector(
@@ -852,8 +1107,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       overflow: TextOverflow.ellipsis,
                     ),
                     Text(
-                      money(post['price'], appController.currency,
-                          appController.decimals),
+                      money(
+                        post['price'],
+                        appController.currency,
+                        appController.decimals,
+                      ),
                       style: TextStyle(
                         color: appController.accentColor,
                         fontSize: 12,
@@ -870,30 +1128,36 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _productGrid(List<Map<String, dynamic>> items) {
-    return SliverLayoutBuilder(builder: (ctx, c) {
-      final w = c.crossAxisExtent;
-      final count = w >= 900 ? 4 : w >= 600 ? 3 : 2;
-      final aspect = w >= 600 ? 0.68 : 0.62;
-      return SliverPadding(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-        sliver: SliverGrid(
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: count,
-            mainAxisSpacing: 12,
-            crossAxisSpacing: 12,
-            childAspectRatio: aspect,
-          ),
-          delegate: SliverChildBuilderDelegate(
-            (_, i) => ProductCard(
-              product: items[i],
-              onTap: () => _openProduct(items[i]),
-              onAdd: () => addProductFromCatalog(context, items[i]),
+    return SliverLayoutBuilder(
+      builder: (ctx, c) {
+        final w = c.crossAxisExtent;
+        final count = w >= 900
+            ? 4
+            : w >= 600
+            ? 3
+            : 2;
+        final aspect = w >= 600 ? 0.68 : 0.62;
+        return SliverPadding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+          sliver: SliverGrid(
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: count,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              childAspectRatio: aspect,
             ),
-            childCount: items.length,
+            delegate: SliverChildBuilderDelegate(
+              (_, i) => ProductCard(
+                product: items[i],
+                onTap: () => _openProduct(items[i]),
+                onAdd: () => addProductFromCatalog(context, items[i]),
+              ),
+              childCount: items.length,
+            ),
           ),
-        ),
-      );
-    });
+        );
+      },
+    );
   }
 
   void _openProduct(Map<String, dynamic> product) {
@@ -1076,7 +1340,11 @@ class EmptyStateInline extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        const Icon(Icons.inbox_outlined, size: 48, color: AppTheme.textSecondary),
+        const Icon(
+          Icons.inbox_outlined,
+          size: 48,
+          color: AppTheme.textSecondary,
+        ),
         const SizedBox(height: 8),
         Text(message, textAlign: TextAlign.center),
       ],

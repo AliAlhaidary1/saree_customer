@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/api/api_errors.dart';
 import '../../core/app_controller.dart';
 import '../../core/app_theme.dart';
 import '../../core/otp_resend.dart';
 import '../../core/yemen_phone.dart';
 import '../../core/config.dart';
 import '../../core/json_util.dart';
+import '../../core/offline/operation_policy.dart';
+import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
 
 String otpT(String key, String fallback) {
@@ -29,14 +32,10 @@ class AuthNavyHeader extends StatelessWidget {
       width: double.infinity,
       decoration: const BoxDecoration(
         color: AppTheme.primaryNavy,
-        borderRadius: BorderRadius.vertical(
-          bottom: Radius.circular(28),
-        ),
+        borderRadius: BorderRadius.vertical(bottom: Radius.circular(28)),
       ),
       child: ClipRRect(
-        borderRadius: const BorderRadius.vertical(
-          bottom: Radius.circular(28),
-        ),
+        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(28)),
         child: Stack(
           children: [
             // علامة برق ضخمة شفافة في الزاوية للعمق.
@@ -220,9 +219,7 @@ class AuthFormCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: AppTheme.primaryNavy.withValues(alpha: 0.10),
-        ),
+        border: Border.all(color: AppTheme.primaryNavy.withValues(alpha: 0.10)),
         boxShadow: [
           BoxShadow(
             color: AppTheme.primaryNavy.withValues(alpha: 0.06),
@@ -262,8 +259,9 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _forgotSuccess;
   bool _forgotEditOpen = false;
 
-  String get _next =>
-      (widget.next != null && widget.next!.startsWith('/')) ? widget.next! : '/';
+  String get _next => (widget.next != null && widget.next!.startsWith('/'))
+      ? widget.next!
+      : '/';
 
   @override
   void initState() {
@@ -346,8 +344,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             const SizedBox(width: 10),
                             Expanded(
                               child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
                                     isLogin
@@ -382,8 +379,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 app.t('enter_mobile'),
                                 Icons.phone_outlined,
                               ).copyWith(
-                                prefixText:
-                                    '+${AppConfig.countryDialCode} ',
+                                prefixText: '+${AppConfig.countryDialCode} ',
                                 prefixStyle: const TextStyle(
                                   color: AppTheme.textSecondary,
                                   fontSize: 13,
@@ -523,8 +519,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 ),
                               ),
                               child: Row(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const Icon(
                                     Icons.check_circle_outline,
@@ -561,8 +556,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                           const SizedBox(height: 8),
                           TextButton.icon(
-                            onPressed:
-                                (_forgotGate.canSend && !_forgotSending)
+                            onPressed: (_forgotGate.canSend && !_forgotSending)
                                 ? _resendForgot
                                 : null,
                             icon: const Icon(Icons.refresh_rounded, size: 16),
@@ -586,8 +580,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               ),
                             ),
                             child: Row(
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.start,
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 const Icon(
                                   Icons.error_outline_rounded,
@@ -637,9 +630,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             child: TextButton.icon(
                               onPressed: () {
                                 setState(() {
-                                  view = view == 'login'
-                                      ? 'forgot'
-                                      : 'login';
+                                  view = view == 'login' ? 'forgot' : 'login';
                                   error = null;
                                 });
                               },
@@ -678,9 +669,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                         boxShadow: [
                           BoxShadow(
-                            color: AppTheme.primaryNavy.withValues(
-                              alpha: 0.04,
-                            ),
+                            color: AppTheme.primaryNavy.withValues(alpha: 0.04),
                             blurRadius: 12,
                             offset: const Offset(0, 4),
                           ),
@@ -777,14 +766,22 @@ class _LoginScreenState extends State<LoginScreen> {
         );
         if (!mounted) return;
         if (message != null) {
-          setState(() => error = message);
+          if (message == kRequiresInternet) {
+            if (mounted) await showRequiresInternetDialog(context);
+            if (mounted) setState(() => error = null);
+          } else if (mounted) {
+            setState(() => error = message);
+          }
         } else {
           if (!mounted) return;
           // GoRouter refreshListenable سيعيد البناء؛ نستخدم post-frame لتجنب
           // "deactivated widget / Dirty widget in wrong build scope"
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
-            if (GoRouter.of(context).routerDelegate.currentConfiguration.uri.path != _next) {
+            if (GoRouter.of(
+                  context,
+                ).routerDelegate.currentConfiguration.uri.path !=
+                _next) {
               context.go(_next);
             }
           });
@@ -834,7 +831,19 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  void _handleForgotSendResult(ApiResult result, {required bool isBackground}) {
+  Future<void> _handleForgotSendResult(
+    ApiResult result, {
+    required bool isBackground,
+  }) async {
+    if (!result.ok &&
+        !isBackground &&
+        result.classifiedError?.category == ApiErrorCategory.network) {
+      if (mounted) await showRequiresInternetDialog(context);
+      if (mounted) {
+        setState(() => error = null);
+      }
+      return;
+    }
     if (result.ok) {
       final sent = otpT('otp_sent_successfully', 'تم إرسال الرمز بنجاح');
       _forgotGate.lock();
@@ -1006,7 +1015,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
     return const [];
   }
 
-  String? _defaultOtpMethod(Map<String, dynamic>? config, List<String> methods) {
+  String? _defaultOtpMethod(
+    Map<String, dynamic>? config,
+    List<String> methods,
+  ) {
     if (methods.isEmpty) return null;
     final preferred = J.str((config?['otp'] as Map?)?['preferred_method']);
     if (preferred.isNotEmpty && methods.contains(preferred)) return preferred;
@@ -1038,9 +1050,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
       if (!mounted) return;
       // Backend verify_user returns exists flag when no otp is sent.
       final data = J.map(result.raw['data']);
-      final exists = result.ok &&
+      final exists =
+          result.ok &&
           (J.str(data['exists']).isNotEmpty
-              ? (data['exists'] == true || data['exists'] == 1 || data['exists'] == '1')
+              ? (data['exists'] == true ||
+                    data['exists'] == 1 ||
+                    data['exists'] == '1')
               : J.str(result.raw['message']).contains('registered'));
       setState(() {
         _mobileExists = exists ? true : false;
@@ -1065,17 +1080,31 @@ class _RegisterScreenState extends State<RegisterScreen> {
     super.dispose();
   }
 
-  InputDecoration _dec(String label, IconData icon, {String? hint, Widget? suffix}) {
+  InputDecoration _dec(
+    String label,
+    IconData icon, {
+    String? hint,
+    Widget? suffix,
+  }) {
     return InputDecoration(
       labelText: label,
       hintText: hint,
-      prefixIcon: Icon(icon, size: 20, color: AppTheme.primaryNavy.withValues(alpha: 0.7)),
+      prefixIcon: Icon(
+        icon,
+        size: 20,
+        color: AppTheme.primaryNavy.withValues(alpha: 0.7),
+      ),
       suffixIcon: suffix,
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
     );
   }
 
-  Widget _sectionHeader(IconData icon, String step, String title, String subtitle) {
+  Widget _sectionHeader(
+    IconData icon,
+    String step,
+    String title,
+    String subtitle,
+  ) {
     return Row(
       children: [
         Container(
@@ -1112,7 +1141,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppTheme.primaryNavy)),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                  color: AppTheme.primaryNavy,
+                ),
+              ),
               const SizedBox(height: 2),
               Container(
                 width: 28,
@@ -1123,7 +1159,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 ),
               ),
               const SizedBox(height: 3),
-              Text(subtitle, style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+              Text(
+                subtitle,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.textSecondary,
+                ),
+              ),
             ],
           ),
         ),
@@ -1142,7 +1184,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
         backgroundColor: AppTheme.primaryNavy,
         foregroundColor: Colors.white,
         elevation: 0,
-        title: Text(app.t('register'), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+        title: Text(
+          app.t('register'),
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
         centerTitle: false,
       ),
       body: SafeArea(
@@ -1160,258 +1208,550 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
                 child: Column(
                   children: [
-            // Personal info section
-            AuthFormCard(
-              children: [
-                    _sectionHeader(Icons.person_outline_rounded, '1', 'المعلومات الشخصية', 'الاسم ورقم الجوال'),
+                    // Personal info section
+                    AuthFormCard(
+                      children: [
+                        _sectionHeader(
+                          Icons.person_outline_rounded,
+                          '1',
+                          'المعلومات الشخصية',
+                          'الاسم ورقم الجوال',
+                        ),
+                        const SizedBox(height: 14),
+                        TextField(
+                          controller: name,
+                          textInputAction: TextInputAction.next,
+                          decoration: _dec(
+                            app.t('Name') == 'Name'
+                                ? 'الاسم الكامل'
+                                : app.t('Name'),
+                            Icons.badge_outlined,
+                            hint: app.t('enter_name'),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: mobile,
+                          keyboardType: TextInputType.phone,
+                          textInputAction: TextInputAction.next,
+                          onChanged: _checkMobileRegistered,
+                          decoration:
+                              _dec(
+                                app.t('enter_mobile'),
+                                Icons.phone_outlined,
+                                hint: '777 000 000',
+                              ).copyWith(
+                                prefixText: '+${AppConfig.countryDialCode} ',
+                                prefixStyle: const TextStyle(
+                                  color: AppTheme.textSecondary,
+                                  fontSize: 13,
+                                ),
+                              ),
+                        ),
+                        if (_checkingMobile)
+                          const Padding(
+                            padding: EdgeInsets.only(top: 8),
+                            child: SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        if (_mobileExists == true)
+                          Container(
+                            margin: const EdgeInsets.only(top: 8),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF8E1),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: const Color(0xFFFFE082),
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    app.t('mobile_already_registered'),
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFFE65100),
+                                    ),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () => context.go('/login'),
+                                  child: Text(
+                                    app.t('login'),
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () => setState(() {
+                                    mobile.clear();
+                                    _mobileExists = null;
+                                    _lastCheckedMobile = '';
+                                  }),
+                                  child: Text(
+                                    app.t('use_another_number'),
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        if (_backupPhoneConfig() != null) ...[
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: backupPhone,
+                            keyboardType: TextInputType.phone,
+                            textInputAction: TextInputAction.next,
+                            decoration:
+                                _dec(
+                                  '${app.t('backup_phone')}${_backupPhoneConfig()!['required'] == true ? ' *' : ''}',
+                                  Icons.phone_forwarded_outlined,
+                                  hint: '777 000 000',
+                                ).copyWith(
+                                  prefixText: '+${AppConfig.countryDialCode} ',
+                                  prefixStyle: const TextStyle(
+                                    color: AppTheme.textSecondary,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                          ),
+                        ],
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: email,
+                          keyboardType: TextInputType.emailAddress,
+                          textInputAction: TextInputAction.next,
+                          decoration: _dec(
+                            app.t('enter_email'),
+                            Icons.mail_outline_rounded,
+                            hint: 'example@email.com',
+                          ),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 14),
-                    TextField(
-                      controller: name,
-                      textInputAction: TextInputAction.next,
-                      decoration: _dec(app.t('Name') == 'Name' ? 'الاسم الكامل' : app.t('Name'), Icons.badge_outlined, hint: app.t('enter_name')),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: mobile,
-                      keyboardType: TextInputType.phone,
-                      textInputAction: TextInputAction.next,
-                      onChanged: _checkMobileRegistered,
-                      decoration: _dec(app.t('enter_mobile'), Icons.phone_outlined, hint: '777 000 000').copyWith(prefixText: '+${AppConfig.countryDialCode} ', prefixStyle: const TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
-                    ),
-                    if (_checkingMobile)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-                      ),
-                    if (_mobileExists == true)
-                      Container(
-                        margin: const EdgeInsets.only(top: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        decoration: BoxDecoration(color: const Color(0xFFFFF8E1), borderRadius: BorderRadius.circular(12), border: Border.all(color: const Color(0xFFFFE082))),
-                        child: Row(
+                    // Security section — بطاقة بيضاء بلمسة كحلية.
+                    AuthFormCard(
+                      children: [
+                        _sectionHeader(
+                          Icons.lock_outline_rounded,
+                          '2',
+                          'الأمان',
+                          'كلمة المرور • 6 أحرف على الأقل',
+                        ),
+                        const SizedBox(height: 14),
+                        TextField(
+                          controller: password,
+                          obscureText: hidePassword,
+                          decoration: _dec(
+                            app.t('enter_password'),
+                            Icons.lock_outline,
+                            hint: '••••••••',
+                            suffix: IconButton(
+                              onPressed: () =>
+                                  setState(() => hidePassword = !hidePassword),
+                              icon: Icon(
+                                hidePassword
+                                    ? Icons.visibility_outlined
+                                    : Icons.visibility_off_outlined,
+                                size: 20,
+                                color: AppTheme.textSecondary,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: confirmPassword,
+                          obscureText: hideConfirm,
+                          decoration: _dec(
+                            app.t('enter_confirm_password'),
+                            Icons.verified_user_outlined,
+                            hint: 'تأكيد كلمة المرور',
+                            suffix: IconButton(
+                              onPressed: () =>
+                                  setState(() => hideConfirm = !hideConfirm),
+                              icon: Icon(
+                                hideConfirm
+                                    ? Icons.visibility_outlined
+                                    : Icons.visibility_off_outlined,
+                                size: 20,
+                                color: AppTheme.textSecondary,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
                           children: [
-                            Expanded(child: Text(app.t('mobile_already_registered'), style: const TextStyle(fontSize: 12, color: Color(0xFFE65100)))),
-                            TextButton(onPressed: () => context.go('/login'), child: Text(app.t('login'), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
-                            TextButton(
-                              onPressed: () => setState(() {
-                                mobile.clear();
-                                _mobileExists = null;
-                                _lastCheckedMobile = '';
-                              }),
-                              child: Text(app.t('use_another_number'), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                            Icon(
+                              Icons.info_outline_rounded,
+                              size: 14,
+                              color: AppTheme.textSecondary,
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                'استخدم 6 أحرف على الأقل، ويفضل مزيج حروف وأرقام',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: AppTheme.textSecondary,
+                                  height: 1.3,
+                                ),
+                              ),
                             ),
                           ],
                         ),
-                      ),
-                    if (_backupPhoneConfig() != null) ...[
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: backupPhone,
-                        keyboardType: TextInputType.phone,
-                        textInputAction: TextInputAction.next,
-                        decoration: _dec(
-                          '${app.t('backup_phone')}${_backupPhoneConfig()!['required'] == true ? ' *' : ''}',
-                          Icons.phone_forwarded_outlined,
-                          hint: '777 000 000',
-                        ).copyWith(prefixText: '+${AppConfig.countryDialCode} ', prefixStyle: const TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
-                      ),
-                    ],
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: email,
-                      keyboardType: TextInputType.emailAddress,
-                      textInputAction: TextInputAction.next,
-                      decoration: _dec(app.t('enter_email'), Icons.mail_outline_rounded, hint: 'example@email.com'),
-                    ),
-                  ],
-                ),
-            const SizedBox(height: 14),
-            // Security section — بطاقة بيضاء بلمسة كحلية.
-            AuthFormCard(
-              children: [
-                    _sectionHeader(Icons.lock_outline_rounded, '2', 'الأمان', 'كلمة المرور • 6 أحرف على الأقل'),
-                    const SizedBox(height: 14),
-                    TextField(
-                      controller: password,
-                      obscureText: hidePassword,
-                      decoration: _dec(app.t('enter_password'), Icons.lock_outline, hint: '••••••••', suffix: IconButton(
-                        onPressed: () => setState(() => hidePassword = !hidePassword),
-                        icon: Icon(hidePassword ? Icons.visibility_outlined : Icons.visibility_off_outlined, size: 20, color: AppTheme.textSecondary),
-                      )),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: confirmPassword,
-                      obscureText: hideConfirm,
-                      decoration: _dec(app.t('enter_confirm_password'), Icons.verified_user_outlined, hint: 'تأكيد كلمة المرور', suffix: IconButton(
-                        onPressed: () => setState(() => hideConfirm = !hideConfirm),
-                        icon: Icon(hideConfirm ? Icons.visibility_outlined : Icons.visibility_off_outlined, size: 20, color: AppTheme.textSecondary),
-                      )),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Icon(Icons.info_outline_rounded, size: 14, color: AppTheme.textSecondary),
-                        const SizedBox(width: 6),
-                        Expanded(child: Text('استخدم 6 أحرف على الأقل، ويفضل مزيج حروف وأرقام', style: TextStyle(fontSize: 11, color: AppTheme.textSecondary, height: 1.3))),
                       ],
                     ),
-                  ],
-                ),
-            if (needOtp) ...[
-              const SizedBox(height: 14),
-              AuthFormCard(
-                children: [
-                      _sectionHeader(Icons.verified_outlined, '3', 'التحقق', 'رمز يُرسل إلى جوالك'),
+                    if (needOtp) ...[
                       const SizedBox(height: 14),
-                      if (otpMethods.length > 1)
-                        DropdownButtonFormField<String>(
-                          value: otpMethod,
-                          decoration: _dec(app.t('otp_method'), Icons.sms_outlined),
-                          items: otpMethods.map((m) => DropdownMenuItem(value: m, child: Text(m == 'whatsapp' ? app.t('whatsapp_otp') : app.t('sms_otp')))).toList(),
-                          onChanged: (v) => setState(() => otpMethod = v),
-                        ),
-                      if (otpMethods.length > 1) const SizedBox(height: 12),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      AuthFormCard(
                         children: [
-                          Expanded(
-                            child: TextField(
-                              controller: otp,
-                              keyboardType: TextInputType.number,
-                              maxLength: 6,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                                LengthLimitingTextInputFormatter(6),
-                              ],
-                              decoration: _dec(app.t('enter_otp'), Icons.pin_outlined, hint: '123456'),
+                          _sectionHeader(
+                            Icons.verified_outlined,
+                            '3',
+                            'التحقق',
+                            'رمز يُرسل إلى جوالك',
+                          ),
+                          const SizedBox(height: 14),
+                          if (otpMethods.length > 1)
+                            DropdownButtonFormField<String>(
+                              initialValue: otpMethod,
+                              decoration: _dec(
+                                app.t('otp_method'),
+                                Icons.sms_outlined,
+                              ),
+                              items: otpMethods
+                                  .map(
+                                    (m) => DropdownMenuItem(
+                                      value: m,
+                                      child: Text(
+                                        m == 'whatsapp'
+                                            ? app.t('whatsapp_otp')
+                                            : app.t('sms_otp'),
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (v) => setState(() => otpMethod = v),
                             ),
-                          ),
-                          const SizedBox(width: 10),
-                          SizedBox(
-                            height: 48,
-                            child: FilledButton(
-                              style: FilledButton.styleFrom(backgroundColor: AppTheme.primaryNavy, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-                              onPressed: (otpSending || busy || !_otpGate.canSend) ? null : _sendOtp,
-                              child: otpSending
-                                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                                  : Row(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.send_rounded, size: 16), const SizedBox(width: 6), Text(app.t('send_otp'), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700))]),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text('سيصلك الرمز عبر ${otpMethod == 'whatsapp' ? 'واتساب' : 'الرسائل'} خلال ثوانٍ', style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
-                      if (_otpSuccess != null)
-                        Container(
-                          margin: const EdgeInsets.only(top: 12),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 12,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFE8F5E9),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: const Color(0xFFA5D6A7),
-                            ),
-                          ),
-                          child: Row(
+                          if (otpMethods.length > 1) const SizedBox(height: 12),
+                          Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Icon(
-                                Icons.check_circle_outline,
-                                size: 18,
-                                color: Color(0xFF2E7D32),
-                              ),
-                              const SizedBox(width: 8),
                               Expanded(
-                                child: Text(
-                                  _otpSuccess!,
-                                  style: const TextStyle(
-                                    color: Color(0xFF2E7D32),
-                                    fontSize: 13,
-                                    height: 1.4,
+                                child: TextField(
+                                  controller: otp,
+                                  keyboardType: TextInputType.number,
+                                  maxLength: 6,
+                                  inputFormatters: [
+                                    FilteringTextInputFormatter.digitsOnly,
+                                    LengthLimitingTextInputFormatter(6),
+                                  ],
+                                  decoration: _dec(
+                                    app.t('enter_otp'),
+                                    Icons.pin_outlined,
+                                    hint: '123456',
                                   ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              SizedBox(
+                                height: 48,
+                                child: FilledButton(
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: AppTheme.primaryNavy,
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
+                                  onPressed:
+                                      (otpSending || busy || !_otpGate.canSend)
+                                      ? null
+                                      : _sendOtp,
+                                  child: otpSending
+                                      ? const SizedBox(
+                                          width: 18,
+                                          height: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white,
+                                          ),
+                                        )
+                                      : Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            const Icon(
+                                              Icons.send_rounded,
+                                              size: 16,
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Text(
+                                              app.t('send_otp'),
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
                                 ),
                               ),
                             ],
                           ),
-                        ),
-                      if (_otpSuccess != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Text(
-                            otpT(
-                              'otp_not_received_hint',
-                              'لم يصلك الرمز؟ لا تقلق، قد يتأخر قليلاً وسيصلك',
-                            ),
-                            style: const TextStyle(
+                          const SizedBox(height: 8),
+                          Text(
+                            'سيصلك الرمز عبر ${otpMethod == 'whatsapp' ? 'واتساب' : 'الرسائل'} خلال ثوانٍ',
+                            style: TextStyle(
                               fontSize: 11,
                               color: AppTheme.textSecondary,
                             ),
                           ),
-                        ),
+                          if (_otpSuccess != null)
+                            Container(
+                              margin: const EdgeInsets.only(top: 12),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFE8F5E9),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: const Color(0xFFA5D6A7),
+                                ),
+                              ),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Icon(
+                                    Icons.check_circle_outline,
+                                    size: 18,
+                                    color: Color(0xFF2E7D32),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      _otpSuccess!,
+                                      style: const TextStyle(
+                                        color: Color(0xFF2E7D32),
+                                        fontSize: 13,
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          if (_otpSuccess != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Text(
+                                otpT(
+                                  'otp_not_received_hint',
+                                  'لم يصلك الرمز؟ لا تقلق، قد يتأخر قليلاً وسيصلك',
+                                ),
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: AppTheme.textSecondary,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                     ],
-                ),
-              ],
-            const SizedBox(height: 16),
-            // Terms
-            Container(
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppTheme.primaryNavy.withValues(alpha: 0.08))),
-              child: CheckboxListTile(
-                value: acceptedTerms,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-                controlAffinity: ListTileControlAffinity.leading,
-                activeColor: AppTheme.accentOrange,
-                onChanged: (v) => setState(() => acceptedTerms = v ?? false),
-                title: Wrap(
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(app.t('i_agree_to') + ' ', style: const TextStyle(fontSize: 13, color: AppTheme.textPrimary)),
-                    InkWell(onTap: () => context.push('/terms'), child: Text(app.t('terms_of_service'), style: const TextStyle(fontSize: 13, color: AppTheme.accentOrange, fontWeight: FontWeight.w600, decoration: TextDecoration.underline))),
-                    Text(' ${app.t('and')} ', style: const TextStyle(fontSize: 13, color: AppTheme.textPrimary)),
-                    InkWell(onTap: () => context.push('/privacy'), child: Text(app.t('privacy_policy'), style: const TextStyle(fontSize: 13, color: AppTheme.accentOrange, fontWeight: FontWeight.w600, decoration: TextDecoration.underline))),
-                  ],
-                ),
-                subtitle: Text('بإنشائك الحساب توافق على الشروط وسياسة الخصوصية', style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
-              ),
-            ),
-            if (error != null)
-              Container(
-                margin: const EdgeInsets.only(top: 12),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                decoration: BoxDecoration(color: const Color(0xFFFFEBEE), borderRadius: BorderRadius.circular(12), border: Border.all(color: const Color(0xFFFFCDD2))),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Icon(Icons.error_outline_rounded, size: 18, color: Color(0xFFC62828)),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(error!, style: const TextStyle(color: Color(0xFFB71C1C), fontSize: 13, height: 1.4))),
-                  ],
-                ),
-              ),
-            const SizedBox(height: 18),
-            SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: FilledButton(
-                style: FilledButton.styleFrom(backgroundColor: AppTheme.accentOrange, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
-                onPressed: busy ? null : _register,
-                child: busy
-                    ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
-                    : Row(mainAxisAlignment: MainAxisAlignment.center, children: [const Icon(Icons.person_add_alt_1_rounded, size: 20), const SizedBox(width: 8), Text(app.t('register'), style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800))]),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(app.t('already_have_account') == 'already_have_account' ? 'لديك حساب؟' : app.t('already_have_account'), style: const TextStyle(fontSize: 13, color: AppTheme.textSecondary)),
-                TextButton(onPressed: () => context.go('/login'), child: Text(app.t('login'), style: const TextStyle(fontWeight: FontWeight.w700, color: AppTheme.primaryNavy))),
-              ],
-            ),
-            const SizedBox(height: 8),
+                    const SizedBox(height: 16),
+                    // Terms
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: AppTheme.primaryNavy.withValues(alpha: 0.08),
+                        ),
+                      ),
+                      child: CheckboxListTile(
+                        value: acceptedTerms,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 2,
+                        ),
+                        controlAffinity: ListTileControlAffinity.leading,
+                        activeColor: AppTheme.accentOrange,
+                        onChanged: (v) =>
+                            setState(() => acceptedTerms = v ?? false),
+                        title: Wrap(
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              '${app.t('i_agree_to')} ',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: AppTheme.textPrimary,
+                              ),
+                            ),
+                            InkWell(
+                              onTap: () => context.push('/terms'),
+                              child: Text(
+                                app.t('terms_of_service'),
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  color: AppTheme.accentOrange,
+                                  fontWeight: FontWeight.w600,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              ' ${app.t('and')} ',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: AppTheme.textPrimary,
+                              ),
+                            ),
+                            InkWell(
+                              onTap: () => context.push('/privacy'),
+                              child: Text(
+                                app.t('privacy_policy'),
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  color: AppTheme.accentOrange,
+                                  fontWeight: FontWeight.w600,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        subtitle: Text(
+                          'بإنشائك الحساب توافق على الشروط وسياسة الخصوصية',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: AppTheme.textSecondary,
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (error != null)
+                      Container(
+                        margin: const EdgeInsets.only(top: 12),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFEBEE),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFFFFCDD2)),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(
+                              Icons.error_outline_rounded,
+                              size: 18,
+                              color: Color(0xFFC62828),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                error!,
+                                style: const TextStyle(
+                                  color: Color(0xFFB71C1C),
+                                  fontSize: 13,
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    const SizedBox(height: 18),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 52,
+                      child: FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: AppTheme.accentOrange,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        onPressed: busy ? null : _register,
+                        child: busy
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(
+                                    Icons.person_add_alt_1_rounded,
+                                    size: 20,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    app.t('register'),
+                                    style: const TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          app.t('already_have_account') ==
+                                  'already_have_account'
+                              ? 'لديك حساب؟'
+                              : app.t('already_have_account'),
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: AppTheme.textSecondary,
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => context.go('/login'),
+                          child: Text(
+                            app.t('login'),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: AppTheme.primaryNavy,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
                   ],
                 ),
               ),
@@ -1579,7 +1919,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
         return;
       }
     }
-    if (_availableOtpMethods(cityConfig).isNotEmpty && otp.text.trim().isEmpty) {
+    if (_availableOtpMethods(cityConfig).isNotEmpty &&
+        otp.text.trim().isEmpty) {
       setState(() => error = app.t('enter_otp'));
       return;
     }
@@ -1603,7 +1944,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
       );
       if (!mounted) return;
       if (message != null) {
-        setState(() => error = message);
+        if (message == kRequiresInternet) {
+          if (mounted) await showRequiresInternetDialog(context);
+          if (mounted) setState(() => error = null);
+        } else if (mounted) {
+          setState(() => error = message);
+        }
       } else {
         if (!mounted) return;
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1665,12 +2011,17 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
       );
       if (!mounted) return;
       if (message != null) {
-        setState(() => error = message);
+        if (message == kRequiresInternet) {
+          if (mounted) await showRequiresInternetDialog(context);
+          if (mounted) setState(() => error = null);
+        } else if (mounted) {
+          setState(() => error = message);
+        }
       } else {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(app.t('password_changed_ok'))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(app.t('password_changed_ok'))));
         setState(() {
           current.clear();
           fresh.clear();
@@ -1688,19 +2039,23 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
   @override
   Widget build(BuildContext context) {
     final app = appController;
-    InputDecoration dec(String label, IconData icon, bool hide, VoidCallback toggle) =>
-        authFieldDec(
-          label,
-          icon,
-          suffix: IconButton(
-            onPressed: toggle,
-            icon: Icon(
-              hide ? Icons.visibility_outlined : Icons.visibility_off_outlined,
-              size: 20,
-              color: AppTheme.textSecondary,
-            ),
-          ),
-        );
+    InputDecoration dec(
+      String label,
+      IconData icon,
+      bool hide,
+      VoidCallback toggle,
+    ) => authFieldDec(
+      label,
+      icon,
+      suffix: IconButton(
+        onPressed: toggle,
+        icon: Icon(
+          hide ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+          size: 20,
+          color: AppTheme.textSecondary,
+        ),
+      ),
+    );
     return Scaffold(
       backgroundColor: AppTheme.surfaceGrey,
       appBar: AppBar(
@@ -1776,22 +2131,34 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                     TextField(
                       controller: current,
                       obscureText: hideCurrent,
-                      decoration: dec(app.t('current_password'), Icons.vpn_key_outlined, hideCurrent,
-                          () => setState(() => hideCurrent = !hideCurrent)),
+                      decoration: dec(
+                        app.t('current_password'),
+                        Icons.vpn_key_outlined,
+                        hideCurrent,
+                        () => setState(() => hideCurrent = !hideCurrent),
+                      ),
                     ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: fresh,
                       obscureText: hideFresh,
-                      decoration: dec(app.t('new_password'), Icons.lock_outline_rounded, hideFresh,
-                          () => setState(() => hideFresh = !hideFresh)),
+                      decoration: dec(
+                        app.t('new_password'),
+                        Icons.lock_outline_rounded,
+                        hideFresh,
+                        () => setState(() => hideFresh = !hideFresh),
+                      ),
                     ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: confirm,
                       obscureText: hideConfirm,
-                      decoration: dec(app.t('confirm_new_password'), Icons.verified_user_outlined, hideConfirm,
-                          () => setState(() => hideConfirm = !hideConfirm)),
+                      decoration: dec(
+                        app.t('confirm_new_password'),
+                        Icons.verified_user_outlined,
+                        hideConfirm,
+                        () => setState(() => hideConfirm = !hideConfirm),
+                      ),
                     ),
                     if (error != null)
                       Container(
@@ -1803,9 +2170,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                         decoration: BoxDecoration(
                           color: const Color(0xFFFFEBEE),
                           borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: const Color(0xFFFFCDD2),
-                          ),
+                          border: Border.all(color: const Color(0xFFFFCDD2)),
                         ),
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,

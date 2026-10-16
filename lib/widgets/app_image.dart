@@ -37,8 +37,8 @@ class AppImage extends StatelessWidget {
       cacheKey: '${thumb ? 't' : 'f'}:$src',
       fadeInDuration: Duration.zero,
       fadeOutDuration: Duration.zero,
-      placeholder: (_, __) => ColoredBox(color: Colors.grey.shade100),
-      errorWidget: (_, __, ___) {
+      placeholder: (_, _) => ColoredBox(color: Colors.grey.shade100),
+      errorWidget: (_, _, _) {
         if (fallback != null && fallback.isNotEmpty && fallback != src) {
           return CachedNetworkImage(
             imageUrl: fallback,
@@ -46,7 +46,7 @@ class AppImage extends StatelessWidget {
             memCacheWidth: thumb ? 128 : 400,
             fadeInDuration: Duration.zero,
             fadeOutDuration: Duration.zero,
-            errorWidget: (_, __, ___) => _iconFallback(),
+            errorWidget: (_, _, _) => _iconFallback(),
           );
         }
         return _iconFallback();
@@ -103,7 +103,7 @@ class HtmlText extends StatelessWidget {
     }
     return Html(
       data: value,
-      onCssParseError: (_, __) => null,
+      onCssParseError: (_, _) => null,
     );
   }
 }

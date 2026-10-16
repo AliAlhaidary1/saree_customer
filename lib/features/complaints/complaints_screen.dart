@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
+import '../../widgets/offline_banner.dart';
+import '../../widgets/requires_internet_dialog.dart';
 
 class ComplaintsScreen extends StatefulWidget {
   const ComplaintsScreen({super.key});
@@ -23,6 +27,11 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
 
   List<Map<String, dynamic>> _mine = [];
   bool _loadingMine = false;
+  bool _servedFromCache = false;
+  bool _draftRestored = false;
+  Timer? _draftDeb;
+
+  static const _draftFormId = 'complaint_form';
 
   @override
   void initState() {
@@ -34,11 +43,62 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
     _subject = TextEditingController();
     _message = TextEditingController();
     _orderId = TextEditingController();
+    _restoreDraft();
+    for (final c in [_subject, _message, _orderId]) {
+      c.addListener(_scheduleDraftSave);
+    }
     if (appController.isLoggedIn) _loadMine();
+  }
+
+  /// Restores the locally saved (never auto-sent) draft, if any.
+  void _restoreDraft() {
+    try {
+      final draft = appController.offline.readDraft(
+        appController.accountScope,
+        _draftFormId,
+      );
+      if (draft == null) return;
+      final type = J.str(draft['type']);
+      if (type == 'complaint' || type == 'suggestion') _type = type;
+      _subject.text = J.str(draft['subject']);
+      _message.text = J.str(draft['message']);
+      _orderId.text = J.str(draft['orderId']);
+      _draftRestored =
+          _subject.text.isNotEmpty ||
+          _message.text.isNotEmpty ||
+          _orderId.text.isNotEmpty;
+    } catch (_) {}
+  }
+
+  void _scheduleDraftSave() {
+    _draftDeb?.cancel();
+    _draftDeb = Timer(const Duration(milliseconds: 600), () async {
+      try {
+        await appController.offline
+            .writeDraft(appController.accountScope, _draftFormId, {
+              'type': _type,
+              'subject': _subject.text,
+              'message': _message.text,
+              'orderId': _orderId.text,
+            });
+      } catch (_) {}
+    });
+  }
+
+  Future<void> _clearDraft() async {
+    _draftDeb?.cancel();
+    try {
+      await appController.offline.removeDraft(
+        appController.accountScope,
+        _draftFormId,
+      );
+    } catch (_) {}
+    _draftRestored = false;
   }
 
   @override
   void dispose() {
+    _draftDeb?.cancel();
     _name.dispose();
     _phone.dispose();
     _email.dispose();
@@ -49,6 +109,14 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
   }
 
   Future<void> _loadMine() async {
+    // Local-first: last synchronized submissions paint offline.
+    final snap = appController.readAccountSnapshot('complaints');
+    if (snap is List && snap.isNotEmpty && mounted) {
+      setState(() {
+        _mine = J.maps(snap);
+        _servedFromCache = true;
+      });
+    }
     setState(() => _loadingMine = true);
     try {
       final res = await appController.api.myComplaints();
@@ -58,9 +126,17 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
         final paged = J.maps(res.dataMap['data']);
         if (paged.isNotEmpty) items = paged;
       }
-      setState(() => _mine = items);
+      if (res.ok && items.isNotEmpty) {
+        await appController.cacheAccountSnapshot('complaints', items);
+      }
+      setState(() {
+        if (res.ok) _mine = items;
+        _servedFromCache = !res.ok && _mine.isNotEmpty;
+      });
     } catch (_) {
-      // keep list empty on failure
+      if (mounted) {
+        setState(() => _servedFromCache = _mine.isNotEmpty);
+      }
     } finally {
       if (mounted) setState(() => _loadingMine = false);
     }
@@ -68,6 +144,10 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
 
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
+    if (!await appController.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     setState(() => _sending = true);
     try {
       final res = await appController.api.submitComplaint(
@@ -82,20 +162,27 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(res.ok
-              ? res.message.isNotEmpty
-                  ? res.message
-                  : appController.t('complaint_sent_success')
-              : (res.message.isNotEmpty
-                  ? res.message
-                  : appController.t('something_went_wrong'))),
+          content: Text(
+            res.ok
+                ? res.message.isNotEmpty
+                      ? res.message
+                      : appController.t('complaint_sent_success')
+                : (res.message.isNotEmpty
+                      ? res.message
+                      : appController.t('something_went_wrong')),
+          ),
         ),
       );
       if (res.ok) {
         _subject.clear();
         _message.clear();
         _orderId.clear();
+        await _clearDraft();
+        if (mounted) setState(() {});
         if (appController.isLoggedIn) _loadMine();
+      } else {
+        // Keep the text: the draft saver already persisted it locally.
+        await _scheduleDraftSaveImmediately();
       }
     } catch (_) {
       if (!mounted) return;
@@ -105,6 +192,19 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  Future<void> _scheduleDraftSaveImmediately() async {
+    _draftDeb?.cancel();
+    try {
+      await appController.offline
+          .writeDraft(appController.accountScope, _draftFormId, {
+            'type': _type,
+            'subject': _subject.text,
+            'message': _message.text,
+            'orderId': _orderId.text,
+          });
+    } catch (_) {}
   }
 
   String _statusLabel(String status) {
@@ -143,19 +243,23 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(app.t('complaints_hero_subtitle'),
-                style: Theme.of(context).textTheme.bodyMedium),
+            Text(
+              app.t('complaints_hero_subtitle'),
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
             const SizedBox(height: 16),
             SegmentedButton<String>(
               segments: [
                 ButtonSegment(
-                    value: 'complaint',
-                    label: Text(app.t('complaint')),
-                    icon: const Icon(Icons.report_problem_outlined)),
+                  value: 'complaint',
+                  label: Text(app.t('complaint')),
+                  icon: const Icon(Icons.report_problem_outlined),
+                ),
                 ButtonSegment(
-                    value: 'suggestion',
-                    label: Text(app.t('suggestion')),
-                    icon: const Icon(Icons.lightbulb_outline)),
+                  value: 'suggestion',
+                  label: Text(app.t('suggestion')),
+                  icon: const Icon(Icons.lightbulb_outline),
+                ),
               ],
               selected: {_type},
               onSelectionChanged: (s) => setState(() => _type = s.first),
@@ -168,16 +272,20 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
                   TextFormField(
                     controller: _name,
                     decoration: InputDecoration(labelText: app.t('Name')),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? app.t('field_required') : null,
+                    validator: (v) => (v == null || v.trim().isEmpty)
+                        ? app.t('field_required')
+                        : null,
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: _phone,
                     keyboardType: TextInputType.phone,
-                    decoration: InputDecoration(labelText: app.t('mobile_number')),
-                    validator: (v) =>
-                        (v == null || v.trim().isEmpty) ? app.t('field_required') : null,
+                    decoration: InputDecoration(
+                      labelText: app.t('mobile_number'),
+                    ),
+                    validator: (v) => (v == null || v.trim().isEmpty)
+                        ? app.t('field_required')
+                        : null,
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
@@ -189,24 +297,28 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
                   TextFormField(
                     controller: _subject,
                     decoration: InputDecoration(
-                        labelText:
-                            '${app.t('complaint_subject')} (${app.t('optional')})'),
+                      labelText:
+                          '${app.t('complaint_subject')} (${app.t('optional')})',
+                    ),
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: _orderId,
                     keyboardType: TextInputType.number,
                     decoration: InputDecoration(
-                        labelText: app.t('order_number_optional')),
+                      labelText: app.t('order_number_optional'),
+                    ),
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: _message,
                     maxLines: 5,
                     decoration: InputDecoration(
-                        labelText: app.t('complaint_message_hint')),
-                    validator: (v) =>
-                        (v == null || v.trim().length < 5) ? app.t('field_required') : null,
+                      labelText: app.t('complaint_message_hint'),
+                    ),
+                    validator: (v) => (v == null || v.trim().length < 5)
+                        ? app.t('field_required')
+                        : null,
                   ),
                   const SizedBox(height: 16),
                   FilledButton.icon(
@@ -215,28 +327,46 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
                         ? const SizedBox(
                             width: 18,
                             height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2))
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
                         : const Icon(Icons.send_outlined),
                     label: Text(app.t('send')),
                   ),
+                  if (_draftRestored)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        app.t('draft_saved'),
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
                 ],
               ),
             ),
             const SizedBox(height: 24),
-            Text(app.t('my_submissions'),
-                style: Theme.of(context).textTheme.titleMedium),
+            OfflineBanner(stale: _servedFromCache),
+            Text(
+              app.t('my_submissions'),
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 8),
             if (!app.isLoggedIn)
-              Text(app.t('complaint_login_hint'),
-                  style: Theme.of(context).textTheme.bodySmall)
+              Text(
+                app.t('complaint_login_hint'),
+                style: Theme.of(context).textTheme.bodySmall,
+              )
             else if (_loadingMine)
               const Center(
-                  child: Padding(
-                      padding: EdgeInsets.all(16),
-                      child: CircularProgressIndicator()))
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: CircularProgressIndicator(),
+                ),
+              )
             else if (_mine.isEmpty)
-              Text(app.t('no_submissions_yet'),
-                  style: Theme.of(context).textTheme.bodySmall)
+              Text(
+                app.t('no_submissions_yet'),
+                style: Theme.of(context).textTheme.bodySmall,
+              )
             else
               ..._mine.map((item) {
                 final status = J.str(item['status'], 'new');
@@ -252,24 +382,32 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
                         Row(
                           children: [
                             Chip(
-                              label: Text(type == 'suggestion'
-                                  ? app.t('suggestion')
-                                  : app.t('complaint')),
+                              label: Text(
+                                type == 'suggestion'
+                                    ? app.t('suggestion')
+                                    : app.t('complaint'),
+                              ),
                               visualDensity: VisualDensity.compact,
                             ),
                             const Spacer(),
-                            Text(_statusLabel(status),
-                                style: TextStyle(
-                                    color: _statusColor(status),
-                                    fontWeight: FontWeight.bold)),
+                            Text(
+                              _statusLabel(status),
+                              style: TextStyle(
+                                color: _statusColor(status),
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ],
                         ),
                         if (J.str(item['subject']).isNotEmpty)
                           Padding(
                             padding: const EdgeInsets.only(top: 4),
-                            child: Text(J.str(item['subject']),
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.bold)),
+                            child: Text(
+                              J.str(item['subject']),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ),
                         const SizedBox(height: 4),
                         Text(J.str(item['message'])),
@@ -284,8 +422,11 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Icon(Icons.verified_outlined,
-                                    size: 16, color: Colors.green),
+                                const Icon(
+                                  Icons.verified_outlined,
+                                  size: 16,
+                                  color: Colors.green,
+                                ),
                                 const SizedBox(width: 6),
                                 Expanded(child: Text(reply)),
                               ],

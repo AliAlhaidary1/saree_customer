@@ -1,29 +1,106 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'city_mode.dart';
+import 'catalog_store.dart';
+import 'catalog_db/catalog_config.dart';
+import 'catalog_db/catalog_database.dart';
+import 'image_prefetch.dart';
+import 'notification_read.dart';
 import 'business_hours.dart';
 import 'checkout_models.dart';
 import 'config.dart';
 import 'i18n.dart';
 import 'json_util.dart';
+import 'api/api_errors.dart';
 import 'api/customer_api.dart';
+import 'auth/token_vault.dart';
 import 'brand/brand_config.dart';
 import 'brand/brand_service.dart';
-
+import 'offline/cache_policy.dart';
+import 'offline/operation_policy.dart';
+import 'offline/checkout_session.dart';
+import 'offline/local_cart.dart' as local_cart;
+import 'offline/sync_orchestrator.dart';
+import 'offline/local_store.dart';
+import 'offline/offline_cache.dart';
+import 'offline/pending_ops.dart';
+import 'offline/sync_engine.dart';
 class AppController extends ChangeNotifier {
   AppController();
 
   late SharedPreferences _prefs;
+  SharedPreferences get prefs => _prefs;
   late CustomerApi api;
   final i18n = I18n();
+
+  // ---- Offline-first infrastructure (testable, no new native deps) ----
+  late TokenVault vault;
+  late LocalStore store;
+  late OfflineCache offline;
+  late SyncEngine sync;
+  CheckoutSession? _checkoutSession;
+
+  /// Best-effort catalog sync (public Drift catalog). Progress is observable
+  /// via [catalogSync].progress; [sync] stays the outbox-only engine.
+  final CatalogSyncService catalogSync = CatalogSyncService();
+  CatalogDatabase? _catalogDb;
+  DateTime? _lastCatalogSyncAttempt;
+  local_cart.LocalCartRepository? _localCart;
+  SyncOrchestrator? _syncOrchestrator;
+
+  /// Bounded opt-in thumbnail prefetch (default OFF — mobile-data safety).
+  final ImagePrefetch imagePrefetch = ImagePrefetch();
+
+  /// True when a previous checkout session could not be reconciled against
+  /// order history at startup. The UI should block new checkout attempts until
+  /// the user reviews their orders.
+  bool unresolvedCheckout = false;
+
+  /// Notified ONLY on auth/city/catalog-mode transitions. GoRouter listens to
+  /// this instead of the whole controller, so cart steppers no longer trigger
+  /// route re-evaluation on every tap (perf fix, preserves redirect logic).
+  final navTick = ValueNotifier<int>(0);
+
+  /// Notified ONLY when chrome (locale/brand/theme-affecting settings)
+  /// changes. MaterialApp listens to this + i18n instead of every cart tick.
+  final chromeTick = ValueNotifier<int>(0);
+
+  /// Stable account scope for offline docs: `u:<id>` or `guest`.
+  /// Prevents one customer's orders/addresses/favorites leaking to another.
+  String get accountScope => LocalStore.accountScope(user?['id']?.toString());
+
+  /// Test-only injection: wires in-memory prefs + a fake API so offline
+  /// cold-start, stale-cache, and failure-preservation behavior can be
+  /// verified without network access. Never used in production code.
+  @visibleForTesting
+  void injectForTest({
+    required SharedPreferences prefs,
+    required CustomerApi testApi,
+  }) {
+    _prefs = prefs;
+    api = testApi;
+    vault = TokenVault(prefs: prefs);
+    store = LocalStore(prefs);
+    offline = OfflineCache(store);
+    sync = SyncEngine(
+      outboxForCurrentScope: () => PendingOutbox(store, accountScope),
+    );
+    _checkoutSession = null;
+  }
+
+  void _bumpNav() => navTick.value++;
+  void _bumpChrome() => chromeTick.value++;
 
   String apiUrl = AppConfig.defaultApiUrl;
   String? token;
   String? viewerKey;
+
   /// Device push token parity with front NotificationBootstrap (sreamart_fcm_token).
   /// Without firebase native config we keep a stable per-device token so the
   /// backend can still target this device; once firebase_messaging is added,
@@ -62,8 +139,10 @@ class AppController extends ChangeNotifier {
   /// Display label for a variant map ("1 كيلو"). Empty when unknown.
   /// [productName] guards against echoing the product name itself when the
   /// variant map carries no distinctive info.
-  static String variantLabelOf(Map<String, dynamic>? v,
-      [String productName = '']) {
+  static String variantLabelOf(
+    Map<String, dynamic>? v, [
+    String productName = '',
+  ]) {
     if (v == null) return '';
     final m = J.str(v['measurement']);
     final u = J.str(
@@ -86,19 +165,35 @@ class AppController extends ChangeNotifier {
   String variantLabelFor(dynamic variantId) =>
       _variantLabels['$variantId'] ?? '';
 
+  /// Maximum variant display labels kept on device. Variant labels are
+  /// display-only conveniences; without a bound they grow one entry per
+  /// distinct variant ever added. Oldest entries are evicted first.
+  static const int maxVariantLabels = 500;
+
   Future<void> rememberVariantLabel(dynamic variantId, String label) async {
     if (variantId == null || label.trim().isEmpty) return;
+    _variantLabels.remove('$variantId');
     _variantLabels['$variantId'] = label.trim();
+    while (_variantLabels.length > maxVariantLabels) {
+      _variantLabels.remove(_variantLabels.keys.first);
+    }
     try {
-      await _prefs.setString('variant_labels', jsonEncode(_variantLabels));
+      await store.writeJson('variant_labels', _variantLabels);
+    } catch (_) {}
+  }
+
+  /// Persists the guest cart with an encoded byte-size guard. Oversized carts
+  /// stay memory-only (and syncable at login) instead of breaking prefs.
+  Future<void> persistGuestCart() async {
+    try {
+      await store.writeJson('guest_cart', guestCart);
     } catch (_) {}
   }
 
   void _attachVariantLabels(List<Map<String, dynamic>> lines) {
     if (_variantLabels.isEmpty) return;
     for (final line in lines) {
-      final key =
-          '${line['product_variant_id'] ?? line['id']}';
+      final key = '${line['product_variant_id'] ?? line['id']}';
       final label = _variantLabels[key];
       if (label != null &&
           label.isNotEmpty &&
@@ -125,29 +220,40 @@ class AppController extends ChangeNotifier {
   bool get isGuest => !isLoggedIn;
   bool get maintenance => J.str(webSettings['website_mode']) == '1';
   bool get akhdimniEnabled => J.flag(settings['akhdimni_enabled']);
-  bool get akhdimniPointToPointEnabled => J.flag(settings['akhdimni_point_to_point_enabled'], true);
-  bool get akhdimniSpecialItemsEnabled => J.flag(settings['akhdimni_special_items_enabled'], true);
+  bool get akhdimniPointToPointEnabled =>
+      J.flag(settings['akhdimni_point_to_point_enabled'], true);
+  bool get akhdimniSpecialItemsEnabled =>
+      J.flag(settings['akhdimni_special_items_enabled'], true);
   bool get orderTrackingEnabled => J.flag(settings['order_tracking_enabled']);
   double get minOrderAmount => J.d(settings['min_order_amount']);
   int get maxCartItemsCount => J.i(settings['max_cart_items_count']);
   double get walletRefillLimit => J.d(settings['user_wallet_refill_limit']);
   String get walletBankName => J.str(settings['wallet_admin_bank_name']);
-  String get walletAccountHolder => J.str(settings['wallet_admin_account_holder']);
-  String get walletAccountNumber => J.str(settings['wallet_admin_account_number']);
-  String get walletTransferInstructions => J.str(settings['wallet_admin_transfer_instructions']);
-  bool get isCategorySectionEnabled => J.flag(settings['is_category_section_in_homepage'], true);
-  bool get isBrandSectionEnabled => J.flag(settings['is_brand_section_in_homepage'], true);
-  bool get isSellerSectionEnabled => J.flag(settings['is_seller_section_in_homepage'], true);
-  bool get isCountrySectionEnabled => J.flag(settings['is_country_section_in_homepage'], true);
+  String get walletAccountHolder =>
+      J.str(settings['wallet_admin_account_holder']);
+  String get walletAccountNumber =>
+      J.str(settings['wallet_admin_account_number']);
+  String get walletTransferInstructions =>
+      J.str(settings['wallet_admin_transfer_instructions']);
+  bool get isCategorySectionEnabled =>
+      J.flag(settings['is_category_section_in_homepage'], true);
+  bool get isBrandSectionEnabled =>
+      J.flag(settings['is_brand_section_in_homepage'], true);
+  bool get isSellerSectionEnabled =>
+      J.flag(settings['is_seller_section_in_homepage'], true);
+  bool get isCountrySectionEnabled =>
+      J.flag(settings['is_country_section_in_homepage'], true);
 
   /// Catalog display mode (parity with web utils/catalogMode.ts).
   /// stores_only hides the global product catalog; products are only
   /// visible from inside a store.
   String get catalogMode {
     final raw = J
-        .str(settings['catalog_mode'] ??
-            webSettings['catalog_mode'] ??
-            shop?['catalog_mode'])
+        .str(
+          settings['catalog_mode'] ??
+              webSettings['catalog_mode'] ??
+              shop?['catalog_mode'],
+        )
         .trim()
         .toLowerCase();
     if (raw == 'stores_only' ||
@@ -163,6 +269,7 @@ class AppController extends ChangeNotifier {
 
   bool get isStoresOnly => catalogMode == 'stores_only';
   Map<String, dynamic> get webSettings => J.map(settings['web_settings']);
+
   /// Deep Navy Blue — headers, navigation, primary structures.
   Color get brandColor => brand.primary;
 
@@ -183,6 +290,7 @@ class AppController extends ChangeNotifier {
     }
     return total;
   }
+
   bool get oneSellerCart => J.flag(settings['one_seller_cart']);
   int get maxSellersPerCheckout {
     final fromSettings = J.i(settings['max_sellers_per_checkout']);
@@ -197,9 +305,20 @@ class AppController extends ChangeNotifier {
 
   Future<void> bootstrap() async {
     _prefs = await SharedPreferences.getInstance();
+    vault = TokenVault(prefs: _prefs);
+    store = LocalStore(_prefs);
+    offline = OfflineCache(store);
+    sync = SyncEngine(
+      outboxForCurrentScope: () => PendingOutbox(store, accountScope),
+    );
     apiUrl = AppConfig.defaultApiUrl;
     await _prefs.setString('api_url', apiUrl);
-    token = _prefs.getString('token');
+    try {
+      token = await vault.read();
+    } on TokenVaultException catch (e) {
+      if (kDebugMode) debugPrint('[auth] token vault read failed: $e');
+      token = null;
+    }
     viewerKey = _prefs.getString('viewer_key');
     if (viewerKey == null || viewerKey!.length < 8) {
       viewerKey = _newViewerKey();
@@ -209,7 +328,8 @@ class AppController extends ChangeNotifier {
     if (fcmToken.isEmpty) {
       // Temporary stub until PushNotifications replaces it with the real FCM
       // token (front stores sreamart_fcm_token the same way).
-      fcmToken = '${AppConfig.devicePlatform}_${viewerKey}_${DateTime.now().millisecondsSinceEpoch}';
+      fcmToken =
+          '${AppConfig.devicePlatform}_${viewerKey}_${DateTime.now().millisecondsSinceEpoch}';
       await _prefs.setString('sreamart_fcm_token', fcmToken);
     }
     final lang = _prefs.getString('language') ?? 'ar';
@@ -250,31 +370,112 @@ class AppController extends ChangeNotifier {
     }
 
     api = CustomerApi(baseUrl: apiUrl, token: token, viewerKey: viewerKey);
+    _catalogDb = await openCatalogDbFile();
+    if (_catalogDb != null) {
+      _localCart = local_cart.LocalCartRepository(_catalogDb!);
+      _syncOrchestrator = SyncOrchestrator(db: _catalogDb!, apiClient: api);
+      _syncOrchestrator!.start();
+      await _localCart!.load();
+      if (guestCart.isNotEmpty) {
+        for (final item in guestCart) {
+          await _localCart!.addItem(local_cart.CartItem.fromMap(item));
+        }
+        await _prefs.remove('guest_cart');
+        guestCart = [];
+      }
+    }
+    // Offline-first cold start: paint every usable persisted document BEFORE
+    // any network request, so a start without connectivity still shows the
+    // last visited shop, categories, and the current account's favorites.
+    // TTLs only decide whether a background refresh is triggered — they never
+    // hide persisted rows (see loadShop/loadRootCategories).
+    _paintStaleShopFromCache();
+    _paintStaleCategoriesFromCache();
+    _paintStaleCitiesFromCache();
+    _paintStaleSettingsFlagsFromCache();
+    await restoreCachedFavorites();
     try {
       brand = await BrandService(apiUrl).load(prefs: _prefs);
-      if (token != null) {
-        final me = await api.userDetails();
-        if (me.ok) {
-          user = me.user.isNotEmpty ? me.user : me.dataMap;
-        } else {
-          await _clearSession();
-        }
-      }
+      await validateSession();
       // Parallel bootstrap: settings + cities are independent.
       await Future.wait([reloadSettings(), loadCities()]);
       await resolveCity();
+      // If still no city and we have cities available, select the first one
+      // so the app has a valid location even when starting offline without
+      // prior city data. This ensures API calls use valid coordinates.
+      if (city == null && cities.isNotEmpty) {
+        await selectCity(normalizeCity(cities.first));
+      }
       // Shop + categories + hours are independent of each other.
-      await Future.wait([loadShop(), loadRootCategories(), loadBusinessHours()]);
+      await Future.wait([
+        loadShop(),
+        loadRootCategories(),
+        loadBusinessHours(),
+      ]);
       if (isLoggedIn) {
         await loadAddresses();
         await refreshCart();
       }
+      await reconcileCheckoutSession();
       bootstrapped = true;
+      // Opportunistic best-effort catalog sync (never blocks startup, never
+      // throws, no-op while the cutover flag is off).
+      syncCatalogSoon();
     } catch (error) {
       bootstrapError = '$error';
       bootstrapped = true;
     }
+    _bumpChrome();
+    _bumpNav();
+    // Opportunistic replay of durable favorite ops (never checkout).
+    kickSyncDelayed(const Duration(seconds: 3));
     notifyListeners();
+  }
+
+  /// Validates the stored session against the backend. Proven auth failures
+  /// (401/403) clear the session; offline/transient failures keep it (token
+  /// + last user snapshot) so airplane restarts stay logged in with saved
+  /// data instead of wiping login on every network blip.
+  @visibleForTesting
+  Future<void> validateSession() async {
+    if (token == null) return;
+    final scope = accountScope;
+    final me = await api.userDetails();
+    if (scope != accountScope) return;
+    if (me.ok) {
+      user = me.user.isNotEmpty ? me.user : me.dataMap;
+      try {
+        await offline.writeDoc(
+          OfflineCache.snapshotKey('user::$scope'),
+          user,
+          scope: scope,
+        );
+      } catch (_) {}
+    } else if (me.classifiedError?.category == ApiErrorCategory.auth) {
+      await _clearSession();
+    } else {
+      if (user == null) {
+        try {
+          final snap = offline.readDoc(
+            OfflineCache.snapshotKey('user::$scope'),
+          );
+          if (snap?.scope == scope && snap?.payload is Map) {
+            user = J.map(snap?.payload);
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// Runs the outbox with the safe executor (favorites/cart-merge only).
+  Future<void> kickSync() => sync.run(executor: runPendingOp);
+
+  void kickSyncDelayed(Duration delay) {
+    Future<void>.delayed(delay, () {
+      try {
+        sync.run(executor: runPendingOp);
+      } catch (_) {}
+    });
   }
 
   Future<void> setApiUrl(String url) async {
@@ -293,25 +494,111 @@ class AppController extends ChangeNotifier {
   Future<void> setLanguage(String code) async {
     await i18n.load(code);
     await _prefs.setString('language', i18n.code);
+    _bumpChrome();
     notifyListeners();
   }
 
   String t(String key) => i18n.t(key);
 
   Future<void> reloadSettings() async {
-    final result = await api.settings(withAuth: isLoggedIn);
+    final scope = accountScope;
+    final loggedIn = isLoggedIn;
+    final result = await api.settings(withAuth: loggedIn);
+    if (scope != accountScope) return;
     if (result.ok) {
       var data = result.dataMap;
-      if (data['web_settings'] is List)
-        data['web_settings'] = <String, dynamic>{};
-      if (data['firebase'] is List) data['firebase'] = <String, dynamic>{};
+      if (data['web_settings'] is List) {
+      data['web_settings'] = <String, dynamic>{};
+    }
+      if (data['firebase'] is List) {
+      data['firebase'] = <String, dynamic>{};
+    }
       settings = data;
-      favoriteIds = J.list(data['favorite_product_ids']);
+      try {
+        final sellerUrl = J.str(data['seller_android_app_url']);
+        if (sellerUrl.isNotEmpty) {
+          await _prefs.setString('seller_app_url', sellerUrl);
+        }
+        Future<void> saveFlag(String key, dynamic raw) async {
+          if (raw == null) return;
+          await _prefs.setInt(key, J.flag(raw) ? 1 : 0);
+        }
+
+        final catalogMode = J.str(
+          data['catalog_mode'] ?? J.map(data['web_settings'])['catalog_mode'],
+        );
+        if (catalogMode.isNotEmpty) {
+          await _prefs.setString('set_catalog_mode', catalogMode);
+        }
+        final currency = J.str(data['currency']);
+        if (currency.isNotEmpty) {
+          await _prefs.setString('set_currency', currency);
+        }
+        if (data['decimal_point'] != null) {
+          await _prefs.setInt('set_decimals', J.i(data['decimal_point'], 2));
+        }
+        await saveFlag('flag_one_seller', data['one_seller_cart']);
+        await saveFlag('flag_akhdimni', data['akhdimni_enabled']);
+        await saveFlag(
+          'flag_akhdimni_p2p',
+          data['akhdimni_point_to_point_enabled'],
+        );
+        await saveFlag(
+          'flag_akhdimni_special',
+          data['akhdimni_special_items_enabled'],
+        );
+        await saveFlag('flag_order_tracking', data['order_tracking_enabled']);
+      } catch (_) {}
+      // Server is authoritative for favorites, but deliberate offline toggles
+      // queued in the outbox must survive a stale server snapshot: pending
+      // adds are re-applied on top, pending removals are filtered out, so
+      // newer local intent is never wiped before the outbox replays.
+      var serverFavs = J.list(data['favorite_product_ids']);
+      try {
+        final pending = PendingOutbox(store, scope).load();
+        final pendingAdds = pending
+            .where((o) => o.type == PendingOpType.favoriteAdd)
+            .map((o) => '${o.payload['product_id']}')
+            .where((id) => id.isNotEmpty && id != 'null')
+            .toSet();
+        final pendingRemoves = pending
+            .where((o) => o.type == PendingOpType.favoriteRemove)
+            .map((o) => '${o.payload['product_id']}')
+            .where((id) => id.isNotEmpty && id != 'null')
+            .toSet();
+        if (pendingAdds.isNotEmpty || pendingRemoves.isNotEmpty) {
+          final merged = <dynamic>[...serverFavs];
+          final seen = merged.map((e) => '$e').toSet();
+          for (final id in pendingAdds) {
+            if (!seen.contains(id)) {
+              merged.add(id);
+              seen.add(id);
+            }
+          }
+          if (pendingRemoves.isNotEmpty) {
+            merged.removeWhere((e) => pendingRemoves.contains('$e'));
+          }
+          serverFavs = merged;
+        }
+      } catch (_) {}
+      favoriteIds = serverFavs;
+      try {
+        await offline.writeDoc(
+          OfflineCache.favoritesKey(scope),
+          favoriteIds.toList(),
+          scope: scope,
+        );
+      } catch (_) {}
+      _bumpChrome();
       checkoutConfig = CheckoutConfig.fromSettings(data);
       final hoursRaw = data['business_hours'];
       if (hoursRaw is Map) {
         businessHours = BusinessHoursResult.fromMap(J.map(hoursRaw));
       }
+    } else {
+      // Refresh failed (offline/timeout): fall back to the last persisted
+      // favorites for this account instead of leaving an empty list.
+      await restoreCachedFavorites();
     }
     try {
       final pay = await api.paymentMethods();
@@ -330,7 +617,19 @@ class AppController extends ChangeNotifier {
 
   Future<void> loadCities() async {
     final result = await api.cities();
-    cities = result.ok ? result.dataMaps : [];
+    if (result.ok && result.dataMaps.isNotEmpty) {
+      cities = result.dataMaps;
+      try {
+        final dump = jsonEncode(cities);
+        // Cities are small global rows; guard anyway for device safety.
+        if (dump.length < 200 * 1024) {
+          await _prefs.setString('cities_cache', dump);
+        }
+      } catch (_) {}
+    } else {
+      // Refresh failed: keep previously painted (stale) rows when available.
+      _paintStaleCitiesFromCache();
+    }
     citiesLoaded = true;
     notifyListeners();
   }
@@ -366,32 +665,137 @@ class AppController extends ChangeNotifier {
   Future<void> selectCity(Map<String, dynamic> next) async {
     city = next;
     await _prefs.setString('city', jsonEncode(next));
+    _bumpNav();
     notifyListeners();
     await loadShop();
     await loadRootCategories();
     if (isLoggedIn) await refreshCart();
+    // New city scope: start a best-effort sync so offline browsing follows
+    // the city switch (old scopes are retained, reads use the new scope).
+    syncCatalogSoon();
   }
 
-  /// Cache-first shop: paints cached home instantly (max 2 min old), then
-  /// refreshes in background. New stores appear within ~2 min max — never hidden.
+  /// Paints the last persisted shop document regardless of age (cold-start
+  /// offline support). Returns true when usable rows were painted.
+  /// Staleness is signalled by the UI badge; a background refresh follows
+  /// whenever the TTL has expired (see [loadShop]).
+  bool _paintStaleShopFromCache() {
+    try {
+      final raw = _prefs.getString('shop_cache');
+      if (raw == null || raw.isEmpty) return false;
+      final decoded = J.map(jsonDecode(raw));
+      if (decoded.isEmpty) return false;
+      shop ??= decoded;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Paints the last persisted cities list (global, non-sensitive) so the
+  /// city picker stays usable offline. Returns true when rows were painted.
+  bool _paintStaleCitiesFromCache() {
+    try {
+      final raw = _prefs.getString('cities_cache');
+      if (raw == null || raw.isEmpty) return false;
+      final decoded = J.maps(jsonDecode(raw));
+      if (decoded.isEmpty) return false;
+      if (cities.isEmpty) {
+        cities = decoded;
+        citiesLoaded = true;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Paints the last persisted categories regardless of age. Returns true
+  /// when usable rows were painted.
+  bool _paintStaleCategoriesFromCache() {
+    try {
+      final raw = _prefs.getString('cats_cache');
+      if (raw == null || raw.isEmpty) return false;
+      final decoded = J.maps(jsonDecode(raw));
+      if (decoded.isEmpty) return false;
+      if (rootCategories.isEmpty) rootCategories = decoded;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Paints last persisted feature flags (tab visibility, tracking) so the
+  /// bottom bar and feature tiles match the last known server state on an
+  /// offline cold start instead of silently dropping tabs.
+  void _paintStaleSettingsFlagsFromCache() {
+    try {
+      int? flag(String key) {
+        if (!_prefs.containsKey(key)) return null;
+        return _prefs.getInt(key);
+      }
+
+      final oneSeller = flag('flag_one_seller');
+      if (oneSeller != null) settings['one_seller_cart'] = oneSeller;
+      final akhdimni = flag('flag_akhdimni');
+      if (akhdimni != null) settings['akhdimni_enabled'] = akhdimni;
+      final p2p = flag('flag_akhdimni_p2p');
+      if (p2p != null) settings['akhdimni_point_to_point_enabled'] = p2p;
+      final special = flag('flag_akhdimni_special');
+      if (special != null) settings['akhdimni_special_items_enabled'] = special;
+      final tracking = flag('flag_order_tracking');
+      if (tracking != null) settings['order_tracking_enabled'] = tracking;
+      if (_prefs.containsKey('set_catalog_mode')) {
+        final mode = _prefs.getString('set_catalog_mode');
+        if (mode != null && mode.isNotEmpty) settings['catalog_mode'] = mode;
+      }
+      if (_prefs.containsKey('set_currency')) {
+        final cur = _prefs.getString('set_currency');
+        if (cur != null && cur.isNotEmpty) settings['currency'] = cur;
+      }
+      if (_prefs.containsKey('set_decimals')) {
+        final dec = _prefs.getInt('set_decimals');
+        if (dec != null) settings['decimal_point'] = dec;
+      }
+    } catch (_) {}
+  }
+
+  /// Stale-while-revalidate shop: paints cached home instantly (any age),
+  /// then refreshes in background when the 2-minute freshness TTL expired.
+  /// A failed refresh NEVER clears the painted rows — stale content stays
+  /// visible with an offline/stale badge instead of an empty screen.
   Future<void> loadShop({bool force = false}) async {
-    const ttl = Duration(minutes: 2);
     if (!force) {
       try {
         final raw = _prefs.getString('shop_cache');
         final at = _prefs.getInt('shop_cache_at') ?? 0;
-        if (raw != null && raw.isNotEmpty &&
-            DateTime.now().millisecondsSinceEpoch - at < ttl.inMilliseconds) {
+        if (raw != null && raw.isNotEmpty) {
           final decoded = J.map(jsonDecode(raw));
           if (decoded.isNotEmpty) {
+            final ageOk =
+                DateTime.now().millisecondsSinceEpoch - at <
+                const Duration(minutes: 2).inMilliseconds;
             shop = decoded;
             notifyListeners();
-            // Background revalidate without blocking UI.
-            _refreshShopInBackground();
-            return;
+            if (ageOk) {
+              // Fresh: revalidate silently without blocking the UI.
+              _refreshShopInBackground();
+              return;
+            }
+            // Stale but usable: keep painted, refresh below (foreground so
+            // pull-to-refresh resolves), preserving rows on failure.
+          } else {
+            // Empty cache entry: keep previously painted shop if any.
           }
+        } else {
+          // No cache entry: keep previously painted shop if any.
         }
-      } catch (_) {}
+      } catch (_) {
+        // Keep previously painted shop if any.
+      }
+      // If shop is still null after cache check, try previously painted value
+      // from an older cycle (defensive: never show empty shop on cold-start
+      // if we had data from a prior session).
     }
     final point = browseCoords;
     final result = await api.shop(
@@ -406,7 +810,18 @@ class AppController extends ChangeNotifier {
         if (dump.length < 400 * 1024) {
           await _prefs.setString('shop_cache', dump);
           await _prefs.setInt(
-              'shop_cache_at', DateTime.now().millisecondsSinceEpoch);
+            'shop_cache_at',
+            DateTime.now().millisecondsSinceEpoch,
+          );
+        }
+      } catch (_) {}
+    } else if (shop == null) {
+      // Last resort: try to recover from ancient cache (no TTL check).
+      try {
+        final ancientRaw = _prefs.getString('shop_cache');
+        if (ancientRaw != null && ancientRaw.isNotEmpty) {
+          shop = J.map(jsonDecode(ancientRaw));
+          notifyListeners();
         }
       } catch (_) {}
     }
@@ -427,7 +842,9 @@ class AppController extends ChangeNotifier {
           if (dump.length < 400 * 1024) {
             await _prefs.setString('shop_cache', dump);
             await _prefs.setInt(
-                'shop_cache_at', DateTime.now().millisecondsSinceEpoch);
+              'shop_cache_at',
+              DateTime.now().millisecondsSinceEpoch,
+            );
           }
         } catch (_) {}
         notifyListeners();
@@ -435,22 +852,39 @@ class AppController extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Stale-while-revalidate categories: paints persisted rows of any age,
+  /// then refreshes when the 10-minute TTL expired. Failed refreshes keep
+  /// the painted rows; only a successful response replaces them.
   Future<void> loadRootCategories({bool force = false}) async {
-    const ttl = Duration(minutes: 10);
     if (!force) {
       try {
         final raw = _prefs.getString('cats_cache');
         final at = _prefs.getInt('cats_cache_at') ?? 0;
-        if (raw != null && raw.isNotEmpty &&
-            DateTime.now().millisecondsSinceEpoch - at < ttl.inMilliseconds) {
+        if (raw != null && raw.isNotEmpty) {
           final decoded = J.maps(jsonDecode(raw));
           if (decoded.isNotEmpty) {
             rootCategories = decoded;
             notifyListeners();
-            return;
+            final ageOk =
+                DateTime.now().millisecondsSinceEpoch - at <
+                const Duration(minutes: 10).inMilliseconds;
+            if (ageOk) {
+              _refreshCategoriesInBackground();
+              return;
+            }
+            // Stale: fall through to foreground refresh, keep rows on failure.
+          } else {
+            // Empty cache entry: keep previously painted categories if any.
           }
+        } else {
+          // No cache entry: keep previously painted categories if any.
         }
-      } catch (_) {}
+      } catch (_) {
+        // Keep previously painted categories if any.
+      }
+      // If rootCategories is still empty after cache check, try previously
+      // painted value from an older cycle (defensive: never show empty
+      // categories on cold-start if we had data from a prior session).
     }
     final result = await api.categories(categoryId: 0, limit: 50, offset: 0);
     if (result.ok) {
@@ -460,11 +894,43 @@ class AppController extends ChangeNotifier {
         if (dump.length < 200 * 1024) {
           await _prefs.setString('cats_cache', dump);
           await _prefs.setInt(
-              'cats_cache_at', DateTime.now().millisecondsSinceEpoch);
+            'cats_cache_at',
+            DateTime.now().millisecondsSinceEpoch,
+          );
+        }
+      } catch (_) {}
+    } else if (rootCategories.isEmpty) {
+      // Last resort: try to recover from ancient cache (no TTL check).
+      try {
+        final ancientRaw = _prefs.getString('cats_cache');
+        if (ancientRaw != null && ancientRaw.isNotEmpty) {
+          rootCategories = J.maps(jsonDecode(ancientRaw));
+          notifyListeners();
         }
       } catch (_) {}
     }
+    // On failure the rows painted above are kept (never cleared here).
     notifyListeners();
+  }
+
+  Future<void> _refreshCategoriesInBackground() async {
+    try {
+      final result = await api.categories(categoryId: 0, limit: 50, offset: 0);
+      if (result.ok && result.dataMaps.isNotEmpty) {
+        rootCategories = result.dataMaps;
+        try {
+          var dump = jsonEncode(rootCategories);
+          if (dump.length < 200 * 1024) {
+            await _prefs.setString('cats_cache', dump);
+            await _prefs.setInt(
+              'cats_cache_at',
+              DateTime.now().millisecondsSinceEpoch,
+            );
+          }
+        } catch (_) {}
+        notifyListeners();
+      }
+    } catch (_) {}
   }
 
   // ---- Front parity: checkout config / business hours / time slots ----
@@ -557,10 +1023,13 @@ class AppController extends ChangeNotifier {
       lines[i] = {...lines[i], 'qty': qty};
     } else {
       lines.add({
+        // ignore: use_null_aware_elements
         if (productId != null) 'product_id': productId,
         'product_variant_id': variantId,
         'qty': qty,
+        // ignore: use_null_aware_elements
         if (sellerId != null) 'seller_id': sellerId,
+        // ignore: use_null_aware_elements
         if (productPrice != null) 'productPrice': productPrice,
       });
     }
@@ -594,6 +1063,7 @@ class AppController extends ChangeNotifier {
   }) async {
     final ids = <dynamic>[
       ..._sellerIdsFromCart(),
+      // ignore: use_null_aware_elements
       if (sellerId != null) sellerId,
     ];
     await loadBusinessHours(sellerIds: ids);
@@ -612,7 +1082,9 @@ class AppController extends ChangeNotifier {
     }
 
     if (wouldExceedStoreLimit(sellerId: sellerId, variantId: variantId)) {
-      return t('max_stores_exceeded').replaceAll('{max}', '$maxSellersPerCheckout');
+      return t(
+        'max_stores_exceeded',
+      ).replaceAll('{max}', '$maxSellersPerCheckout');
     }
     return null;
   }
@@ -653,26 +1125,799 @@ class AppController extends ChangeNotifier {
   }
 
   Future<ApiResult> fetchCheckoutGroup(dynamic id) => api.checkoutGroup(id);
-  Future<ApiResult> cancelCheckoutGroup(dynamic id, {String reason = ''}) => api.cancelCheckoutGroup(id, reason: reason);
+  Future<ApiResult> cancelCheckoutGroup(dynamic id, {String reason = ''}) =>
+      api.cancelCheckoutGroup(id, reason: reason);
 
+  CheckoutSession get checkoutSession {
+    _checkoutSession ??= CheckoutSession(store, accountScope);
+    return _checkoutSession!;
+  }
+
+  /// Stable idempotency key for the current logical checkout attempt.
+  /// The SAME key is reused across retries/gateway steps; a fresh timestamp
+  /// per tap would defeat server-side deduplication. Cleared only on
+  /// authoritative success or explicit cancellation (see CheckoutSession).
+  Future<String> checkoutKey({Map<String, dynamic>? context}) =>
+      checkoutSession.begin(context: context);
+
+  /// Deterministic fingerprint for the current cart snapshot. Changes whenever
+  /// items, quantities, address, payment method, delivery slot, or promo code
+  /// change, forcing a fresh idempotency key for a logically different order.
+  String checkoutFingerprint({
+    dynamic addressId,
+    String? paymentMethod,
+    String? deliveryTime,
+    String? promoCodeId,
+  }) => cartFingerprint(
+    items: cartProducts,
+    addressId: addressId,
+    paymentMethod: paymentMethod,
+    deliveryTime: deliveryTime,
+    promoCodeId: promoCodeId,
+  );
+
+  /// Legacy alias (kept for compatibility): returns the persisted session key
+  /// synchronously when available, otherwise a scoped fresh key. Prefer
+  /// [checkoutKey] (async, persisted) for new code.
   String buildIdempotencyKey() {
+    final existing = _checkoutSession?.key;
+    if (existing != null) return existing;
     final uid = user?['id'] ?? 'guest';
     return 'checkout-$uid-${DateTime.now().millisecondsSinceEpoch}';
   }
 
-  CanPlaceOrderResult canPlaceOrder() => canPlaceOrderFromBusinessHours(businessHours);
+  Future<void> clearCheckoutSession() async {
+    try {
+      await checkoutSession.clear();
+    } catch (_) {}
+    _checkoutSession = null;
+  }
+
+  /// Called once at startup. If a checkout session exists, try to find a
+  /// matching recent order. If found, the session is cleared; otherwise the
+  /// unresolved flag is set so the UI can block resubmission until the user
+  /// reconciles manually.
+  Future<void> reconcileCheckoutSession() async {
+    final key = checkoutSession.key;
+    if (key == null) {
+      unresolvedCheckout = false;
+      return;
+    }
+    final exists = await hasRecentOrderForSession(key);
+    if (exists) {
+      await clearCheckoutSession();
+      unresolvedCheckout = false;
+    } else {
+      unresolvedCheckout = true;
+    }
+  }
+
+  Future<void> _invalidateCheckoutSession() async {
+    if (_checkoutSession?.key != null || checkoutSession.key != null) {
+      await clearCheckoutSession();
+    }
+  }
+
+  /// Reconciles an uncertain checkout (timeout / crash / killed app) against
+  /// the authoritative order history BEFORE offering resubmission, so a timed
+  /// out request that actually succeeded never becomes a duplicate order.
+  Future<bool> hasRecentOrderForSession(String sessionKey) async {
+    try {
+      final res = await api.orders(limit: 5, offset: 0);
+      if (!res.ok) return false;
+      for (final o in res.dataMaps) {
+        if ('${o['idempotency_key']}' == sessionKey) return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  CanPlaceOrderResult canPlaceOrder() =>
+      canPlaceOrderFromBusinessHours(businessHours);
 
   Future<void> loadAddresses() async {
     if (!isLoggedIn) return;
+    final scope = accountScope;
+    // Paint cached addresses instantly (offline-first), then refresh.
+    try {
+      final cached = offline.readDoc(OfflineCache.addressesKey(accountScope));
+      final payload = cached?.payload;
+      if (payload is List && addresses.isEmpty) {
+        addresses = J.maps(payload);
+        selectedAddress ??= addresses.cast<Map<String, dynamic>?>().firstWhere(
+          (item) => J.i(item?['is_default']) == 1,
+          orElse: () => addresses.isNotEmpty ? addresses.first : null,
+        );
+        notifyListeners();
+      }
+    } catch (_) {}
     final result = await api.addresses();
+    if (scope != accountScope) return;
     if (result.ok) {
       addresses = result.dataMaps;
       selectedAddress ??= addresses.cast<Map<String, dynamic>?>().firstWhere(
         (item) => J.i(item?['is_default']) == 1,
         orElse: () => addresses.isNotEmpty ? addresses.first : null,
       );
+      try {
+        await offline.writeDoc(
+          OfflineCache.addressesKey(scope),
+          addresses,
+          scope: scope,
+        );
+      } catch (_) {}
     }
     notifyListeners();
+  }
+
+  // ---- Offline-first document helpers (local-first paint, network refresh) ----
+  /// Hash includes the catalog [view] so seller rows (stores tab) can never
+  /// be painted as product rows or vice versa (was a cache-key collision:
+  /// both views shared the same key).
+  String productPageHash(
+    Map<String, dynamic> query, {
+    String view = 'products',
+  }) =>
+      OfflineCache.queryHash({...query, 'view': view, 'city_id': city?['id']});
+
+  Future<void> cacheProductPage(
+    Map<String, dynamic> query,
+    List<Map<String, dynamic>> items, {
+    String view = 'products',
+  }) async {
+    try {
+      // Bounded LRU writer: browsing never grows storage without limit.
+      await offline.writeProductPage(
+        OfflineCache.productsKey(productPageHash(query, view: view)),
+        items,
+      );
+    } catch (_) {}
+  }
+
+  List<Map<String, dynamic>> readCachedProductPage(
+    Map<String, dynamic> query, {
+    String view = 'products',
+  }) {
+    try {
+      final doc = offline.readDoc(
+        OfflineCache.productsKey(productPageHash(query, view: view)),
+      );
+      final payload = doc?.payload;
+      if (payload is List) return J.maps(payload);
+    } catch (_) {}
+    return [];
+  }
+
+  Future<void> cacheProductDetails(String id, Map<String, dynamic> data) async {
+    try {
+      await offline.writeProductDetails(
+        OfflineCache.productDetailsKey(id),
+        data,
+      );
+    } catch (_) {}
+  }
+
+  Map<String, dynamic>? readCachedProductDetails(String id) {
+    try {
+      final doc = offline.readDoc(OfflineCache.productDetailsKey(id));
+      final payload = doc?.payload;
+      if (payload is Map) return J.map(payload);
+    } catch (_) {}
+    return null;
+  }
+
+  bool isProductDetailsFresh(String id) {
+    try {
+      return offline.fresh(
+        OfflineCache.productDetailsKey(id),
+        CacheEntity.productDetails,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ---- Local Drift catalog (public snapshots; account data never enters) ----
+  /// Location scope for catalog reads/writes (`city:<id>` or `global`).
+  String get catalogScope => catalogScopeForCity(city);
+
+/// Resolves the honest data state of the current catalog scope for empty
+/// states and retry controls. Never infers status from a row count alone:
+/// a zero count can mean disabled, failed, unsynchronized, or genuinely
+/// empty, and each needs different UI.
+Future<CatalogScopeState> catalogScopeState() async {
+  final scope = catalogScope;
+  if (catalogSync.progress.value.phase == CatalogSyncPhase.syncing &&
+      catalogSync.progress.value.scope == scope) {
+    return const CatalogScopeState(
+      status: CatalogScopeStatus.syncing,
+    );
+  }
+  try {
+    final db = await ensureCatalogDb();
+    if (db == null) return const CatalogScopeState(status: CatalogScopeStatus.neverSynced);
+    final dao = CatalogDao(db);
+    final row = await dao.getSyncState(scope);
+    if (row == null) {
+      return const CatalogScopeState(status: CatalogScopeStatus.neverSynced);
+    }
+    final count = await dao.productCount(scope);
+    final lastSyncAt = row.updatedAt;
+    final stale =
+        DateTime.now().difference(lastSyncAt) >
+        CachePolicy.ttlOf(CacheEntity.productList);
+    if (row.phase != 'full_complete') {
+      return CatalogScopeState(
+        status: CatalogScopeStatus.failed,
+        lastSyncAt: lastSyncAt,
+        listedCount: count,
+        stale: true,
+      );
+    }
+    // Count sections and haraj in current scope
+    final sectionCount = await dao.sectionHarajCount(scope, 'section');
+    final harajCount = await dao.sectionHarajCount(scope, 'haraj');
+    final anySection = sectionCount > 0;
+    final anyHaraj = harajCount > 0;
+    if (count == 0 && !anySection && !anyHaraj) {
+      return CatalogScopeState(
+        status: CatalogScopeStatus.empty,
+        lastSyncAt: lastSyncAt,
+        listedCount: count,
+        stale: stale,
+        sectionCount: sectionCount,
+        harajCount: harajCount,
+      );
+    }
+    return CatalogScopeState(
+      status: CatalogScopeStatus.ready,
+      lastSyncAt: lastSyncAt,
+      listedCount: count,
+      stale: stale,
+      sectionCount: sectionCount,
+      harajCount: harajCount,
+    );
+  } catch (_) {
+    return const CatalogScopeState(status: CatalogScopeStatus.neverSynced);
+  }
+}
+
+  /// Opens the catalog database when the cutover flag allows it. Returns null
+  /// when disabled or unavailable — callers always fall back to JSON/network.
+  Future<CatalogDatabase?> ensureCatalogDb() async {
+    if (!CatalogDbConfig.enabledForUse) return null;
+    final existing = _catalogDb;
+    if (existing != null) return existing;
+    try {
+      _catalogDb = await openCatalogDbFile();
+    } catch (_) {
+      _catalogDb = null;
+    }
+    return _catalogDb;
+  }
+
+  /// Test seam: injects an (in-memory) catalog database directly.
+  @visibleForTesting
+  void setCatalogDbForTest(CatalogDatabase? db) {
+    _catalogDb = db;
+  }
+
+  /// Best-effort sync of the current city scope in the background. Safe to
+  /// call from bootstrap/city-change/pull-to-refresh: debounced, single
+  /// flight, never throws, never blocks the UI.
+  Future<void> syncCatalogSoon() async {
+    if (!CatalogDbConfig.enabledForUse) return;
+    final last = _lastCatalogSyncAttempt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(minutes: 5)) {
+      return;
+    }
+    _lastCatalogSyncAttempt = DateTime.now();
+    try {
+      await syncCatalogNow();
+    } catch (_) {}
+  }
+
+  Future<CatalogSyncResult?> syncCatalogNow() async {
+    final db = await ensureCatalogDb();
+    if (db == null) return null;
+    final scope = catalogScope;
+    final point = browseCoords;
+    Future<CatalogPage> fetchProducts({
+      required int limit,
+      required int offset,
+    }) async {
+      try {
+        final res = await api.products(
+          latitude: point.latitude,
+          longitude: point.longitude,
+          filters: {'limit': limit, 'offset': offset, 'sort': 'old'},
+        );
+        if (!res.ok) {
+          // Past-end pages (and genuinely empty catalogs) arrive as
+          // status:0 + empty signal with no rows — clean end, not failure.
+          if (isEmptyCatalogPage(res)) {
+            return CatalogPage(rows: const [], total: offset);
+          }
+          return CatalogPage(rows: const [], ok: false, error: res.message);
+        }
+        final total = J.i(res.raw['total'] ?? res.dataMap['total'], -1);
+        return CatalogPage(rows: res.dataMaps, total: total);
+      } catch (e) {
+        return CatalogPage(rows: const [], ok: false, error: '$e');
+      }
+    }
+
+    Future<CatalogPage> fetchStores({
+      required int limit,
+      required int offset,
+    }) async {
+      try {
+        final res = await api.sellers(
+          latitude: point.latitude,
+          longitude: point.longitude,
+          limit: limit,
+          offset: offset,
+        );
+        if (!res.ok) {
+          return CatalogPage(rows: const [], ok: false, error: res.message);
+        }
+        var rows = res.dataMaps;
+        var total = J.i(res.raw['total'] ?? res.dataMap['total'], -1);
+        final node = res.raw['data'];
+        if (rows.isEmpty && node is Map) {
+          rows = J.maps(node['data']);
+          total = J.i(node['total'] ?? total, -1);
+        }
+        return CatalogPage(rows: rows, total: total);
+      } catch (e) {
+        return CatalogPage(rows: const [], ok: false, error: '$e');
+      }
+    }
+
+    Future<CatalogPage> fetchCategories({
+      required int limit,
+      required int offset,
+    }) async {
+      try {
+        final res = await api.categories(
+          categoryId: 0,
+          limit: limit,
+          offset: offset,
+        );
+        if (!res.ok) {
+          // Same past-end/empty convention as products (verified live).
+          if (isEmptyCatalogPage(res)) {
+            return CatalogPage(rows: const [], total: offset);
+          }
+          return CatalogPage(rows: const [], ok: false, error: res.message);
+        }
+        // Prefer the server total (response envelope) so walks past the
+        // first page work; fall back to the page length for compat.
+        final total = J.i(
+          res.raw['total'] ?? res.dataMap['total'],
+          res.dataMaps.length,
+        );
+        return CatalogPage(rows: res.dataMaps, total: total);
+      } catch (e) {
+        return CatalogPage(rows: const [], ok: false, error: '$e');
+      }
+    }
+
+    final result = await catalogSync.syncScope(
+      db: db,
+      scope: scope,
+      fetchProducts: fetchProducts,
+      fetchStores: fetchStores,
+      fetchCategories: fetchCategories,
+    );
+    notifyListeners();
+    // Opt-in thumbnails: only after a completed sync, never blocking.
+    if (result.complete) prefetchCatalogImages();
+    return result;
+  }
+
+  /// Downloads newest catalog thumbnails when the user opted in. Fire-and-
+  /// forget, bounded, best-effort — catalog data never waits for images.
+  Future<void> prefetchCatalogImages() async {
+    if (!offlineImagesEnabled) return;
+    try {
+      final db = await ensureCatalogDb();
+      if (db == null) return;
+      await ImagePrefetch.reconcile(db);
+      final rows = await CatalogDao(db).listProducts(catalogScope, limit: 100);
+      final urls = <String>[];
+      for (final p in rows) {
+        final u = p.thumbnailUrl;
+        if (u != null && u.isNotEmpty) urls.add(u);
+      }
+      await imagePrefetch.prefetch(urls, db: db);
+    } catch (_) {}
+  }
+
+  /// Local product rows for offline browsing (synchronized scope only).
+  /// Applies text/category/store scoping in the database, remaining filters
+  /// and sorting in memory. Returns [] when the catalog is disabled, empty,
+  /// or unsynchronized for this scope.
+  Future<List<Map<String, dynamic>>> catalogProductsLocal({
+    int? categoryId,
+    int? storeId,
+    String search = '',
+    String sort = '',
+    String priceMin = '',
+    String priceMax = '',
+    String minRating = '',
+    bool inStock = false,
+    bool onlyOffers = false,
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    try {
+      final db = await ensureCatalogDb();
+      if (db == null) return [];
+      // Filtering, sorting, and pagination all happen in SQL over the full
+      // listed set — matches beyond the first window are never hidden.
+      final found = await CatalogDao(db).queryProducts(
+        catalogScope,
+        categoryId: categoryId,
+        storeId: storeId,
+        search: search,
+        sort: sort,
+        priceMin: double.tryParse(priceMin),
+        priceMax: double.tryParse(priceMax),
+        minRating: double.tryParse(minRating),
+        inStockOnly: inStock,
+        offersOnly: onlyOffers,
+        limit: limit,
+        offset: offset,
+      );
+      return found.map((p) => J.map(jsonDecode(p.payload))).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Number of listed products matching the same filters as
+  /// [catalogProductsLocal] (without paging). Drives result counts and the
+  /// empty-state distinction together with [catalogScopeState].
+  Future<int> catalogFilteredCountLocal({
+    int? categoryId,
+    int? storeId,
+    String search = '',
+    String priceMin = '',
+    String priceMax = '',
+    String minRating = '',
+    bool inStock = false,
+    bool onlyOffers = false,
+  }) async {
+    try {
+      final db = await ensureCatalogDb();
+      if (db == null) return 0;
+      return await CatalogDao(db).countProducts(
+        catalogScope,
+        categoryId: categoryId,
+        storeId: storeId,
+        search: search,
+        priceMin: double.tryParse(priceMin),
+        priceMax: double.tryParse(priceMax),
+        minRating: double.tryParse(minRating),
+        inStockOnly: inStock,
+        offersOnly: onlyOffers,
+      );
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Offline product lookup by id or slug (synchronized rows only — covers
+  /// products the user never opened, unlike the visit-scoped JSON cache).
+  Future<Map<String, dynamic>?> catalogProductLocal({
+    int? id,
+    String slug = '',
+  }) async {
+    try {
+      final db = await ensureCatalogDb();
+      if (db == null) return null;
+      final dao = CatalogDao(db);
+      final scope = catalogScope;
+      if (id != null && id > 0) {
+        final p = await dao.getProductById(scope, id);
+        if (p != null) return J.map(jsonDecode(p.payload));
+      }
+      if (slug.isNotEmpty) {
+        final p = await dao.getProductBySlug(scope, slug);
+        if (p != null) return J.map(jsonDecode(p.payload));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Number of synchronized products for the current scope. Used to
+  /// distinguish "no synchronized data yet" from "no results for query".
+  Future<int> catalogProductCountLocal() async {
+    try {
+      final db = await ensureCatalogDb();
+      if (db == null) return 0;
+      return await CatalogDao(db).productCount(catalogScope);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Offline store rows + lookups for the synchronized scope.
+  Future<List<Map<String, dynamic>>> catalogStoresLocal({
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    try {
+      final db = await ensureCatalogDb();
+      if (db == null) return [];
+      final found = await CatalogDao(
+        db,
+      ).listStores(catalogScope, limit: limit + offset);
+      final rows = found.map((s) {
+        try {
+          final m = J.map(jsonDecode(s.payload));
+          if (m.isNotEmpty) return m;
+        } catch (_) {}
+        return <String, dynamic>{
+          'id': s.serverId,
+          'name': s.name,
+          'slug': s.slug,
+          'latitude': s.latitude,
+          'longitude': s.longitude,
+          'rating': s.rating,
+          'status': s.status,
+        };
+      }).toList();
+      if (offset >= rows.length) return [];
+      final end = (offset + limit).clamp(0, rows.length);
+      return rows.sublist(offset, end);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<Map<String, dynamic>?> catalogStoreLocal({
+    int? id,
+    String slug = '',
+  }) async {
+    try {
+      final db = await ensureCatalogDb();
+      if (db == null) return null;
+      final dao = CatalogDao(db);
+      final scope = catalogScope;
+      if (id != null && id > 0) {
+        final s = await dao.getStoreById(scope, id);
+        if (s != null) {
+          try {
+            final m = J.map(jsonDecode(s.payload));
+            if (m.isNotEmpty) return m;
+          } catch (_) {}
+          return <String, dynamic>{'id': s.serverId, 'name': s.name};
+        }
+      }
+      if (slug.isNotEmpty) {
+        final s = await dao.getStoreBySlug(scope, slug);
+        if (s != null) {
+          try {
+            final m = J.map(jsonDecode(s.payload));
+            if (m.isNotEmpty) return m;
+          } catch (_) {}
+          return <String, dynamic>{'id': s.serverId, 'name': s.name};
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Offline categories for the synchronized scope.
+  Future<List<Map<String, dynamic>>> catalogCategoriesLocal() async {
+    try {
+      final db = await ensureCatalogDb();
+      if (db == null) return [];
+      final found = await CatalogDao(db).listCategories(catalogScope);
+      return found
+          .map(
+            (c) => <String, dynamic>{
+              'id': c.serverId,
+              'name': c.name,
+              'slug': c.slug,
+              'image': c.imageUrl,
+              'parent_id': c.parentId,
+              'row_order': c.rowOrder,
+            },
+          )
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  // ---- Generic snapshots for non-catalog domains ----
+  /// Public (global) snapshot: sliders, offers, campaigns, sections, FAQs,
+  /// CMS pages. Small display documents with no account data.
+  Future<void> cachePublicSnapshot(String name, dynamic payload) async {
+    try {
+      await offline.writeDoc(
+        OfflineCache.snapshotKey(name),
+        payload,
+        scope: 'global',
+      );
+    } catch (_) {}
+  }
+
+  dynamic readPublicSnapshot(String name) {
+    try {
+      return offline.readDoc(OfflineCache.snapshotKey(name))?.payload;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Account-scoped snapshot (orders-like privacy): never painted across
+  /// accounts. The owning scope is embedded in the key and verified on read.
+  Future<void> cacheAccountSnapshot(String name, dynamic payload) async {
+    final scope = accountScope;
+    try {
+      await offline.writeDoc(
+        OfflineCache.snapshotKey('$name::$scope'),
+        payload,
+        scope: scope,
+      );
+    } catch (_) {}
+  }
+
+  dynamic readAccountSnapshot(String name) {
+    final scope = accountScope;
+    try {
+      final doc = offline.readDoc(OfflineCache.snapshotKey('$name::$scope'));
+      if (doc?.scope != scope) return null;
+      return doc?.payload;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Deletes one account-scoped snapshot (e.g. assistant "new chat").
+  Future<void> removeAccountSnapshot(String name) async {
+    final scope = accountScope;
+    try {
+      await offline.removeDoc(OfflineCache.snapshotKey('$name::$scope'));
+    } catch (_) {}
+  }
+
+  // ---- Recent searches (global, non-sensitive) ----
+  static const int maxRecentSearches = 10;
+
+  List<String> recentSearches() {
+    try {
+      final raw = store.readJson('recent_searches');
+      if (raw is List) {
+        return raw
+            .map((e) => '$e'.trim())
+            .where((e) => e.isNotEmpty)
+            .take(maxRecentSearches)
+            .toList();
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  Future<void> addRecentSearch(String query) async {
+    final q = query.trim();
+    if (q.isEmpty) return;
+    try {
+      final current = recentSearches()
+          .where((e) => e.toLowerCase() != q.toLowerCase())
+          .toList();
+      current.insert(0, q);
+      await store.writeJson(
+        'recent_searches',
+        current.take(maxRecentSearches).toList(),
+      );
+    } catch (_) {}
+  }
+
+  // ---- Offline image prefetch preference ----
+  /// Whether the user opted into downloading catalog thumbnails for offline
+  /// browsing. OFF by default: prefetch may use significant mobile data, so
+  /// it requires an explicit choice (Wi-Fi recommended in the UI copy).
+  bool get offlineImagesEnabled {
+    try {
+      return _prefs.getBool('offline_images') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> setOfflineImagesEnabled(bool value) async {
+    try {
+      await _prefs.setBool('offline_images', value);
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> cacheOrders(
+    List<Map<String, dynamic>> activeOrders,
+    List<Map<String, dynamic>> previousOrders,
+  ) async {
+    // Never let an empty/failed refresh erase the last good snapshot:
+    // callers must only invoke this with confirmed rows (see OrdersScreen).
+    if (activeOrders.isEmpty && previousOrders.isEmpty) return;
+    try {
+      await offline.writeDoc(OfflineCache.ordersKey(accountScope), {
+        'active': activeOrders,
+        'previous': previousOrders,
+      }, scope: accountScope);
+    } catch (_) {}
+  }
+
+  ({List<Map<String, dynamic>> active, List<Map<String, dynamic>> previous})
+  readCachedOrders() {
+    try {
+      final doc = offline.readDoc(OfflineCache.ordersKey(accountScope));
+      final payload = doc?.payload;
+      if (payload is Map) {
+        final m = J.map(payload);
+        // Scope guard: never paint another account's orders.
+        if (doc?.scope != accountScope) {
+          return (active: [], previous: []);
+        }
+        return (active: J.maps(m['active']), previous: J.maps(m['previous']));
+      }
+    } catch (_) {}
+    return (active: [], previous: []);
+  }
+
+  /// Wishlist (full product rows) cache-first helpers. Favorite *ids* are
+  /// cached via reloadSettings/toggleFavorite; these helpers persist the full
+  /// product rows so the wishlist screen can paint offline.
+  Future<void> cacheWishlist(List<Map<String, dynamic>> items) async {
+    if (!isLoggedIn || items.isEmpty) return;
+    try {
+      await offline.writeDoc(
+        OfflineCache.wishlistKey(accountScope),
+        items,
+        scope: accountScope,
+      );
+    } catch (_) {}
+  }
+
+  List<Map<String, dynamic>> readCachedWishlist() {
+    try {
+      final doc = offline.readDoc(OfflineCache.wishlistKey(accountScope));
+      if (doc?.scope != accountScope) return [];
+      final payload = doc?.payload;
+      if (payload is List) return J.maps(payload);
+    } catch (_) {}
+    return [];
+  }
+
+  /// Last-known notifications page (account-scoped). Notifications stay
+  /// server-authoritative; the cache only prevents an empty screen when a
+  /// refresh fails offline.
+  Future<void> cacheNotifications(List<Map<String, dynamic>> items) async {
+    if (!isLoggedIn || items.isEmpty) return;
+    try {
+      await offline.writeDoc(
+        OfflineCache.notificationsKey(accountScope),
+        items,
+        scope: accountScope,
+      );
+    } catch (_) {}
+  }
+
+  List<Map<String, dynamic>> readCachedNotifications() {
+    try {
+      final doc = offline.readDoc(OfflineCache.notificationsKey(accountScope));
+      if (doc?.scope != accountScope) return [];
+      final payload = doc?.payload;
+      if (payload is List) return J.maps(payload);
+    } catch (_) {}
+    return [];
   }
 
   Future<void> setFcmToken(String value) async {
@@ -690,8 +1935,15 @@ class AppController extends ChangeNotifier {
     required String mobile,
     required String password,
   }) async {
-    final result = await api.loginMobile(mobile: mobile, password: password, fcm: fcmToken);
+    final result = await api.loginMobile(
+      mobile: mobile,
+      password: password,
+      fcm: fcmToken,
+    );
     if (!result.ok) {
+      if (result.classifiedError?.category == ApiErrorCategory.network) {
+        return kRequiresInternet;
+      }
       return result.message.isEmpty ? t('login_error') : result.message;
     }
     await _applyAuth(result);
@@ -717,7 +1969,12 @@ class AppController extends ChangeNotifier {
       backupPhone: backupPhone,
       fcm: fcmToken,
     );
-    if (!result.ok) return result.message;
+    if (!result.ok) {
+      if (result.classifiedError?.category == ApiErrorCategory.network) {
+        return kRequiresInternet;
+      }
+      return result.message;
+    }
     await _applyAuth(result);
     return null;
   }
@@ -732,37 +1989,120 @@ class AppController extends ChangeNotifier {
       password: password,
       passwordConfirmation: passwordConfirmation,
     );
-    if (!result.ok) return result.message;
+    if (!result.ok) {
+      if (result.classifiedError?.category == ApiErrorCategory.network) {
+        return kRequiresInternet;
+      }
+      return result.message;
+    }
     return null;
   }
 
   Future<void> _applyAuth(ApiResult result) async {
-    token = result.token ?? J.str(result.dataMap['access_token']);
+    await _persistAuth(result);
+    // Post-login refresh runs in the background: login completion (and the
+    // navigation that follows it) must never depend on settings/shop/cart
+    // round-trips. A stalled auxiliary call previously left the login screen
+    // stuck despite a valid server session (D1). Every refresh step below is
+    // idempotent and individually guarded, so concurrent/duplicate runs are
+    // safe (e.g. rapid repeated taps).
+    unawaited(_refreshAfterAuth());
+  }
+
+  /// Normalizes the signed-in user map. Login/register responses nest the
+  /// profile as `data.user` while `ApiResult.user` only reads a top-level
+  /// `user` key, so without this the controller would keep an id-less map
+  /// (wrong account scope + wrong snapshot key) even though the token is
+  /// valid.
+  Map<String, dynamic> _normalizeAuthUser(ApiResult result) {
+    final top = result.user.isNotEmpty ? result.user : result.dataMap;
+    if (top['id'] != null) return top;
+    final nested = J.map(top['user']);
+    if (nested['id'] != null) return nested;
+    return top;
+  }
+
+  /// Durable session persistence. Awaited by login/register: navigation only
+  /// proceeds once token + profile + secure storage are committed.
+  Future<void> _persistAuth(ApiResult result) async {
+    token = result.token;
     if (token == null || token!.isEmpty) {
       throw StateError('missing_token');
     }
-    user = result.user.isNotEmpty ? result.user : result.dataMap;
+    user = _normalizeAuthUser(result);
+    try {
+      await offline.writeDoc(
+        OfflineCache.snapshotKey('user::$accountScope'),
+        user,
+        scope: accountScope,
+      );
+    } catch (_) {}
     api.setToken(token);
-    await _prefs.setString('token', token!);
-    if (fcmToken.isNotEmpty) {
-      try {
+    try {
+      await vault.write(token!);
+    } on TokenVaultException {
+      token = null;
+      user = null;
+      api.setToken(null);
+      rethrow;
+    }
+    _checkoutSession = null;
+    // New account scope: restore that account's persisted favorites BEFORE
+    // the network refresh, so the wishlist paints instantly and offline
+    // toggles are not lost when the refresh races or fails.
+    favoriteIds = [];
+    await restoreCachedFavorites();
+    _bumpNav();
+    notifyListeners();
+  }
+
+  /// Best-effort post-login refresh (fire-and-forget). Order matches the
+  /// previous inline sequence: FCM binding, one-shot guest-cart merge, then
+  /// settings/city/shop/cart refreshes and an outbox kick.
+  Future<void> _refreshAfterAuth() async {
+    try {
+      if (fcmToken.isNotEmpty) {
         await api.updateFcmToken(fcmToken);
+      }
+    } catch (_) {}
+    // Guest->account cart migration: attempt once during login. Because
+    // bulkAddToCart is NOT idempotent, we never enqueue an automatic retry;
+    // the guest cart is kept until the next successful login merge or until
+    // the user clears it manually.
+    if (guestCart.isNotEmpty) {
+      try {
+        final pending = List<Map<String, dynamic>>.from(guestCart);
+        final ids = pending
+            .map((item) => '${item['product_variant_id']}')
+            .join(',');
+        final qtys = pending.map((item) => '${item['qty']}').join(',');
+        final merged = await api.bulkAddToCart(variantIds: ids, quantities: qtys);
+        if (merged.ok) {
+          guestCart = [];
+          guestCartTotal = 0;
+          await _prefs.remove('guest_cart');
+        }
+        // On failure keep guestCart in memory and in prefs; refreshCart()
+        // reconciles against the server cart without duplicating lines.
       } catch (_) {}
     }
-    if (guestCart.isNotEmpty) {
-      final ids = guestCart
-          .map((item) => '${item['product_variant_id']}')
-          .join(',');
-      final qtys = guestCart.map((item) => '${item['qty']}').join(',');
-      await api.bulkAddToCart(variantIds: ids, quantities: qtys);
-      guestCart = [];
-      guestCartTotal = 0;
-      await _prefs.remove('guest_cart');
-    }
-    await reloadSettings();
-    await resolveCity();
-    await loadShop();
-    await refreshCart();
+    try {
+      await reloadSettings();
+    } catch (_) {}
+    try {
+      await resolveCity();
+    } catch (_) {}
+    try {
+      await loadShop();
+    } catch (_) {}
+    try {
+      await refreshCart();
+    } catch (_) {}
+    _bumpNav();
+    _bumpChrome();
+    try {
+      await kickSync();
+    } catch (_) {}
     notifyListeners();
   }
 
@@ -775,6 +2115,10 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _clearSession() async {
+    // Capture scope BEFORE nulling user so per-account docs are wiped and
+    // can never leak into the next account (orders/addresses/favorites).
+    final scope = accountScope;
+    final uid = user?['id'];
     token = null;
     user = null;
     cart = null;
@@ -783,8 +2127,22 @@ class AppController extends ChangeNotifier {
     selectedAddress = null;
     promoCode = null;
     favoriteIds = [];
+    _checkoutSession = null;
+    _variantLabels.clear();
+    try {
+      await store.writeJson('variant_labels', <String, String>{});
+    } catch (_) {}
     api.setToken(null);
-    await _prefs.remove('token');
+    await vault.clear();
+    try {
+      await offline.clearAccountDocs(scope);
+    } catch (_) {}
+    // Local notification-read flags are per-account: drop the outgoing
+    // account's rows so unread badges never leak across accounts.
+    try {
+      await NotificationRead.clear(uid);
+    } catch (_) {}
+    _bumpNav();
   }
 
   Future<ApiResult> refreshCart({int checkout = 0}) async {
@@ -796,21 +2154,39 @@ class AppController extends ChangeNotifier {
       return ApiResult({'status': 0});
     }
     if (isLoggedIn) {
+      final scope = accountScope;
       final result = await api.cart(
         latitude: point.latitude,
         longitude: point.longitude,
         checkout: checkout,
       );
+      if (scope != accountScope) return result;
       if (result.ok) {
         cart = result.dataMap;
         cartProducts = J.maps(cart?['cart'] ?? cart?['items'] ?? result.data);
         _attachVariantLabels(cartProducts);
         cartSubTotal = J.d(cart?['sub_total'] ?? cart?['total']);
+        // Persist the confirmed snapshot so an offline restart still shows
+        // the last server-confirmed lines (stale-badged, revalidated before
+        // checkout — never treated as live stock/prices).
+        if (checkout == 0) {
+          try {
+            await offline.writeDoc(
+              OfflineCache.snapshotKey('cart::$scope'),
+              {'products': cartProducts, 'subTotal': cartSubTotal},
+              scope: scope,
+            );
+          } catch (_) {}
+        }
         // parity: enrich sellerGroups etc when is_checkout=1
         if (checkout == 1) {
-          sellerGroups = J.maps(cart?['seller_groups'] ?? cart?['sellerGroups']);
+          sellerGroups = J.maps(
+            cart?['seller_groups'] ?? cart?['sellerGroups'],
+          );
           deliveryFees = J.map(cart?['delivery_fees'] ?? cart?['deliveryFees']);
-          paymentSplit = J.maps(cart?['payment_split'] ?? cart?['paymentSplit']);
+          paymentSplit = J.maps(
+            cart?['payment_split'] ?? cart?['paymentSplit'],
+          );
           platformFee = J.d(cart?['platform_fee']);
           isWalletChecked = J.i(cart?['is_wallet_checked']) == 1;
         }
@@ -831,6 +2207,24 @@ class AppController extends ChangeNotifier {
           if (timeSlots.isEmpty) await loadTimeSlots();
           await loadCheckoutConfig();
         }
+      } else if (cartProducts.isEmpty) {
+        // Offline with no live lines: restore the last server-confirmed
+        // snapshot for this account (scope-guarded). The UI badges it stale;
+        // checkout revalidates before any commit.
+        try {
+          final snap = offline.readDoc(
+            OfflineCache.snapshotKey('cart::$accountScope'),
+          );
+          if (snap?.scope == accountScope && snap?.payload is Map) {
+            final m = J.map(snap?.payload);
+            final rows = J.maps(m['products']);
+            if (rows.isNotEmpty) {
+              cartProducts = rows;
+              _attachVariantLabels(cartProducts);
+              cartSubTotal = J.d(m['subTotal']);
+            }
+          }
+        } catch (_) {}
       }
       notifyListeners();
       return result;
@@ -858,8 +2252,9 @@ class AppController extends ChangeNotifier {
         // user's taps are the truth for qty until the server confirms.
         final localQty = <String, int>{};
         for (final item in guestCart) {
-          localQty['${item['product_variant_id']}'] =
-              J.i(item['qty'] ?? item['quantity']);
+          localQty['${item['product_variant_id']}'] = J.i(
+            item['qty'] ?? item['quantity'],
+          );
         }
         for (final p in priced) {
           final key = '${p['product_variant_id'] ?? p['id']}';
@@ -886,6 +2281,24 @@ class AppController extends ChangeNotifier {
     return coords;
   }
 
+  /// Authoritative reachability probe for cart mutations (cart edits are
+  /// online-only): a recent success short-circuits, otherwise one cheap
+  /// request decides. Non-network failures still count as reachable.
+  Future<bool> hasInternetAccess() async {
+    final lastOk = api.lastSuccessAt;
+    if (lastOk != null &&
+        DateTime.now().difference(lastOk) < const Duration(seconds: 45)) {
+      return true;
+    }
+    try {
+      final res = await api.cities().timeout(const Duration(seconds: 8));
+      if (res.ok) return true;
+      return res.classifiedError?.category != ApiErrorCategory.network;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Returns `same_seller` when mixing sellers is not allowed.
   Future<String?> addToCart({
     required dynamic productId,
@@ -897,9 +2310,12 @@ class AppController extends ChangeNotifier {
     String storeName = '',
     String variantLabel = '',
   }) async {
+    if (!await hasInternetAccess()) return kRequiresInternet;
     if (!replaceSeller) {
       if (maxCartItemsCount > 0 && qty > maxCartItemsCount) {
-        return t('max_cart_limit_error').replaceAll('{max}', '$maxCartItemsCount');
+        return t(
+          'max_cart_limit_error',
+        ).replaceAll('{max}', '$maxCartItemsCount');
       }
       final currentQty = _qtyInCart(variantId);
       final isNewOrIncrease = qty > currentQty;
@@ -944,16 +2360,19 @@ class AppController extends ChangeNotifier {
       );
       if (result.oneSellerError == 1) {
         await refreshCart();
+        await _invalidateCheckoutSession();
         return 'same_seller';
       }
       if (!result.ok) {
         // Reconcile: drop the optimistic change, show the real error.
         await refreshCart();
+        await _invalidateCheckoutSession();
         return result.message.isEmpty
             ? t('something_went_wrong')
             : result.message;
       }
       await refreshCart();
+      await _invalidateCheckoutSession();
       return null;
     }
     if (replaceSeller) {
@@ -982,14 +2401,15 @@ class AppController extends ChangeNotifier {
         'product_id': productId,
         'product_variant_id': variantId,
         'qty': qty,
-        if (sellerId != null) 'seller_id': sellerId,
-        if (productPrice != null) 'productPrice': productPrice,
+        'seller_id': ?sellerId,
+        'productPrice': ?productPrice,
         if (variantLabel.trim().isNotEmpty)
           'variant_label': variantLabel.trim(),
       });
     }
-    await _prefs.setString('guest_cart', jsonEncode(guestCart));
+    await persistGuestCart();
     await refreshCart();
+    await _invalidateCheckoutSession();
     return null;
   }
 
@@ -1000,6 +2420,7 @@ class AppController extends ChangeNotifier {
     required dynamic productId,
     required dynamic variantId,
   }) async {
+    if (!await hasInternetAccess()) return kRequiresInternet;
     if (isLoggedIn) {
       // Optimistic: line disappears instantly, server confirms after.
       _optimisticSetQty(variantId, 0);
@@ -1009,28 +2430,33 @@ class AppController extends ChangeNotifier {
       );
       if (!result.ok) {
         await refreshCart();
+        await _invalidateCheckoutSession();
         return result.message.isEmpty
             ? t('something_went_wrong')
             : result.message;
       }
       await refreshCart();
+      await _invalidateCheckoutSession();
       return null;
     }
     guestCart.removeWhere(
       (item) => '${item['product_variant_id']}' == '$variantId',
     );
-    await _prefs.setString('guest_cart', jsonEncode(guestCart));
+    await persistGuestCart();
     await refreshCart();
+    await _invalidateCheckoutSession();
     return null;
   }
 
   Future<void> clearAllCart() async {
+    if (!await hasInternetAccess()) return;
     if (isLoggedIn) {
       await api.clearCart();
     }
     guestCart = [];
     await _prefs.remove('guest_cart');
     await refreshCart();
+    await _invalidateCheckoutSession();
   }
 
   Future<String?> applyPromo(String code, double total) async {
@@ -1039,6 +2465,7 @@ class AppController extends ChangeNotifier {
     promoCode = result.dataMap.isNotEmpty
         ? result.dataMap
         : {'promo_code': code, ...result.raw};
+    await _invalidateCheckoutSession();
     notifyListeners();
     return null;
   }
@@ -1061,16 +2488,155 @@ class AppController extends ChangeNotifier {
   bool isFavorite(dynamic productId) =>
       favoriteIds.map((id) => '$id').contains('$productId');
 
+  /// Optimistic favorite toggle with a durable outbox. The local state moves
+  /// instantly; failures are queued (coalesced by product id) and replayed by
+  /// [sync]. Server removals win on next refresh (reconciliation).
   Future<void> toggleFavorite(dynamic productId) async {
     if (!isLoggedIn) return;
-    if (isFavorite(productId)) {
-      await api.removeFavorite(productId);
-      favoriteIds.removeWhere((id) => '$id' == '$productId');
-    } else {
-      await api.addFavorite(productId);
+    final adding = !isFavorite(productId);
+    if (adding) {
       favoriteIds.add(productId);
+    } else {
+      favoriteIds.removeWhere((id) => '$id' == '$productId');
     }
+    try {
+      await offline.writeDoc(
+        OfflineCache.favoritesKey(accountScope),
+        favoriteIds.toList(),
+        scope: accountScope,
+      );
+    } catch (_) {}
     notifyListeners();
+    final res = adding
+        ? await api.addFavorite(productId)
+        : await api.removeFavorite(productId);
+    if (!res.ok) {
+      try {
+        await PendingOutbox(store, accountScope).enqueue(
+          PendingOp(
+            id: PendingOutbox.newId('fav'),
+            type: adding
+                ? PendingOpType.favoriteAdd
+                : PendingOpType.favoriteRemove,
+            payload: {
+              'product_id': '$productId',
+              // Owning account: the executor drops this op if the active
+              // account changed before replay (never mutate B with A's intent).
+              'account_scope': accountScope,
+            },
+            createdAt: DateTime.now(),
+          ),
+        );
+      } catch (_) {}
+      kickSyncDelayed(const Duration(seconds: 5));
+    } else {
+      // Direct success supersedes any queued opposite intent for this
+      // product (D3): without this, a stale queued remove replays after a
+      // newer successful add and silently undoes it on the next sync.
+      // Only same-product favorite ops in the current scope are cancelled;
+      // every other queued op keeps its retry guarantees.
+      try {
+        final outbox = PendingOutbox(store, accountScope);
+        final stale = outbox.load().where((o) =>
+            (adding
+                    ? o.type == PendingOpType.favoriteRemove
+                    : o.type == PendingOpType.favoriteAdd) &&
+                '${o.payload['product_id']}' == '$productId');
+        for (final o in stale) {
+          await outbox.remove(o.id);
+        }
+      } catch (_) {}
+    }
+  }
+
+  /// SyncEngine executor: replays ONLY safe idempotent ops. Returns true when
+  /// the op is done (success or permanently rejected), false on transient
+  /// failure (backoff). Auth/validation failures count as done — they are
+  /// reconciled by refresh, not retried blindly.
+  Future<bool> runPendingOp(PendingOp op) async {
+    // Cross-account guard: an op queued by account A must never execute
+    // under account B's credentials after a switch. Legacy ops without a
+    // stamped scope keep the old behavior (treated as current).
+    final opScope = op.payload['account_scope']?.toString();
+    if (opScope != null && opScope.isNotEmpty && opScope != accountScope) {
+      return true;
+    }
+    try {
+      switch (op.type) {
+        case PendingOpType.favoriteAdd:
+          final r = await api.addFavorite(op.payload['product_id']);
+          if (r.ok) return true;
+          if (_isAlreadyFavorite(r.message)) return true;
+          if (_isPermanent(r.classifiedError)) return true;
+          return false;
+        case PendingOpType.favoriteRemove:
+          // Verified against the current backend
+          // (`BasicApiController.removeFromFavorite`): with a valid
+          // product_id exactly one row is deleted, so replay converges;
+          // a repeat reports `no_product_found`, which also counts as done.
+          // WITHOUT product_id the endpoint deletes ALL user favorites, so
+          // an op with a missing/empty id is dropped, never executed.
+          final pid = '${op.payload['product_id']}';
+          if (pid.isEmpty || pid == 'null') return true;
+          final r = await api.removeFavorite(op.payload['product_id']);
+          if (r.ok) return true;
+          if (_isAlreadyRemoved(r.message)) return true;
+          if (_isPermanent(r.classifiedError)) return true;
+          return false;
+        case PendingOpType.guestCartMerge:
+          // bulkAddToCart is not idempotent, so guest-cart merge is never
+          // replayed automatically. Drain any legacy queued merges.
+          return true;
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _isAlreadyFavorite(String message) {
+    final m = message.toLowerCase();
+    return m.contains('already') && m.contains('favorite');
+  }
+
+  /// The backend reports `no_product_found` when the row is already gone:
+  /// the local removal has converged, so the op is done (not retried).
+  bool _isAlreadyRemoved(String message) {
+    final m = message.toLowerCase();
+    return (m.contains('no_product') && m.contains('found')) ||
+        (m.contains('not') && m.contains('found')) ||
+        (m.contains('already') && m.contains('removed'));
+  }
+
+  bool _isPermanent(ClassifiedApiError? error) {
+    if (error == null) return false;
+    switch (error.category) {
+      case ApiErrorCategory.auth:
+      case ApiErrorCategory.validation:
+      case ApiErrorCategory.notFound:
+        return true;
+      case ApiErrorCategory.network:
+      case ApiErrorCategory.server:
+      case ApiErrorCategory.rateLimit:
+      case ApiErrorCategory.malformed:
+      case ApiErrorCategory.unknown:
+        return false;
+    }
+  }
+
+  /// Restores cached favorites for the current scope (offline-first paint).
+  /// Wired into bootstrap, login, and settings-refresh failure so cached
+  /// favorites are actually displayed offline (previously written but never
+  /// read). Scope-guarded: another account's rows are never painted.
+  Future<void> restoreCachedFavorites() async {
+    try {
+      final cached = offline.readDoc(OfflineCache.favoritesKey(accountScope));
+      if (cached?.scope != accountScope) return;
+      final payload = cached?.payload;
+      if (payload is List && favoriteIds.isEmpty) {
+        favoriteIds = payload.toList();
+        notifyListeners();
+      }
+    } catch (_) {}
   }
 
   Future<String?> deleteAccount({
@@ -1082,6 +2648,9 @@ class AppController extends ChangeNotifier {
       password: password,
     );
     if (!result.ok) {
+      if (result.classifiedError?.category == ApiErrorCategory.network) {
+        return kRequiresInternet;
+      }
       return result.message.isEmpty
           ? t('something_went_wrong')
           : result.message;
@@ -1094,6 +2663,9 @@ class AppController extends ChangeNotifier {
   Future<String?> logoutAllDevices() async {
     final result = await api.logoutAllDevices();
     if (!result.ok) {
+      if (result.classifiedError?.category == ApiErrorCategory.network) {
+        return kRequiresInternet;
+      }
       return result.message.isEmpty
           ? t('something_went_wrong')
           : result.message;

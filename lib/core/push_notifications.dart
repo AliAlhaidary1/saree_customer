@@ -314,7 +314,33 @@ class PushNotifications {
     }
 
     final link = pick(['link', 'link_url', 'url', 'click_action']);
-    if (link.startsWith('/')) return link;
+    const allowed = [
+      '/orders',
+      '/product/',
+      '/seller/',
+      '/store/',
+      '/haraj',
+      '/akhdimni',
+      '/products',
+      '/sellers',
+      '/offers',
+      '/category/',
+      '/checkout-groups/',
+      '/notifications',
+      '/wishlist',
+      '/addresses',
+      '/wallet',
+      '/cart',
+      '/checkout',
+      '/account',
+      '/profile',
+      '/faq',
+      '/assistant',
+    ];
+    if (link.startsWith('/') &&
+        (link == '/' || allowed.any((p) => link == p || link.startsWith(p)))) {
+      return link;
+    }
 
     final groupId = pick(['checkout_group_id', 'checkoutGroupId', 'group_id']);
     if (groupId.isNotEmpty) return '/orders/$groupId';

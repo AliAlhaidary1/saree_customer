@@ -3,7 +3,10 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
+import '../../core/offline/operation_policy.dart';
 import '../../widgets/app_image.dart';
+import '../../widgets/offline_banner.dart';
+import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
 
 class FaqScreen extends StatefulWidget {
@@ -16,6 +19,7 @@ class FaqScreen extends StatefulWidget {
 class _FaqScreenState extends State<FaqScreen> {
   List<Map<String, dynamic>> items = [];
   bool loading = true;
+  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -24,15 +28,33 @@ class _FaqScreenState extends State<FaqScreen> {
   }
 
   Future<void> _load() async {
+    // Local-first: last FAQ snapshot paints offline.
+    final snap = appController.readPublicSnapshot('faqs');
+    if (snap is List && snap.isNotEmpty && mounted) {
+      setState(() {
+        items = J.maps(snap);
+        loading = false;
+        _servedFromCache = true;
+      });
+    }
     try {
       final res = await appController.api.faqs(limit: 50);
       if (!mounted) return;
+      if (res.ok && res.dataMaps.isNotEmpty) {
+        await appController.cachePublicSnapshot('faqs', res.dataMaps);
+      }
       setState(() {
-        items = res.dataMaps;
+        if (res.ok) items = res.dataMaps;
         loading = false;
+        _servedFromCache = !res.ok && items.isNotEmpty;
       });
     } catch (_) {
-      if (mounted) setState(() => loading = false);
+      if (mounted) {
+        setState(() {
+          loading = false;
+          _servedFromCache = items.isNotEmpty;
+        });
+      }
     }
   }
 
@@ -44,26 +66,28 @@ class _FaqScreenState extends State<FaqScreen> {
       body: loading
           ? const Center(child: CircularProgressIndicator())
           : items.isEmpty
-              ? EmptyState(message: app.t('no_faqs'))
-              : ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: items
-                      .map(
-                        (f) => Card(
-                          child: ExpansionTile(
-                            title: Text(J.str(f['question'])),
-                            children: [
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                    16, 0, 16, 16),
-                                child: Text(J.str(f['answer'])),
-                              ),
-                            ],
-                          ),
+          ? EmptyState(message: app.t('not_synced_yet'))
+          : ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                OfflineBanner(stale: _servedFromCache),
+                ...items
+                    .map(
+                      (f) => Card(
+                        child: ExpansionTile(
+                          title: Text(J.str(f['question'])),
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                              child: Text(J.str(f['answer'])),
+                            ),
+                          ],
                         ),
-                      )
-                      .toList(),
-                ),
+                      ),
+                    )
+                    ,
+              ],
+            ),
     );
   }
 }
@@ -82,6 +106,31 @@ class _AssistantScreenState extends State<AssistantScreen> {
   bool loading = false;
   bool confirming = false;
 
+  /// Thread history is local-only (last 30 text turns, no auto-send).
+  static const _threadKey = 'assistant_thread';
+
+  @override
+  void initState() {
+    super.initState();
+    try {
+      final snap = appController.readAccountSnapshot(_threadKey);
+      if (snap is List && snap.isNotEmpty) {
+        messages.addAll(J.maps(snap).take(30));
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _persistThread() async {
+    try {
+      final slim = messages
+          .where((m) => J.str(m['text']).isNotEmpty)
+          .map((m) => {'role': J.str(m['role']), 'text': J.str(m['text'])})
+          .toList();
+      final tail = slim.length > 30 ? slim.sublist(slim.length - 30) : slim;
+      await appController.cacheAccountSnapshot(_threadKey, tail);
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
     controller.dispose();
@@ -89,15 +138,17 @@ class _AssistantScreenState extends State<AssistantScreen> {
     super.dispose();
   }
 
-  void _pushBot(String text,
-      {Map<String, dynamic>? action,
-      List<Map<String, dynamic>> products = const []}) {
+  void _pushBot(
+    String text, {
+    Map<String, dynamic>? action,
+    List<Map<String, dynamic>> products = const [],
+  }) {
     if (!mounted) return;
     setState(() {
       messages.add({
         'role': 'bot',
         'text': text,
-        if (action != null) 'action': action,
+        'action': ?action,
         if (products.isNotEmpty) 'products': products,
       });
     });
@@ -119,34 +170,58 @@ class _AssistantScreenState extends State<AssistantScreen> {
     final text = controller.text.trim();
     if (text.isEmpty || loading) return;
     controller.clear();
+    // Honest offline guard: recent failures prove the backend unreachable —
+    // explain instead of spinning, and never auto-send later.
+    if (appController.api.likelyOffline) {
+      if (!mounted) return;
+      setState(() {
+        messages.add({'role': 'user', 'text': text});
+        messages.add({
+          'role': 'bot',
+          'text': appController.t('assistant_offline'),
+        });
+      });
+      _persistThread();
+      _scrollDown();
+      return;
+    }
     // Web parity: only the last 8 messages are sent as history.
     final history = messages.length <= 8
         ? messages
-            .where((item) => J.str(item['text']).isNotEmpty)
-            .map((item) => {
+              .where((item) => J.str(item['text']).isNotEmpty)
+              .map(
+                (item) => {
                   'role': J.str(item['role']),
                   'text': J.str(item['text']),
-                })
-            .toList()
+                },
+              )
+              .toList()
         : messages
-            .sublist(messages.length - 8)
-            .where((item) => J.str(item['text']).isNotEmpty)
-            .map((item) => {
+              .sublist(messages.length - 8)
+              .where((item) => J.str(item['text']).isNotEmpty)
+              .map(
+                (item) => {
                   'role': J.str(item['role']),
                   'text': J.str(item['text']),
-                })
-            .toList();
+                },
+              )
+              .toList();
     setState(() {
       messages.add({'role': 'user', 'text': text});
       loading = true;
     });
+    _persistThread();
     _scrollDown();
     try {
-      final result = await appController.api.assistantChat(text, history: history);
+      final result = await appController.api.assistantChat(
+        text,
+        history: history,
+      );
       if (!mounted) return;
       final data = result.dataMap;
-      final action =
-          data['has_action'] == true || data['has_action'] == 1 ? J.map(data['action']) : <String, dynamic>{};
+      final action = data['has_action'] == true || data['has_action'] == 1
+          ? J.map(data['action'])
+          : <String, dynamic>{};
       final products = J.maps(data['products']);
       if (!mounted) return;
       setState(() {
@@ -160,13 +235,16 @@ class _AssistantScreenState extends State<AssistantScreen> {
           'products': products,
         });
       });
+      _persistThread();
       _scrollDown();
     } catch (_) {
       if (!mounted) return;
       setState(() {
         loading = false;
-        messages.add(
-            {'role': 'bot', 'text': appController.t('assistant_not_found')});
+        messages.add({
+          'role': 'bot',
+          'text': appController.t('assistant_not_found'),
+        });
       });
       _scrollDown();
     }
@@ -233,7 +311,9 @@ class _AssistantScreenState extends State<AssistantScreen> {
     final raw = path.trim();
     if (raw.isEmpty || raw == '#') return '/';
     if (map.containsKey(raw)) return map[raw]!;
-    if (raw.startsWith('/store/')) return '/store/${raw.substring('/store/'.length)}';
+    if (raw.startsWith('/store/')) {
+      return '/store/${raw.substring('/store/'.length)}';
+    }
     return raw;
   }
 
@@ -246,7 +326,14 @@ class _AssistantScreenState extends State<AssistantScreen> {
         actions: [
           if (messages.isNotEmpty)
             IconButton(
-              onPressed: () => setState(messages.clear),
+              onPressed: () {
+                setState(messages.clear);
+                // "New chat" must also drop the persisted thread, otherwise
+                // the next cold start restores the "deleted" history.
+                try {
+                  appController.removeAccountSnapshot(_threadKey);
+                } catch (_) {}
+              },
               icon: const Icon(Icons.add_comment_outlined),
               tooltip: app.t('new_chat'),
             ),
@@ -267,8 +354,9 @@ class _AssistantScreenState extends State<AssistantScreen> {
                 final item = messages[index];
                 final isUser = item['role'] == 'user';
                 return Align(
-                  alignment:
-                      isUser ? Alignment.centerLeft : Alignment.centerRight,
+                  alignment: isUser
+                      ? Alignment.centerLeft
+                      : Alignment.centerRight,
                   child: Container(
                     margin: const EdgeInsets.only(bottom: 10),
                     padding: const EdgeInsets.all(12),
@@ -295,12 +383,14 @@ class _AssistantScreenState extends State<AssistantScreen> {
                               ),
                             ),
                             title: Text(J.str(product['name'])),
-                            subtitle: Text([
-                              if (J.str(product['seller_name']).isNotEmpty)
-                                J.str(product['seller_name']),
-                              if (J.str(product['price_text']).isNotEmpty)
-                                J.str(product['price_text']),
-                            ].join(' · ')),
+                            subtitle: Text(
+                              [
+                                if (J.str(product['seller_name']).isNotEmpty)
+                                  J.str(product['seller_name']),
+                                if (J.str(product['price_text']).isNotEmpty)
+                                  J.str(product['price_text']),
+                              ].join(' · '),
+                            ),
                             trailing: Text(
                               app.t('assistant_open_product'),
                               style: TextStyle(
@@ -328,18 +418,21 @@ class _AssistantScreenState extends State<AssistantScreen> {
                                     : '/seller/${seller['id']}',
                               );
                             },
-                            child: Text([
-                              J.str(seller['store_name']),
-                              if (J.str(seller['rating_text']).isNotEmpty)
-                                J.str(seller['rating_text']),
-                            ].join(' · ')),
+                            child: Text(
+                              [
+                                J.str(seller['store_name']),
+                                if (J.str(seller['rating_text']).isNotEmpty)
+                                  J.str(seller['rating_text']),
+                              ].join(' · '),
+                            ),
                           ),
                         for (final link in J.maps(item['links']))
                           Padding(
                             padding: const EdgeInsets.only(top: 8),
                             child: FilledButton(
-                              onPressed: () =>
-                                  context.push(_assistantPath(J.str(link['path']))),
+                              onPressed: () => context.push(
+                                _assistantPath(J.str(link['path'])),
+                              ),
                               child: Text(J.str(link['title'])),
                             ),
                           ),
@@ -356,13 +449,15 @@ class _AssistantScreenState extends State<AssistantScreen> {
               child: Row(
                 children: [
                   const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(strokeWidth: 2)),
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
                   const SizedBox(width: 8),
-                  Text(app.t('assistant_wait'),
-                      style:
-                          const TextStyle(color: Colors.grey, fontSize: 12)),
+                  Text(
+                    app.t('assistant_wait'),
+                    style: const TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
                 ],
               ),
             ),
@@ -386,10 +481,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
                     ),
                   ),
                 ),
-                IconButton(
-                  onPressed: _send,
-                  icon: const Icon(Icons.send),
-                ),
+                IconButton(onPressed: _send, icon: const Icon(Icons.send)),
               ],
             ),
           ),
@@ -406,17 +498,19 @@ class _AssistantScreenState extends State<AssistantScreen> {
       return Padding(
         padding: const EdgeInsets.only(top: 8),
         child: FilledButton.icon(
-          onPressed:
-              (confirming || loading) ? null : () => _confirm(action),
+          onPressed: (confirming || loading) ? null : () => _confirm(action),
           icon: confirming
               ? const SizedBox(
                   width: 16,
                   height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2))
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
               : const Icon(Icons.check, size: 18),
-          label: Text(J.str(action['label']).isNotEmpty
-              ? J.str(action['label'])
-              : app.t('assistant_confirm')),
+          label: Text(
+            J.str(action['label']).isNotEmpty
+                ? J.str(action['label'])
+                : app.t('assistant_confirm'),
+          ),
         ),
       );
     }
@@ -432,13 +526,14 @@ class _AssistantScreenState extends State<AssistantScreen> {
       padding: const EdgeInsets.only(top: 8),
       child: FilledButton.tonal(
         onPressed: () => context.push(_assistantPath(url)),
-        child: Text(J.str(action['label']).isNotEmpty
-            ? J.str(action['label'])
-            : app.t('assistant_open_page')),
+        child: Text(
+          J.str(action['label']).isNotEmpty
+              ? J.str(action['label'])
+              : app.t('assistant_open_page'),
+        ),
       ),
     );
   }
-
 }
 
 /// Web parity with AssistantProductCard: product link + qty stepper +
@@ -472,7 +567,8 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
         slug: J.str(product['slug']),
       );
       final variants = J.maps(
-          detail.dataMap['variants'] ?? detail.dataMap['product_variants']);
+        detail.dataMap['variants'] ?? detail.dataMap['product_variants'],
+      );
       Map<String, dynamic>? variant;
       for (final v in variants) {
         if (J.i(v['stock']) > 0) {
@@ -492,11 +588,15 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
       );
       if (!mounted) return;
       if (error != null) {
-        widget.pushBot('${app.t('assistant_add_failed')}: $error');
+        await showCartError(context, error);
+        if (error != kRequiresInternet) {
+          widget.pushBot('${app.t('assistant_add_failed')}: $error');
+        }
       } else {
         setState(() => added = true);
         widget.pushBot(
-            '${app.t('assistant_added_to_cart')} (${J.str(product['name'])} × $qty)');
+          '${app.t('assistant_added_to_cart')} (${J.str(product['name'])} × $qty)',
+        );
         Future.delayed(const Duration(seconds: 2), () {
           if (mounted) setState(() => added = false);
         });
@@ -515,8 +615,8 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
     final url = J.str(p['url']).isNotEmpty
         ? p['url']
         : (J.str(p['slug']).isNotEmpty || p['id'] != null
-            ? '/product/${J.str(p['slug']).isNotEmpty ? p['slug'] : p['id']}'
-            : '/');
+              ? '/product/${J.str(p['slug']).isNotEmpty ? p['slug'] : p['id']}'
+              : '/');
     return Container(
       margin: const EdgeInsets.only(top: 8),
       padding: const EdgeInsets.all(8),
@@ -533,17 +633,15 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
             leading: SizedBox(
               width: 48,
               height: 48,
-              child: AppImage(
-                J.str(p['image']),
-                placeholder: app.placeholder,
-              ),
+              child: AppImage(J.str(p['image']), placeholder: app.placeholder),
             ),
             title: Text(
-                J.str(p['name']).isNotEmpty
-                    ? J.str(p['name'])
-                    : J.str(widget.action['label']),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis),
+              J.str(p['name']).isNotEmpty
+                  ? J.str(p['name'])
+                  : J.str(widget.action['label']),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
             subtitle: J.str(p['price']).isNotEmpty
                 ? Text(J.str(p['price']))
                 : null,
@@ -569,8 +667,9 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
               Text('$qty', style: const TextStyle(fontWeight: FontWeight.w700)),
               IconButton(
                 visualDensity: VisualDensity.compact,
-                onPressed:
-                    adding ? null : () => setState(() => qty = qty >= 99 ? 99 : qty + 1),
+                onPressed: adding
+                    ? null
+                    : () => setState(() => qty = qty >= 99 ? 99 : qty + 1),
                 icon: const Icon(Icons.add_circle_outline),
               ),
               const SizedBox(width: 8),
@@ -581,10 +680,13 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
                       ? const SizedBox(
                           width: 16,
                           height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2))
-                      : Text(added
-                          ? '✓ ${app.t('assistant_added_to_cart')}'
-                          : app.t('add_to_cart')),
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Text(
+                          added
+                              ? '✓ ${app.t('assistant_added_to_cart')}'
+                              : app.t('add_to_cart'),
+                        ),
                 ),
               ),
             ],

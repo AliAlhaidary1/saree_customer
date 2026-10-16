@@ -44,6 +44,41 @@ class J {
     return product['seller_id'] ?? map(product['seller'])['id'];
   }
 
+  /// Stable identity for a catalog/order/notification row (server ids first,
+  /// display fields never). Used to deduplicate paginated appends when the
+  /// backend shifts offset pages between requests (no cursor API).
+  static String rowKey(Map<String, dynamic> row) {
+    for (final k in const [
+      'id',
+      'product_id',
+      'order_id',
+      'checkout_group_id',
+      'seller_id',
+      'slug',
+    ]) {
+      final v = str(row[k]);
+      if (v.isNotEmpty) return '$k:$v';
+    }
+    return 'raw:${row.hashCode}';
+  }
+
+  /// Appends [incoming] rows, skipping ones already present (by [rowKey]).
+  /// Offset pagination over live backend data can repeat rows across pages;
+  /// without this, repeated loads and refresh races visibly duplicate items.
+  static List<Map<String, dynamic>> appendUnique(
+    List<Map<String, dynamic>> existing,
+    List<Map<String, dynamic>> incoming,
+  ) {
+    if (incoming.isEmpty) return existing;
+    if (existing.isEmpty) return List<Map<String, dynamic>>.from(incoming);
+    final seen = existing.map(rowKey).toSet();
+    final out = List<Map<String, dynamic>>.from(existing);
+    for (final row in incoming) {
+      if (seen.add(rowKey(row))) out.add(row);
+    }
+    return out;
+  }
+
   static String html(dynamic value) {
     if (value == null) return '';
     if (value is String) {
@@ -88,7 +123,13 @@ class ApiResult {
   List<Map<String, dynamic>> get dataMaps => J.maps(raw['data']);
   Map<String, dynamic> get user => J.map(raw['user']);
   String? get token {
-    final value = raw['token'] ?? raw['access_token'] ?? dataMap['token'];
+    // Login/register responses nest the bearer token as data.access_token
+    // (see CustomerAuthController::issueTokenResponse); top-level and
+    // data.token shapes are kept for older/alternate endpoints.
+    final value = raw['token'] ??
+        raw['access_token'] ??
+        dataMap['token'] ??
+        dataMap['access_token'];
     if (value == null) return null;
     final text = value.toString();
     return text.isEmpty ? null : text;

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -11,6 +12,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/app_controller.dart';
+import '../../core/akhdimni_status.dart';
 import '../../core/city_mode.dart';
 import '../../core/json_util.dart';
 import '../../core/order_status.dart';
@@ -18,8 +20,11 @@ import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/product_variant_sheet.dart';
 import '../../core/app_theme.dart';
+import '../../core/offline/offline_cache.dart';
 import '../../widgets/dynamic_address_fields.dart';
+import '../../widgets/offline_banner.dart';
 import '../../widgets/order_tracker.dart';
+import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
 
 class AccountScreen extends StatelessWidget {
@@ -76,7 +81,9 @@ class AccountScreen extends StatelessWidget {
     final mobile = J.str(app.user?['mobile'] ?? app.user?['email']);
     final profileImg = J.str(app.user?['profile'] ?? app.user?['image']);
     final wallet = J.d(
-      app.user?['balance'] ?? app.user?['wallet'] ?? app.settings['user_balance'],
+      app.user?['balance'] ??
+          app.user?['wallet'] ??
+          app.settings['user_balance'],
     );
     // Web parity (ProfileDashboard pf-nav): user header + wallet card +
     // focused menu. No CMS clutter, no server field (debug-only below).
@@ -89,21 +96,25 @@ class AccountScreen extends StatelessWidget {
             leading: CircleAvatar(
               radius: 26,
               backgroundColor: app.accentColor.withValues(alpha: 0.15),
-              backgroundImage:
-                  profileImg.isNotEmpty ? NetworkImage(profileImg) : null,
+              backgroundImage: profileImg.isNotEmpty
+                  ? NetworkImage(profileImg)
+                  : null,
               onBackgroundImageError: profileImg.isNotEmpty ? (_, __) {} : null,
               child: profileImg.isEmpty
                   ? Text(
                       name.isEmpty ? 'م' : name.substring(0, 1),
                       style: TextStyle(
-                          color: app.accentColor,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 22),
+                        color: app.accentColor,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 22,
+                      ),
                     )
                   : null,
             ),
-            title: Text(name.isEmpty ? app.t('profile') : name,
-                style: const TextStyle(fontWeight: FontWeight.w700)),
+            title: Text(
+              name.isEmpty ? app.t('profile') : name,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
             subtitle: mobile.isEmpty ? null : Text(mobile),
             trailing: const Icon(Icons.chevron_left, size: 18),
             onTap: () => context.push('/profile'),
@@ -113,16 +124,22 @@ class AccountScreen extends StatelessWidget {
           color: app.accentColor,
           child: ListTile(
             contentPadding: const EdgeInsets.all(12),
-            leading: const Icon(Icons.account_balance_wallet_outlined,
-                color: Colors.white, size: 30),
-            title: Text(app.t('walletBalance'),
-                style: const TextStyle(color: Colors.white70, fontSize: 12)),
+            leading: const Icon(
+              Icons.account_balance_wallet_outlined,
+              color: Colors.white,
+              size: 30,
+            ),
+            title: Text(
+              app.t('walletBalance'),
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
             subtitle: Text(
               '${J.str(app.settings['currency'], '')} ${wallet.toStringAsFixed(app.decimals)}',
               style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 20),
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+                fontSize: 20,
+              ),
             ),
             trailing: const Icon(Icons.chevron_left, color: Colors.white),
             onTap: () => context.push('/wallet'),
@@ -132,28 +149,58 @@ class AccountScreen extends StatelessWidget {
         Row(
           children: [
             Expanded(
-                child: _hubCard(context, Icons.receipt_long_outlined,
-                    app.t('orders'), '/orders', app)),
+              child: _hubCard(
+                context,
+                Icons.receipt_long_outlined,
+                app.t('orders'),
+                '/orders',
+                app,
+              ),
+            ),
             const SizedBox(width: 10),
             Expanded(
-                child: _hubCard(context, Icons.location_on_outlined,
-                    app.t('myAddress'), '/addresses', app)),
+              child: _hubCard(
+                context,
+                Icons.location_on_outlined,
+                app.t('myAddress'),
+                '/addresses',
+                app,
+              ),
+            ),
             const SizedBox(width: 10),
             Expanded(
-                child: _hubCard(context, Icons.favorite_border,
-                    app.t('wishlist'), '/wishlist', app)),
+              child: _hubCard(
+                context,
+                Icons.favorite_border,
+                app.t('wishlist'),
+                '/wishlist',
+                app,
+              ),
+            ),
           ],
         ),
         const SizedBox(height: 12),
         _tile(context, Icons.person_outline, app.t('profile'), '/profile'),
         _tile(context, Icons.receipt_long_outlined, app.t('orders'), '/orders'),
         _tile(context, Icons.favorite_border, app.t('wishlist'), '/wishlist'),
-        _tile(context, Icons.location_on_outlined, app.t('myAddress'),
-            '/addresses'),
-        _tile(context, Icons.account_balance_wallet_outlined, app.t('wallet'),
-            '/wallet'),
-        _tile(context, Icons.lock_outline, app.t('change_password'),
-            '/change-password'),
+        _tile(
+          context,
+          Icons.location_on_outlined,
+          app.t('myAddress'),
+          '/addresses',
+        ),
+        _tile(
+          context,
+          Icons.account_balance_wallet_outlined,
+          app.t('wallet'),
+          '/wallet',
+        ),
+        _tile(
+          context,
+          Icons.lock_outline,
+          app.t('change_password'),
+          '/change-password',
+        ),
         const Divider(),
         _cmsTile(
           context,
@@ -187,6 +234,19 @@ class AccountScreen extends StatelessWidget {
           leading: const Icon(Icons.language),
           title: Text(app.i18n.code == 'ar' ? 'English' : 'العربية'),
           onTap: () => app.setLanguage(app.i18n.code == 'ar' ? 'en' : 'ar'),
+        ),
+        ListenableBuilder(
+          listenable: app,
+          builder: (_, __) => SwitchListTile(
+            secondary: const Icon(Icons.image_outlined),
+            title: Text(app.t('offline_images_title')),
+            subtitle: Text(app.t('offline_images_subtitle')),
+            value: app.offlineImagesEnabled,
+            onChanged: (v) async {
+              await app.setOfflineImagesEnabled(v);
+              if (v) await app.prefetchCatalogImages();
+            },
+          ),
         ),
         if (kDebugMode)
           ListTile(
@@ -228,8 +288,7 @@ class AccountScreen extends StatelessWidget {
             showDialog(
               context: context,
               barrierDismissible: false,
-              builder: (_) =>
-                  const Center(child: CircularProgressIndicator()),
+              builder: (_) => const Center(child: CircularProgressIndicator()),
             );
             await app.logout();
             if (context.mounted) {
@@ -251,16 +310,13 @@ class AccountScreen extends StatelessWidget {
             showDialog(
               context: context,
               barrierDismissible: false,
-              builder: (_) =>
-                  const Center(child: CircularProgressIndicator()),
+              builder: (_) => const Center(child: CircularProgressIndicator()),
             );
             final error = await app.logoutAllDevices();
             if (context.mounted) {
               Navigator.of(context, rootNavigator: true).pop();
               if (error != null) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(error)),
-                );
+                await showCartError(context, error);
               } else {
                 context.go('/');
               }
@@ -286,8 +342,13 @@ class AccountScreen extends StatelessWidget {
   }
 
   /// Web parity (pf-hub): quick hub cards for orders/address/wishlist.
-  Widget _hubCard(BuildContext context, IconData icon, String label,
-      String path, AppController app) {
+  Widget _hubCard(
+    BuildContext context,
+    IconData icon,
+    String label,
+    String path,
+    AppController app,
+  ) {
     return Card(
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
@@ -303,7 +364,9 @@ class AccountScreen extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w600),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ],
           ),
@@ -327,17 +390,28 @@ class AccountScreen extends StatelessWidget {
 
   Future<void> _openSellerApp(BuildContext context) async {
     final app = appController;
-    final url = J.str(app.settings['seller_android_app_url']).isNotEmpty
-        ? J.str(app.settings['seller_android_app_url'])
-        : 'https://play.google.com/store/apps/details?id=com.sreamart.sreamart_seller';
+    if (!await app.hasInternetAccess()) {
+      if (context.mounted) await showRequiresInternetDialog(context);
+      return;
+    }
+    var url = J.str(app.settings['seller_android_app_url']);
+    if (url.isEmpty) {
+      try {
+        final saved = app.prefs.getString('seller_app_url');
+        if (saved != null && saved.isNotEmpty) url = saved;
+      } catch (_) {}
+    }
+    if (url.isEmpty) {
+      url =
+          'https://play.google.com/store/apps/details?id=com.sreamart.sreamart_seller';
+    }
     final uri = Uri.tryParse(url);
     if (uri == null) return;
-    final opened =
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
+    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!opened && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(app.t('something_went_wrong'))),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(app.t('something_went_wrong'))));
     }
   }
 
@@ -395,9 +469,8 @@ class AccountScreen extends StatelessWidget {
                   decoration: InputDecoration(
                     labelText: app.t('password'),
                     suffixIcon: IconButton(
-                      onPressed: () => setDialogState(
-                        () => hidePassword = !hidePassword,
-                      ),
+                      onPressed: () =>
+                          setDialogState(() => hidePassword = !hidePassword),
                       icon: Icon(
                         hidePassword
                             ? Icons.visibility_outlined
@@ -432,14 +505,12 @@ class AccountScreen extends StatelessWidget {
     );
     if (!context.mounted) return;
     if (error != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error)));
+      await showCartError(context, error);
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(app.t('account_deleted_success'))),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(app.t('account_deleted_success'))));
     context.go('/');
   }
 }
@@ -457,8 +528,10 @@ class _OrdersScreenState extends State<OrdersScreen>
   List<Map<String, dynamic>> active = [];
   List<Map<String, dynamic>> previous = [];
   bool loading = true;
+  bool _servedFromCache = false;
   int page = 1;
   int totalActive = 0;
+  int _seq = 0;
   static const _perPage = 10;
 
   @override
@@ -475,30 +548,133 @@ class _OrdersScreenState extends State<OrdersScreen>
 
   /// Parity with front Order.jsx fetchOrders: legacy active + legacy prev +
   /// checkout-groups, then mergeOrders + sort by created_at desc.
+  /// Local-first: cached orders paint instantly, then refresh.
   Future<void> _load({bool more = false}) async {
     if (!appController.isLoggedIn) {
       if (mounted) setState(() => loading = false);
       return;
     }
+    final mySeq = ++_seq;
+    // Owning account for this refresh: if logout/switch happens mid-flight,
+    // the late response must neither paint nor persist under the new scope.
+    final scope = appController.accountScope;
     if (!more && mounted) setState(() => loading = true);
+
+    // Paint cached account-scoped list before network.
+    if (!more && active.isEmpty) {
+      final cached = appController.readCachedOrders();
+      if (cached.active.isNotEmpty || cached.previous.isNotEmpty) {
+        setState(() {
+          active = cached.active;
+          previous = cached.previous;
+          loading = false;
+          _servedFromCache = true;
+        });
+      }
+    }
+
     final nextPage = more ? page + 1 : 1;
     final offset = (nextPage - 1) * _perPage;
-    final legacyActive = await appController.api.orders(type: 1, limit: _perPage, offset: offset);
-    final legacyPrev = await appController.api.orders(type: 0, limit: _perPage, offset: offset);
+    final legacyActive = await appController.api.orders(
+      type: 1,
+      limit: _perPage,
+      offset: offset,
+    );
+    final legacyPrev = await appController.api.orders(
+      type: 0,
+      limit: _perPage,
+      offset: offset,
+    );
     final groups = await appController.api.checkoutGroups(page: nextPage);
-    if (!mounted) return;
+    final akh = await appController.api.akhdimniOrders({});
+    if (!mounted || mySeq != _seq) return;
+    // Account changed or session ended mid-flight: drop the response instead
+    // of painting account A's orders into account B's session.
+    if (!appController.isLoggedIn || appController.accountScope != scope) {
+      return;
+    }
+    // All three failed (offline/timeout): keep the cached rows painted above
+    // — never replace them with empty lists or erase the persisted snapshot.
+    // Cached order status is always badged as saved (see OfflineBanner).
+    if (!legacyActive.ok && !legacyPrev.ok && !groups.ok) {
+      setState(() {
+        loading = false;
+        _servedFromCache = active.isNotEmpty || previous.isNotEmpty;
+      });
+      return;
+    }
     final legacyActiveParsed = parseOrdersPayload(legacyActive);
     final legacyPrevParsed = parseOrdersPayload(legacyPrev);
     final groupsParsed = parseCheckoutGroupsPayload(groups);
-    final freshActive = mergeOrders(legacyActiveParsed.rows, groupsParsed.rows, true);
-    final freshPrev = mergeOrders(legacyPrevParsed.rows, groupsParsed.rows, false);
+    final activeOk = legacyActive.ok || groups.ok;
+    final prevOk = legacyPrev.ok || groups.ok;
+    final baseActive = activeOk
+        ? mergeOrders(legacyActiveParsed.rows, groupsParsed.rows, true)
+        : active.where((e) => e['is_akhdimni'] != true).toList();
+    final basePrev = prevOk
+        ? mergeOrders(legacyPrevParsed.rows, groupsParsed.rows, false)
+        : previous.where((e) => e['is_akhdimni'] != true).toList();
+    var akhActive = active
+        .where((e) => e['is_akhdimni'] == true)
+        .toList();
+    var akhPrev = previous
+        .where((e) => e['is_akhdimni'] == true)
+        .toList();
+    if (akh.ok) {
+      akhActive = [];
+      akhPrev = [];
+      for (final r in akh.dataMaps) {
+        final status = J.str(r['active_status'] ?? r['status']);
+        final m = _mapAkhOrder(r, status);
+        if (_akhTerminal(status)) {
+          akhPrev.add(m);
+        } else {
+          akhActive.add(m);
+        }
+      }
+    }
+    final freshActive = [...baseActive, ...akhActive];
+    final freshPrev = [...basePrev, ...akhPrev];
+    await appController.cacheOrders(freshActive, freshPrev);
+    if (!mounted || mySeq != _seq || appController.accountScope != scope) {
+      return;
+    }
     setState(() {
       page = nextPage;
-      active = more ? [...active, ...freshActive] : freshActive;
-      previous = more ? [...previous, ...freshPrev] : freshPrev;
-      totalActive = legacyActiveParsed.total + groupsParsed.total;
+      active = more ? J.appendUnique(active, freshActive) : freshActive;
+      previous = more ? J.appendUnique(previous, freshPrev) : freshPrev;
+      if (activeOk) {
+        totalActive =
+            legacyActiveParsed.total +
+            groupsParsed.total +
+            akhActive.length;
+      }
       loading = false;
+      _servedFromCache =
+          (!activeOk || !prevOk) &&
+          (active.isNotEmpty || previous.isNotEmpty);
     });
+  }
+
+  static bool _akhTerminal(String status) =>
+      status == 'delivered' ||
+      status == 'completed' ||
+      status == 'cancelled' ||
+      status == 'rejected' ||
+      status == 'failed';
+
+  Map<String, dynamic> _mapAkhOrder(Map<String, dynamic> r, String status) {
+    final total = r['final_total'] ?? r['total'];
+    return {
+      'id': r['id'],
+      'order_id': r['id'],
+      'is_akhdimni': true,
+      'final_total': total,
+      'total': total,
+      'status_name': akhdimniStatusLabel(status.isEmpty ? null : status),
+      'active_status': status,
+      'created_at': r['created_at'] ?? r['date'],
+    };
   }
 
   String _statusLabel(Map<String, dynamic> order) {
@@ -530,10 +706,14 @@ class _OrdersScreenState extends State<OrdersScreen>
           indicatorWeight: 3,
           labelColor: Colors.white,
           unselectedLabelColor: Colors.white70,
-          labelStyle:
-              const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-          unselectedLabelStyle:
-              const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+          labelStyle: const TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 14,
+          ),
+          unselectedLabelStyle: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+          ),
           tabs: [
             Tab(text: app.t('active_orders')),
             Tab(text: app.t('previous_orders')),
@@ -542,9 +722,16 @@ class _OrdersScreenState extends State<OrdersScreen>
       ),
       body: loading
           ? const Center(child: CircularProgressIndicator())
-          : TabBarView(
-              controller: tab,
-              children: [_list(active, true), _list(previous, false)],
+          : Column(
+              children: [
+                if (_servedFromCache) OfflineBanner(stale: true),
+                Expanded(
+                  child: TabBarView(
+                    controller: tab,
+                    children: [_list(active, true), _list(previous, false)],
+                  ),
+                ),
+              ],
             ),
     );
   }
@@ -572,12 +759,23 @@ class _OrdersScreenState extends State<OrdersScreen>
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16),
             ),
-            title: Text('${appController.t('id')}${order['id'] ?? order['order_id']}'),
+            title: Text(
+              '${appController.t('id')}${order['id'] ?? order['order_id']}',
+            ),
             subtitle: Text(
               '${_statusLabel(order)} • ${money(order['final_total'] ?? order['total'], appController.currency, appController.decimals)}',
             ),
-            trailing: isGroup ? const Icon(Icons.inventory_2_outlined) : null,
-            onTap: () => context.push('/orders/${order['id'] ?? order['order_id']}'),
+            trailing: order['is_akhdimni'] == true
+                ? const Icon(Icons.delivery_dining_outlined)
+                : (isGroup ? const Icon(Icons.inventory_2_outlined) : null),
+            onTap: () {
+              final oid = order['id'] ?? order['order_id'];
+              if (order['is_akhdimni'] == true) {
+                context.push('/akhdimni/orders/$oid');
+              } else {
+                context.push('/orders/$oid');
+              }
+            },
           );
         },
       ),
@@ -604,24 +802,69 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     _load();
   }
 
+  bool _servedFromCache = false;
+
   /// Parity with front fetchOrderDetails: try checkout-group first, fallback legacy.
+  /// Local-first: cache-miss starts spinner, cache-hit paints instantly, network refreshes.
   Future<void> _load() async {
+    final scope = appController.accountScope;
+    final orderId = widget.id;
+    if (order == null) {
+      final cached = appController.offline.readDoc(
+        OfflineCache.orderDetailsKey(scope, orderId),
+      );
+      final payload = cached?.payload;
+      if (cached?.scope == scope && payload is Map) {
+        setState(() {
+          order = J.map(payload);
+          loading = false;
+          _servedFromCache = true;
+        });
+      }
+    }
     try {
-      final cg = await appController.api.checkoutGroup(widget.id);
+      final cg = await appController.api.checkoutGroup(orderId);
+      if (!mounted || scope != appController.accountScope) return;
       if (cg.ok && cg.dataMap.isNotEmpty) {
+        final data = mapCheckoutGroupToOrder(cg.dataMap);
+        await appController.offline.writeDoc(
+          OfflineCache.orderDetailsKey(scope, orderId),
+          data,
+          scope: scope,
+        );
         if (!mounted) return;
         setState(() {
-          order = mapCheckoutGroupToOrder(cg.dataMap);
+          order = data;
           loading = false;
+          _servedFromCache = false;
         });
         return;
       }
     } catch (_) {}
-    final result = await appController.api.orders(orderId: widget.id);
+    final result = await appController.api.orders(orderId: orderId);
+    if (!mounted || scope != appController.accountScope) return;
+    if (result.ok) {
+      final data = result.dataMaps.isNotEmpty
+          ? result.dataMaps.first
+          : result.dataMap;
+      await appController.offline.writeDoc(
+        OfflineCache.orderDetailsKey(scope, orderId),
+        data,
+        scope: scope,
+      );
+      if (!mounted) return;
+      setState(() {
+        order = data;
+        loading = false;
+        _servedFromCache = false;
+      });
+      return;
+    }
+    // Refresh failed: keep cached row if available.
     if (!mounted) return;
     setState(() {
-      order = result.dataMaps.isNotEmpty ? result.dataMaps.first : result.dataMap;
-      loading = false;
+      loading = order == null;
+      _servedFromCache = order != null;
     });
   }
 
@@ -678,12 +921,23 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       appController.t('write_cancel_reason'),
     );
     if (reason == null || reason.isEmpty || !mounted) return;
+    if (!await appController.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     setState(() => cancellingGroup = true);
-    final res = await appController.api.cancelCheckoutGroup(widget.id, reason: reason);
+    final res = await appController.api.cancelCheckoutGroup(
+      widget.id,
+      reason: reason,
+    );
     if (!mounted) return;
     setState(() => cancellingGroup = false);
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(res.ok ? appController.t('order_cancelled') : res.message)),
+      SnackBar(
+        content: Text(
+          res.ok ? appController.t('order_cancelled') : res.message,
+        ),
+      ),
     );
     if (res.ok) _load();
   }
@@ -694,6 +948,10 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       appController.t('write_cancel_reason'),
     );
     if (reason == null || reason.isEmpty || !mounted) return;
+    if (!await appController.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     if (_isGroup) {
       await _cancelGroupWithReason(reason);
       return;
@@ -706,18 +964,31 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(res.ok ? appController.t('OrderItemCancelledSuccessfully') : res.message)),
+      SnackBar(
+        content: Text(
+          res.ok
+              ? appController.t('OrderItemCancelledSuccessfully')
+              : res.message,
+        ),
+      ),
     );
     if (res.ok) _load();
   }
 
   Future<void> _cancelGroupWithReason(String reason) async {
     setState(() => cancellingGroup = true);
-    final res = await appController.api.cancelCheckoutGroup(widget.id, reason: reason);
+    final res = await appController.api.cancelCheckoutGroup(
+      widget.id,
+      reason: reason,
+    );
     if (!mounted) return;
     setState(() => cancellingGroup = false);
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(res.ok ? appController.t('order_cancelled') : res.message)),
+      SnackBar(
+        content: Text(
+          res.ok ? appController.t('order_cancelled') : res.message,
+        ),
+      ),
     );
     if (res.ok) _load();
   }
@@ -728,9 +999,16 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       appController.t('write_return_reason'),
     );
     if (reason == null || reason.isEmpty || !mounted) return;
+    if (!await appController.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     ApiResult res;
     if (_isGroup) {
-      res = await appController.api.requestCommerceReturn(item['id'], reason: reason);
+      res = await appController.api.requestCommerceReturn(
+        item['id'],
+        reason: reason,
+      );
     } else {
       res = await appController.api.updateOrderItemStatus(
         orderId: order?['id'] ?? widget.id,
@@ -740,13 +1018,18 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       );
     }
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(res.ok ? res.message : res.message)),
-    );
+    final msg = res.message.isNotEmpty
+        ? res.message
+        : appController.t(res.ok ? 'return_requested' : 'something_went_wrong');
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     if (res.ok) _load();
   }
 
   Future<void> _invoice() async {
+    if (!await appController.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     final id = order?['id'] ?? widget.id;
     final (ok, bytes, _) = await appController.api.invoiceBytes(id);
     if (!mounted) return;
@@ -761,7 +1044,11 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       final file = await _writeBytes('$dir/Invoice-No:$id.pdf', bytes);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${appController.t('invoice_downloaded_successfully')}: $file')),
+        SnackBar(
+          content: Text(
+            '${appController.t('invoice_downloaded_successfully')}: $file',
+          ),
+        ),
       );
     } catch (_) {
       if (!mounted) return;
@@ -774,6 +1061,10 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   Future<void> _rateProduct(Map<String, dynamic> item) async {
     final res = await _askRate(appController.t('rate_the_product'));
     if (res == null || !mounted) return;
+    if (!await appController.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     final result = await appController.api.addProductRating({
       'product_id': item['product_id'],
       'rate': res.stars,
@@ -783,7 +1074,13 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(result.ok ? appController.t('rating_saved_successfully') : result.message)),
+      SnackBar(
+        content: Text(
+          result.ok
+              ? appController.t('rating_saved_successfully')
+              : result.message,
+        ),
+      ),
     );
     if (result.ok) _load();
   }
@@ -791,6 +1088,10 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   Future<void> _rateSeller(dynamic sellerId, String name) async {
     final res = await _askRate('${appController.t('rate_seller')}: $name');
     if (res == null || !mounted) return;
+    if (!await appController.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     final result = await appController.api.rateSeller({
       'seller_id': sellerId,
       'rate': res.stars,
@@ -799,7 +1100,13 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(result.ok ? appController.t('rating_saved_successfully') : result.message)),
+      SnackBar(
+        content: Text(
+          result.ok
+              ? appController.t('rating_saved_successfully')
+              : result.message,
+        ),
+      ),
     );
     if (result.ok) _load();
   }
@@ -807,6 +1114,10 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   Future<void> _rateCourier(dynamic courierId, String name) async {
     final res = await _askRate('${appController.t('rate_courier')}: $name');
     if (res == null || !mounted) return;
+    if (!await appController.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     final result = await appController.api.rateDeliveryBoy({
       'delivery_boy_id': courierId,
       'rate': res.stars,
@@ -815,7 +1126,13 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(result.ok ? appController.t('rating_saved_successfully') : result.message)),
+      SnackBar(
+        content: Text(
+          result.ok
+              ? appController.t('rating_saved_successfully')
+              : result.message,
+        ),
+      ),
     );
     if (result.ok) _load();
   }
@@ -836,8 +1153,10 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                 children: List.generate(5, (i) {
                   final idx = i + 1;
                   return IconButton(
-                    icon: Icon(idx <= value ? Icons.star : Icons.star_border,
-                        color: Colors.amber),
+                    icon: Icon(
+                      idx <= value ? Icons.star : Icons.star_border,
+                      color: Colors.amber,
+                    ),
                     onPressed: () => setS(() => value = idx),
                   );
                 }),
@@ -846,7 +1165,8 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                 controller: ctrl,
                 maxLines: 3,
                 decoration: InputDecoration(
-                    hintText: appController.t('write_review')),
+                  hintText: appController.t('write_review'),
+                ),
               ),
             ],
           ),
@@ -893,21 +1213,27 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       );
     }
     final items = J.maps(order?['items'] ?? order?['order_items']);
-    final activeStatus = J.str(order?['active_status'] ?? order?['status'] ?? '2');
+    final activeStatus = J.str(
+      order?['active_status'] ?? order?['status'] ?? '2',
+    );
     final isDelivered = J.i(activeStatus) == 6;
     final isReturned = J.i(activeStatus) == 8;
-    final canGetInvoice = isDelivered ||
+    final canGetInvoice =
+        isDelivered ||
         isReturned ||
-        items.any((e) =>
-            J.i(e['active_status']) == 6 ||
-            J.str(e['return_status']) == 'completed' ||
-            J.str(e['return_status']) == 'approved');
+        items.any(
+          (e) =>
+              J.i(e['active_status']) == 6 ||
+              J.str(e['return_status']) == 'completed' ||
+              J.str(e['return_status']) == 'approved',
+        );
     final sellers = _sellersToRate();
     final courierId = order?['delivery_boy_id'] ?? order?['courier_id'];
     final courierName = J.str(
-        order?['delivery_boy_name'] ?? order?['courier_name']);
-    final trackingOn = app.orderTrackingEnabled ||
-        J.flag(order?['order_tracking_enabled']);
+      order?['delivery_boy_name'] ?? order?['courier_name'],
+    );
+    final trackingOn =
+        app.orderTrackingEnabled || J.flag(order?['order_tracking_enabled']);
     final blocked = J.str(order?['cancel_blocked_reason']);
     final publicId = J.str(order?['public_id']).isNotEmpty
         ? J.str(order?['public_id'])
@@ -922,8 +1248,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
             onPressed: () async {
               await Clipboard.setData(ClipboardData(text: publicId));
               if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(app.t('copied'))));
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(SnackBar(content: Text(app.t('copied'))));
               }
             },
           ),
@@ -932,9 +1259,15 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          if (_servedFromCache) ...[
+            OfflineBanner(stale: true, staleLabel: app.t('saved_status_note')),
+            const SizedBox(height: 12),
+          ],
           OrderTracker(
             status: activeStatus,
-            statusLabel: J.str(order?['status_name'] ?? _displayLabel(activeStatus)),
+            statusLabel: J.str(
+              order?['status_name'] ?? _displayLabel(activeStatus),
+            ),
           ),
           const SizedBox(height: 12),
           Wrap(
@@ -967,13 +1300,15 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
               child: ListTile(
                 leading: const Icon(Icons.local_shipping_outlined),
                 title: Text(app.t('track_order')),
-                subtitle: Text(J.str(
-                  order?['tracking_status'] ??
-                      order?['delivery_status'] ??
-                      order?['address_snapshot'] is Map
-                          ? J.str((order?['address_snapshot'] as Map)['city'])
-                          : '—',
-                )),
+                subtitle: Text(
+                  J.str(
+                    order?['tracking_status'] ??
+                            order?['delivery_status'] ??
+                            order?['address_snapshot'] is Map
+                        ? J.str((order?['address_snapshot'] as Map)['city'])
+                        : '—',
+                  ),
+                ),
               ),
             ),
           const SizedBox(height: 8),
@@ -985,7 +1320,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                 subtitle: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('x${item['quantity']} • ${J.str(item['seller_name'])}'),
+                    Text(
+                      'x${item['quantity']} • ${J.str(item['seller_name'])}',
+                    ),
                     Text(app.t(tone.key)),
                     if (J.str(item['return_status']) == 'requested' ||
                         J.str(item['return_status']) == 'approved')
@@ -998,7 +1335,10 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                         if (_canReturnItem(item))
                           TextButton.icon(
                             onPressed: () => _returnItem(item),
-                            icon: const Icon(Icons.restart_alt_outlined, size: 16),
+                            icon: const Icon(
+                              Icons.restart_alt_outlined,
+                              size: 16,
+                            ),
                             label: Text(app.t('return')),
                           ),
                         if (_canCancelItem(item))
@@ -1018,35 +1358,48 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                   ],
                 ),
                 trailing: Text(
-                  money(item['sub_total'] ?? item['price'], app.currency, app.decimals),
+                  money(
+                    item['sub_total'] ?? item['price'],
+                    app.currency,
+                    app.decimals,
+                  ),
                 ),
               ),
             );
           }),
           if ((isDelivered || isReturned) && sellers.isNotEmpty) ...[
             const SizedBox(height: 8),
-            Text(app.t('order_ratings'), style: const TextStyle(fontWeight: FontWeight.bold)),
-            ...sellers.map((s) => ListTile(
-                  leading: const Icon(Icons.storefront_outlined),
-                  title: Text(J.str(s['seller_name'])),
-                  trailing: TextButton(
-                    onPressed: () => _rateSeller(s['seller_id'], J.str(s['seller_name'])),
-                    child: Text(app.t('rate_seller')),
-                  ),
-                )),
+            Text(
+              app.t('order_ratings'),
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            ...sellers.map(
+              (s) => ListTile(
+                leading: const Icon(Icons.storefront_outlined),
+                title: Text(J.str(s['seller_name'])),
+                trailing: TextButton(
+                  onPressed: () =>
+                      _rateSeller(s['seller_id'], J.str(s['seller_name'])),
+                  child: Text(app.t('rate_seller')),
+                ),
+              ),
+            ),
           ],
-          if ((isDelivered || isReturned) && courierId != null && '$courierId'.isNotEmpty)
+          if ((isDelivered || isReturned) &&
+              courierId != null &&
+              '$courierId'.isNotEmpty)
             ListTile(
               leading: const Icon(Icons.delivery_dining_outlined),
-              title: Text(courierName.isNotEmpty
-                  ? courierName
-                  : app.t('courier_rating')),
+              title: Text(
+                courierName.isNotEmpty ? courierName : app.t('courier_rating'),
+              ),
               trailing: TextButton(
                 onPressed: () => _rateCourier(
-                    courierId,
-                    courierName.isNotEmpty
-                        ? courierName
-                        : app.t('courier_rating')),
+                  courierId,
+                  courierName.isNotEmpty
+                      ? courierName
+                      : app.t('courier_rating'),
+                ),
                 child: Text(app.t('rate_courier')),
               ),
             ),
@@ -1055,17 +1408,21 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
             ListTile(
               leading: const Icon(Icons.location_on_outlined),
               title: Text(app.t('delivery_information')),
-              subtitle: Text([
-                J.str(order?['order_address'] ??
-                    [
-                      J.str((order?['address_snapshot'] as Map)['address']),
-                      J.str((order?['address_snapshot'] as Map)['area']),
-                      J.str((order?['address_snapshot'] as Map)['city']),
-                      J.str((order?['address_snapshot'] as Map)['country']),
-                    ].where((e) => e.isNotEmpty).join('، ')),
-                if (J.str(order?['mobile']).isNotEmpty)
-                  J.str(order?['mobile']),
-              ].where((e) => e.isNotEmpty).join('\n')),
+              subtitle: Text(
+                [
+                  J.str(
+                    order?['order_address'] ??
+                        [
+                          J.str((order?['address_snapshot'] as Map)['address']),
+                          J.str((order?['address_snapshot'] as Map)['area']),
+                          J.str((order?['address_snapshot'] as Map)['city']),
+                          J.str((order?['address_snapshot'] as Map)['country']),
+                        ].where((e) => e.isNotEmpty).join('، '),
+                  ),
+                  if (J.str(order?['mobile']).isNotEmpty)
+                    J.str(order?['mobile']),
+                ].where((e) => e.isNotEmpty).join('\n'),
+              ),
             ),
           _billingCard(order, app),
         ],
@@ -1081,9 +1438,12 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
           children: [
             Text(label, style: const TextStyle(color: Colors.grey)),
             const Spacer(),
-            Text(value,
-                style: TextStyle(
-                    fontWeight: bold ? FontWeight.w800 : FontWeight.w600)),
+            Text(
+              value,
+              style: TextStyle(
+                fontWeight: bold ? FontWeight.w800 : FontWeight.w600,
+              ),
+            ),
           ],
         ),
       );
@@ -1096,33 +1456,50 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(app.t('billing_details'),
-                style:
-                    const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+            Text(
+              app.t('billing_details'),
+              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+            ),
             const SizedBox(height: 6),
             if (J.str(order?['payment_method']).isNotEmpty)
               row(app.t('payment_method'), J.str(order?['payment_method'])),
-            if (J.str(order?['transaction_id'] ?? order?['transaction']).isNotEmpty)
-              row(app.t('transaction_id'),
-                  J.str(order?['transaction_id'] ?? order?['transaction'])),
+            if (J
+                .str(order?['transaction_id'] ?? order?['transaction'])
+                .isNotEmpty)
+              row(
+                app.t('transaction_id'),
+                J.str(order?['transaction_id'] ?? order?['transaction']),
+              ),
             if (order?['subtotal'] != null)
-              row(app.t('sub_total'),
-                  money(order?['subtotal'], app.currency, app.decimals)),
+              row(
+                app.t('sub_total'),
+                money(order?['subtotal'], app.currency, app.decimals),
+              ),
             if (order?['delivery_charge'] != null)
-              row(app.t('delivery_charge'),
-                  money(order?['delivery_charge'], app.currency, app.decimals)),
+              row(
+                app.t('delivery_charge'),
+                money(order?['delivery_charge'], app.currency, app.decimals),
+              ),
             if (J.d(order?['promo_discount']) > 0)
-              row(app.t('promo_code_discount'),
-                  '- ${money(order?['promo_discount'], app.currency, app.decimals)}'),
+              row(
+                app.t('promo_code_discount'),
+                '- ${money(order?['promo_discount'], app.currency, app.decimals)}',
+              ),
             if (J.d(order?['wallet_balance'] ?? order?['wallet_applied']) > 0)
-              row(app.t('wallet_balance_used'),
-                  '- ${money(order?['wallet_balance'] ?? order?['wallet_applied'], app.currency, app.decimals)}'),
+              row(
+                app.t('wallet_balance_used'),
+                '- ${money(order?['wallet_balance'] ?? order?['wallet_applied'], app.currency, app.decimals)}',
+              ),
             if (J.d(order?['discount']) > 0)
-              row(app.t('discount'),
-                  '- ${money(order?['discount'], app.currency, app.decimals)}'),
+              row(
+                app.t('discount'),
+                '- ${money(order?['discount'], app.currency, app.decimals)}',
+              ),
             if (refunded > 0)
-              row(app.t('refunded'),
-                  money(refunded, app.currency, app.decimals)),
+              row(
+                app.t('refunded'),
+                money(refunded, app.currency, app.decimals),
+              ),
             const Divider(),
             row(
               app.t('total'),
@@ -1133,9 +1510,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
               Padding(
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(
-                    '${app.t('order_note')}: ${J.str(order?['order_note'] ?? order?['note'])}',
-                    style:
-                        const TextStyle(color: Colors.grey, fontSize: 12)),
+                  '${app.t('order_note')}: ${J.str(order?['order_note'] ?? order?['note'])}',
+                  style: const TextStyle(color: Colors.grey, fontSize: 12),
+                ),
               ),
           ],
         ),
@@ -1284,7 +1661,20 @@ class _AddressesScreenState extends State<AddressesScreen> {
                               title: app.t('delete_address_confirm'),
                             );
                             if (!ok) return;
-                            await app.api.deleteAddress(address['id']);
+                            final res = await app.api.deleteAddress(
+                              address['id'],
+                            );
+                            if (context.mounted && !res.ok) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    res.message.isNotEmpty
+                                        ? res.message
+                                        : app.t('something_went_wrong'),
+                                  ),
+                                ),
+                              );
+                            }
                             await app.loadAddresses();
                           },
                         ),
@@ -1314,16 +1704,36 @@ class _AddressesScreenState extends State<AddressesScreen> {
 
   Future<void> _edit({Map<String, dynamic>? existing}) async {
     final app = appController;
+    // Local draft for new addresses (never auto-submitted, cleared on save).
+    Map<String, dynamic>? addressDraft;
+    if (existing == null) {
+      try {
+        addressDraft = app.offline.readDraft(app.accountScope, 'address_form');
+      } catch (_) {}
+    }
+    final draftName = J.str(addressDraft?['name']);
+    final draftMobile = J.str(addressDraft?['mobile']);
+    final draftStreet = J.str(addressDraft?['address']);
+    final draftType = J.str(addressDraft?['type']);
     final name = TextEditingController(
-      text: J.str(existing?['name'] ?? app.user?['name']),
+      text: J.str(existing?['name']).isNotEmpty
+          ? J.str(existing?['name'])
+          : (draftName.isNotEmpty ? draftName : J.str(app.user?['name'])),
     );
     final mobile = TextEditingController(
-      text: J.str(existing?['mobile'] ?? app.user?['mobile']),
+      text: J.str(existing?['mobile']).isNotEmpty
+          ? J.str(existing?['mobile'])
+          : (draftMobile.isNotEmpty ? draftMobile : J.str(app.user?['mobile'])),
     );
     final address = TextEditingController(
-      text: J.str(existing?['address']),
+      text: J.str(existing?['address']).isNotEmpty
+          ? J.str(existing?['address'])
+          : draftStreet,
     );
-    String addressType = J.str(existing?['type'], 'Home');
+    final rawType = J.str(existing?['type']).isNotEmpty
+        ? J.str(existing?['type'])
+        : draftType;
+    String addressType = rawType.isNotEmpty ? rawType : 'Home';
     const types = ['Home', 'Office', 'Shop', 'Other'];
     if (!types.contains(addressType)) addressType = 'Home';
     final city = app.city;
@@ -1406,7 +1816,20 @@ class _AddressesScreenState extends State<AddressesScreen> {
         },
       ),
     );
-    if (ok != true) return;
+    if (ok != true) {
+      // Dialog dismissed: keep a local draft for new addresses.
+      if (existing == null) {
+        try {
+          await app.offline.writeDraft(app.accountScope, 'address_form', {
+            'name': name.text,
+            'mobile': mobile.text,
+            'address': address.text,
+            'type': addressType,
+          });
+        } catch (_) {}
+      }
+      return;
+    }
     if (name.text.trim().isEmpty ||
         mobile.text.trim().isEmpty ||
         address.text.trim().isEmpty) {
@@ -1436,6 +1859,10 @@ class _AddressesScreenState extends State<AddressesScreen> {
       if (customFields.isNotEmpty) 'custom_fields': jsonEncode(customFields),
     };
     final hadAny = app.addresses.isNotEmpty;
+    if (!await app.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     final res = existing != null
         ? await app.api.updateAddress({...fields, 'id': existing['id']})
         : await app.api.addAddress(fields);
@@ -1444,24 +1871,46 @@ class _AddressesScreenState extends State<AddressesScreen> {
     // Surface backend errors instead of failing silently (this was why
     // addresses "never appeared" — e.g. the old required-pincode rule).
     if (!res.ok) {
+      // Offline/validation failure: keep a local draft (city/zone validation
+      // still happens server-side on explicit save — never queued blindly).
+      if (existing == null) {
+        try {
+          await app.offline.writeDraft(app.accountScope, 'address_form', {
+            'name': name.text,
+            'mobile': mobile.text,
+            'address': address.text,
+            'type': addressType,
+          });
+        } catch (_) {}
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-            content: Text(res.message.isNotEmpty
+          content: Text(
+            res.message.isNotEmpty
                 ? res.message
-                : app.t('something_went_wrong'))),
+                : app.t('something_went_wrong'),
+          ),
+        ),
       );
       return;
     }
+    if (existing == null) {
+      try {
+        await app.offline.removeDraft(app.accountScope, 'address_form');
+      } catch (_) {}
+    }
     // Auto-select the new address so checkout sees it immediately.
     if (!hadAny && app.addresses.isNotEmpty) {
-      app.selectAddress(app.addresses.firstWhere(
-        (a) => J.i(a['is_default']) == 1,
-        orElse: () => app.addresses.first,
-      ));
+      app.selectAddress(
+        app.addresses.firstWhere(
+          (a) => J.i(a['is_default']) == 1,
+          orElse: () => app.addresses.first,
+        ),
+      );
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(app.t('address_saved_ok'))),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(app.t('address_saved_ok'))));
   }
 }
 
@@ -1475,6 +1924,7 @@ class WishlistScreen extends StatefulWidget {
 class _WishlistScreenState extends State<WishlistScreen> {
   List<Map<String, dynamic>> items = [];
   bool loading = true;
+  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -1482,10 +1932,23 @@ class _WishlistScreenState extends State<WishlistScreen> {
     _load();
   }
 
+  /// Offline-first: restores the account's persisted favorites + cached
+  /// wishlist rows instantly, then refreshes. A failed refresh keeps the
+  /// cached rows (badged as saved) instead of showing an empty list.
   Future<void> _load() async {
     if (!appController.isLoggedIn) {
       if (mounted) setState(() => loading = false);
       return;
+    }
+    final scope = appController.accountScope;
+    await appController.restoreCachedFavorites();
+    final cached = appController.readCachedWishlist();
+    if (cached.isNotEmpty && mounted) {
+      setState(() {
+        items = cached;
+        loading = false;
+        _servedFromCache = true;
+      });
     }
     final point = appController.coords ?? (latitude: 0.0, longitude: 0.0);
     final result = await appController.api.favorites(
@@ -1493,10 +1956,25 @@ class _WishlistScreenState extends State<WishlistScreen> {
       longitude: point.longitude,
     );
     if (!mounted) return;
-    setState(() {
-      items = result.dataMaps;
-      loading = false;
-    });
+    // Drop late responses after logout/account switch.
+    if (!appController.isLoggedIn || appController.accountScope != scope) {
+      return;
+    }
+    if (result.ok) {
+      await appController.cacheWishlist(result.dataMaps);
+      if (!mounted || appController.accountScope != scope) return;
+      setState(() {
+        items = result.dataMaps;
+        loading = false;
+        _servedFromCache = false;
+      });
+    } else {
+      // Keep cached rows (if any); only an empty cache shows a retry affordance.
+      setState(() {
+        loading = false;
+        _servedFromCache = items.isNotEmpty;
+      });
+    }
   }
 
   @override
@@ -1515,10 +1993,7 @@ class _WishlistScreenState extends State<WishlistScreen> {
                 backgroundColor: AppTheme.accentOrange,
                 label: Text(
                   '${appController.cartCount}',
-                  style: const TextStyle(
-                    fontSize: 10,
-                    color: Colors.white,
-                  ),
+                  style: const TextStyle(fontSize: 10, color: Colors.white),
                 ),
                 child: const Icon(Icons.shopping_cart_outlined),
               ),
@@ -1535,58 +2010,65 @@ class _WishlistScreenState extends State<WishlistScreen> {
           ? EmptyState(
               icon: Icons.favorite_border,
               message: app.t('wishlist'),
-              actionLabel: app.t('shop_now'),
-              onAction: () => context.go('/products'),
+              actionLabel: app.t('retry'),
+              onAction: _load,
             )
-          : ListView(
-              children: items
-                  .map(
-                    (item) => ListTile(
-                      leading: SizedBox(
-                        width: 56,
-                        child: AppImage(
-                          J.str(item['image_url']),
-                          placeholder: app.placeholder,
-                        ),
-                      ),
-                      title: Text(J.str(item['name'])),
-                      subtitle: Text(
-                        money(
-                          item['price'] ?? item['final_price'],
-                          app.currency,
-                          app.decimals,
-                        ),
-                        style: TextStyle(
-                          color: app.accentColor,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      onTap: () => context.push(
-                        '/product/${item['slug'] ?? item['id']}',
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.add_shopping_cart),
-                            tooltip: app.t('add_to_cart'),
-                            onPressed: () => addProductFromCatalog(
-                                context, item),
+          : Column(
+              children: [
+                if (_servedFromCache) OfflineBanner(stale: true),
+                Expanded(
+                  child: ListView(
+                    children: items
+                        .map(
+                          (item) => ListTile(
+                            leading: SizedBox(
+                              width: 56,
+                              child: AppImage(
+                                J.str(item['image_url']),
+                                placeholder: app.placeholder,
+                              ),
+                            ),
+                            title: Text(J.str(item['name'])),
+                            subtitle: Text(
+                              money(
+                                item['price'] ?? item['final_price'],
+                                app.currency,
+                                app.decimals,
+                              ),
+                              style: TextStyle(
+                                color: app.accentColor,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            onTap: () => context.push(
+                              '/product/${item['slug'] ?? item['id']}',
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(Icons.add_shopping_cart),
+                                  tooltip: app.t('add_to_cart'),
+                                  onPressed: () =>
+                                      addProductFromCatalog(context, item),
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.delete_outline),
+                                  onPressed: () async {
+                                    await app.toggleFavorite(
+                                      item['id'] ?? item['product_id'],
+                                    );
+                                    if (mounted) _load();
+                                  },
+                                ),
+                              ],
+                            ),
                           ),
-                          IconButton(
-                            icon: const Icon(Icons.delete_outline),
-                            onPressed: () async {
-                              await app.toggleFavorite(
-                                item['id'] ?? item['product_id'],
-                              );
-                              if (mounted) _load();
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  )
-                  .toList(),
+                        )
+                        .toList(),
+                  ),
+                ),
+              ],
             ),
     );
   }
@@ -1600,13 +2082,19 @@ class SimpleListScreen extends StatefulWidget {
     this.header,
     this.pageLoader,
     this.emptyMessage,
+    this.snapshotName,
   });
   final String title;
   final Future<List<Map<String, dynamic>>> Function() loader;
   final Widget? header;
   final Future<List<Map<String, dynamic>>> Function(int limit, int offset)?
-      pageLoader;
+  pageLoader;
   final String? emptyMessage;
+
+  /// Offline snapshot name (account-scoped). When set, the last synchronized
+  /// first page paints offline with a stale badge (spend-disabled for wallet:
+  /// snapshots are never proof of balance).
+  final String? snapshotName;
 
   @override
   State<SimpleListScreen> createState() => _SimpleListScreenState();
@@ -1617,6 +2105,7 @@ class _SimpleListScreenState extends State<SimpleListScreen> {
   bool loading = true;
   bool loadingMore = false;
   bool hasMore = false;
+  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -1629,6 +2118,18 @@ class _SimpleListScreenState extends State<SimpleListScreen> {
       if (mounted) setState(() => loading = false);
       return;
     }
+    // Local-first: last synchronized page paints offline.
+    final snapName = widget.snapshotName;
+    if (snapName != null && mounted) {
+      final snap = appController.readAccountSnapshot(snapName);
+      if (snap is List && snap.isNotEmpty) {
+        setState(() {
+          items = J.maps(snap);
+          loading = false;
+          _servedFromCache = true;
+        });
+      }
+    }
     try {
       List<Map<String, dynamic>> value;
       if (widget.pageLoader != null) {
@@ -1638,13 +2139,20 @@ class _SimpleListScreenState extends State<SimpleListScreen> {
         value = await widget.loader();
       }
       if (!mounted) return;
+      if (value.isNotEmpty && snapName != null) {
+        await appController.cacheAccountSnapshot(snapName, value);
+      }
       setState(() {
-        items = value;
+        if (value.isNotEmpty) items = value;
         loading = false;
+        _servedFromCache = value.isEmpty && items.isNotEmpty;
       });
     } catch (_) {
       if (!mounted) return;
-      setState(() => loading = false);
+      setState(() {
+        loading = false;
+        _servedFromCache = items.isNotEmpty;
+      });
     }
   }
 
@@ -1676,33 +2184,37 @@ class _SimpleListScreenState extends State<SimpleListScreen> {
           : ListView(
               children: [
                 if (widget.header != null) widget.header!,
+                OfflineBanner(stale: _servedFromCache),
                 if (items.isEmpty)
                   EmptyState(
-                    message: widget.emptyMessage ??
-                        app.t('no_notifications'),
+                    message: widget.emptyMessage ?? app.t('no_notifications'),
                   )
                 else ...[
                   ...items
                       .map(
-                    (item) => ListTile(
-                      title: Text(
-                        J.str(
-                          item['title'] ??
-                              item['message'] ??
-                              item['txn_id'] ??
-                              item['id'],
+                        (item) => ListTile(
+                          title: Text(
+                            J.str(
+                              item['title'] ??
+                                  item['message'] ??
+                                  item['txn_id'] ??
+                                  item['id'],
+                            ),
+                          ),
+                          subtitle: Text(
+                            J.str(
+                              item['date'] ??
+                                  item['created_at'] ??
+                                  item['type'],
+                            ),
+                          ),
+                          trailing: Text(
+                            J.str(
+                              item['amount'] ?? item['latest_message'] ?? '',
+                            ),
+                          ),
                         ),
-                      ),
-                      subtitle: Text(
-                        J.str(
-                          item['date'] ?? item['created_at'] ?? item['type'],
-                        ),
-                      ),
-                      trailing: Text(
-                        J.str(item['amount'] ?? item['latest_message'] ?? ''),
-                      ),
-                    ),
-                  )
+                      )
                       .toList(),
                   if (widget.pageLoader != null && hasMore)
                     Padding(
@@ -1742,9 +2254,54 @@ class _ProfileScreenState extends State<ProfileScreen> {
   );
   XFile? pickedImage;
   bool saving = false;
+  bool _draftRestored = false;
+
+  static const _draftFormId = 'profile_form';
+
+  @override
+  void initState() {
+    super.initState();
+    // Local text draft (never auto-sent; photo upload stays online-only).
+    try {
+      final draft = appController.offline.readDraft(
+        appController.accountScope,
+        _draftFormId,
+      );
+      if (draft != null) {
+        final n = J.str(draft['name']);
+        final e = J.str(draft['email']);
+        final m = J.str(draft['mobile']);
+        if (n.isNotEmpty || e.isNotEmpty || m.isNotEmpty) {
+          if (n.isNotEmpty) name.text = n;
+          if (e.isNotEmpty) email.text = e;
+          if (m.isNotEmpty) mobile.text = m;
+          _draftRestored = true;
+        }
+      }
+    } catch (_) {}
+    for (final c in [name, email, mobile]) {
+      c.addListener(_saveDraftSoon);
+    }
+  }
+
+  Timer? _draftDeb;
+
+  void _saveDraftSoon() {
+    _draftDeb?.cancel();
+    _draftDeb = Timer(const Duration(milliseconds: 600), () async {
+      try {
+        await appController.offline.writeDraft(
+          appController.accountScope,
+          _draftFormId,
+          {'name': name.text, 'email': email.text, 'mobile': mobile.text},
+        );
+      } catch (_) {}
+    });
+  }
 
   @override
   void dispose() {
+    _draftDeb?.cancel();
     name.dispose();
     email.dispose();
     mobile.dispose();
@@ -1765,9 +2322,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _save() async {
     final app = appController;
     if (name.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(app.t('fill_required_fields'))),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(app.t('fill_required_fields'))));
+      return;
+    }
+    if (!await app.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
       return;
     }
     setState(() => saving = true);
@@ -1800,6 +2361,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
         if (me.ok) {
           app.setUser(me.user.isNotEmpty ? me.user : me.dataMap);
         }
+        try {
+          await app.offline.removeDraft(app.accountScope, _draftFormId);
+        } catch (_) {}
+        _draftRestored = false;
         if (mounted) setState(() => pickedImage = null);
       }
       if (!mounted) return;
@@ -1870,10 +2435,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ],
             ),
           ),
-          TextButton(
-            onPressed: _pickImage,
-            child: Text(app.t('change_photo')),
-          ),
+          TextButton(onPressed: _pickImage, child: Text(app.t('change_photo'))),
           TextField(
             controller: name,
             decoration: InputDecoration(labelText: app.t('Name')),
@@ -1893,10 +2455,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
           const SizedBox(height: 16),
           FilledButton(
             onPressed: saving ? null : _save,
-            child: saving
-                ? const BusySpinner()
-                : Text(app.t('update')),
+            child: saving ? const BusySpinner() : Text(app.t('update')),
           ),
+          if (_draftRestored)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                app.t('draft_saved'),
+                style: const TextStyle(color: Colors.black54, fontSize: 12),
+              ),
+            ),
         ],
       ),
     );
@@ -1911,7 +2479,8 @@ class WalletSettingsHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final app = appController;
     final hasLimit = app.walletRefillLimit > 0;
-    final hasBank = app.walletBankName.isNotEmpty ||
+    final hasBank =
+        app.walletBankName.isNotEmpty ||
         app.walletAccountHolder.isNotEmpty ||
         app.walletAccountNumber.isNotEmpty ||
         app.walletTransferInstructions.isNotEmpty;
@@ -1945,22 +2514,35 @@ class WalletSettingsHeader extends StatelessWidget {
             Card(
               child: ListTile(
                 leading: const Icon(Icons.info_outline),
-                title: Text(app.t('wallet_refill_limit_hint')
-                    .replaceAll('{amount}', '${app.currency} ${app.walletRefillLimit}')),
+                title: Text(
+                  app
+                      .t('wallet_refill_limit_hint')
+                      .replaceAll(
+                        '{amount}',
+                        '${app.currency} ${app.walletRefillLimit}',
+                      ),
+                ),
               ),
             ),
           if (hasBank)
             Card(
               child: ListTile(
                 leading: const Icon(Icons.account_balance),
-                title: Text([
-                  if (app.walletBankName.isNotEmpty) app.walletBankName,
-                  if (app.walletAccountNumber.isNotEmpty) app.walletAccountNumber,
-                ].join(' • ')),
-                subtitle: Text([
-                  if (app.walletAccountHolder.isNotEmpty) app.walletAccountHolder,
-                  if (app.walletTransferInstructions.isNotEmpty) app.walletTransferInstructions,
-                ].where((e) => e.isNotEmpty).join('\n')),
+                title: Text(
+                  [
+                    if (app.walletBankName.isNotEmpty) app.walletBankName,
+                    if (app.walletAccountNumber.isNotEmpty)
+                      app.walletAccountNumber,
+                  ].join(' • '),
+                ),
+                subtitle: Text(
+                  [
+                    if (app.walletAccountHolder.isNotEmpty)
+                      app.walletAccountHolder,
+                    if (app.walletTransferInstructions.isNotEmpty)
+                      app.walletTransferInstructions,
+                  ].where((e) => e.isNotEmpty).join('\n'),
+                ),
               ),
             ),
         ],

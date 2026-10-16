@@ -7,6 +7,7 @@ import '../core/product_media.dart';
 import '../core/promo_price.dart';
 import 'app_image.dart';
 import 'closed_store_badge.dart';
+import 'requires_internet_dialog.dart';
 
 /// Variant picker as a centered dialog (web parity with ProductVariantModal).
 /// A dialog (not a bottom sheet) so the page never looks dimmed-and-empty:
@@ -74,7 +75,7 @@ Future<void> handleCartAddResult(
       );
       if (!context.mounted) return;
       if (retry != null) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(retry)));
+        await showCartError(context, retry);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(app.t('add_to_cart'))),
@@ -84,7 +85,7 @@ Future<void> handleCartAddResult(
     return;
   }
   if (error != null) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+    await showCartError(context, error);
     return;
   }
   if (silentSuccess) return;
@@ -170,9 +171,7 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
         if (mySeq != _seq || !mounted) return;
         setState(() => _optimistic.remove(key));
         if (err != null && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(err)),
-          );
+          await showCartError(context, err);
         }
         return;
       }
@@ -217,9 +216,7 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
           if (mySeq != _seq || !mounted) return;
           setState(() => _optimistic.remove(key));
           if (retry != null && mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(retry)),
-            );
+            await showCartError(context, retry);
           }
         } else if (mounted) {
           setState(() => _optimistic.remove(key));
@@ -230,9 +227,7 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
         if (!mounted) return;
         setState(() => _optimistic.remove(key));
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(err)),
-          );
+          await showCartError(context, err);
         }
       } else {
         // Silent success.
@@ -364,7 +359,7 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
               child: ListView.separated(
                 shrinkWrap: true,
                 itemCount: variants.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 10),
+                separatorBuilder: (_, _) => const SizedBox(height: 10),
                 itemBuilder: (_, i) {
                   final variant = variants[i];
                   final price = variantDisplayPrice(variant);

@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sareemart_customer/core/api/api_errors.dart';
+import 'package:sareemart_customer/core/json_util.dart';
 
 void main() {
   group('development: detailed errors remain visible', () {
@@ -215,5 +216,97 @@ void main() {
       'file': '/app/x.php',
       'line': 1,
     }), isTrue);
+  });
+
+  group('ApiErrorCategory', () {
+    test('classifies network, server, auth, validation, rate-limit', () {
+      expect(classifyUnknown('ECONNREFUSED', release: true).category,
+          ApiErrorCategory.network);
+      expect(
+          classifyDio(
+            DioException(
+              requestOptions: RequestOptions(path: '/'),
+              type: DioExceptionType.connectionTimeout,
+            ),
+            release: true,
+          ).category,
+          ApiErrorCategory.network);
+      expect(
+          classifyDio(
+            DioException(
+              requestOptions: RequestOptions(path: '/'),
+              type: DioExceptionType.badResponse,
+              response: Response(
+                requestOptions: RequestOptions(path: '/'),
+                statusCode: 500,
+                data: {'message': 'error'},
+              ),
+            ),
+            release: true,
+          ).category,
+          ApiErrorCategory.server);
+      expect(
+          classifyDio(
+            DioException(
+              requestOptions: RequestOptions(path: '/'),
+              type: DioExceptionType.badResponse,
+              response: Response(
+                requestOptions: RequestOptions(path: '/'),
+                statusCode: 401,
+                data: {'message': 'Unauthenticated'},
+              ),
+            ),
+            release: true,
+          ).category,
+          ApiErrorCategory.auth);
+      expect(
+          classifyDio(
+            DioException(
+              requestOptions: RequestOptions(path: '/'),
+              type: DioExceptionType.badResponse,
+              response: Response(
+                requestOptions: RequestOptions(path: '/'),
+                statusCode: 422,
+                data: {'message': 'validation'},
+              ),
+            ),
+            release: true,
+          ).category,
+          ApiErrorCategory.validation);
+      expect(
+          classifyDio(
+            DioException(
+              requestOptions: RequestOptions(path: '/'),
+              type: DioExceptionType.badResponse,
+              response: Response(
+                requestOptions: RequestOptions(path: '/'),
+                statusCode: 429,
+                data: {'message': 'rate limit'},
+                headers: Headers.fromMap({'retry-after': ['5']}),
+              ),
+            ),
+            release: true,
+          ),
+          isA<ClassifiedApiError>()
+              .having((e) => e.category, 'category', ApiErrorCategory.rateLimit)
+              .having((e) => e.retryAfter, 'retryAfter', 5));
+    });
+
+    test('ApiResultErrorX extracts classified error from guarded response', () {
+      final res = ApiResult({
+        'status': 0,
+        'message': 'The mobile field is required.',
+        'error': {
+          'code': 'HTTP_422',
+          'httpStatus': 422,
+          'publicCode': 'VALIDATION',
+        },
+      });
+      final err = res.classifiedError;
+      expect(err, isNotNull);
+      expect(err!.category, ApiErrorCategory.validation);
+      expect(err.publicCode, 'VALIDATION');
+      expect(err.httpStatus, 422);
+    });
   });
 }

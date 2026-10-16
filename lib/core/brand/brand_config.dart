@@ -98,10 +98,18 @@ class BrandConfig {
       assets['logo_png_url'] ?? assets['logo_svg_url'] ?? assets['logo_png'];
 
   Color _color(String key, int fallback) {
-    final raw = colors[key];
-    if (raw == null || raw.isEmpty) return Color(fallback);
-    var hex = raw.replaceAll('#', '');
-    if (hex.length == 6) hex = 'FF$hex';
-    return Color(int.parse(hex, radix: 16));
+    try {
+      final raw = colors[key];
+      if (raw == null || raw.isEmpty) return Color(fallback);
+      var hex = raw.replaceAll('#', '').trim();
+      if (hex.length == 3) hex = hex.split('').map((c) => '$c$c').join();
+      if (hex.length == 6) hex = 'FF$hex';
+      if (hex.length != 8) return Color(fallback);
+      final value = int.tryParse(hex, radix: 16);
+      if (value == null) return Color(fallback);
+      return Color(value);
+    } catch (_) {
+      return Color(fallback);
+    }
   }
 }

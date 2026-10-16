@@ -21,13 +21,14 @@ import 'features/more/more_screens.dart';
 import 'features/notifications/notifications_screen.dart';
 import 'features/products/categories_screen.dart';
 import 'features/products/products_screens.dart';
-import 'features/roles/roles_screens.dart';
 import 'widgets/ui_helpers.dart';
 
 GoRouter buildRouter() {
   return GoRouter(
     initialLocation: '/',
-    refreshListenable: appController,
+    // Scoped refresh: auth/city/catalog-mode only. Cart steppers, shop
+    // revalidation, and favorites no longer re-evaluate every redirect.
+    refreshListenable: appController.navTick,
     routes: [
       GoRoute(
         path: '/login',
@@ -105,11 +106,15 @@ GoRouter buildRouter() {
           key: state.pageKey,
           child: SimpleListScreen(
             title: appController.t('wallet'),
+            snapshotName: 'wallet',
             loader: () async =>
                 (await appController.api.transactions(type: 'wallet')).dataMaps,
-            pageLoader: (limit, offset) async => (await appController.api
-                    .transactions(limit: limit, offset: offset, type: 'wallet'))
-                .dataMaps,
+            pageLoader: (limit, offset) async =>
+                (await appController.api.transactions(
+                  limit: limit,
+                  offset: offset,
+                  type: 'wallet',
+                )).dataMaps,
             emptyMessage: appController.t('no_transaction'),
             header: const WalletSettingsHeader(),
           ),
@@ -121,10 +126,14 @@ GoRouter buildRouter() {
           key: state.pageKey,
           child: SimpleListScreen(
             title: appController.t('transactions'),
-            loader: () async => (await appController.api.transactions()).dataMaps,
-            pageLoader: (limit, offset) async => (await appController.api
-                    .transactions(limit: limit, offset: offset))
-                .dataMaps,
+            snapshotName: 'transactions',
+            loader: () async =>
+                (await appController.api.transactions()).dataMaps,
+            pageLoader: (limit, offset) async =>
+                (await appController.api.transactions(
+                  limit: limit,
+                  offset: offset,
+                )).dataMaps,
             emptyMessage: appController.t('no_transaction'),
           ),
         ),
@@ -134,7 +143,8 @@ GoRouter buildRouter() {
         pageBuilder: (_, state) => AppTheme.slidePage(
           key: state.pageKey,
           child: SellersScreen(
-            typeId: state.uri.queryParameters['type'] ??
+            typeId:
+                state.uri.queryParameters['type'] ??
                 state.uri.queryParameters['category'],
           ),
         ),
@@ -155,17 +165,13 @@ GoRouter buildRouter() {
       ),
       GoRoute(
         path: '/offers',
-        pageBuilder: (_, state) => AppTheme.slidePage(
-          key: state.pageKey,
-          child: const OffersScreen(),
-        ),
+        pageBuilder: (_, state) =>
+            AppTheme.slidePage(key: state.pageKey, child: const OffersScreen()),
       ),
       GoRoute(
         path: '/search',
-        pageBuilder: (_, state) => AppTheme.slidePage(
-          key: state.pageKey,
-          child: const SearchScreen(),
-        ),
+        pageBuilder: (_, state) =>
+            AppTheme.slidePage(key: state.pageKey, child: const SearchScreen()),
       ),
       GoRoute(
         path: '/category/:slug',
@@ -209,20 +215,20 @@ GoRouter buildRouter() {
           child: HarajDetailsScreen(id: state.pathParameters['id']!),
         ),
       ),
-      GoRoute(path: '/checkout-groups', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const CheckoutGroupsScreen())),
-      GoRoute(path: '/checkout-groups/:id', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: CheckoutGroupDetailsScreen(id: s.pathParameters['id']!))),
-      GoRoute(path: '/seller/orders', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const SellerOrdersScreen())),
-      GoRoute(path: '/seller/orders/:id', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: SellerOrderDetailsScreen(id: s.pathParameters['id']!))),
-      GoRoute(path: '/seller/settlement', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const SellerSettlementScreen())),
-      GoRoute(path: '/courier', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const CourierDashboardScreen())),
-      GoRoute(path: '/courier/assignments', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const CourierAssignmentsScreen())),
-      GoRoute(path: '/courier/assignments/:id', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: CourierAssignmentDetailsScreen(id: s.pathParameters['id']!))),
-      GoRoute(path: '/courier/settlement', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const CourierSettlementScreen())),
-      GoRoute(path: '/admin/checkout-groups', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const AdminCheckoutGroupsScreen())),
-      GoRoute(path: '/admin/checkout-groups/:id', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: AdminCheckoutGroupDetailsScreen(id: s.pathParameters['id']!))),
-      GoRoute(path: '/admin/dispatch', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const AdminDispatchScreen())),
-      GoRoute(path: '/admin/returns', pageBuilder: (_, s)=> AppTheme.slidePage(key: s.pageKey, child: const AdminReturnsScreen())),
-
+      GoRoute(
+        path: '/checkout-groups',
+        pageBuilder: (_, s) => AppTheme.slidePage(
+          key: s.pageKey,
+          child: const CheckoutGroupsScreen(),
+        ),
+      ),
+      GoRoute(
+        path: '/checkout-groups/:id',
+        pageBuilder: (_, s) => AppTheme.slidePage(
+          key: s.pageKey,
+          child: CheckoutGroupDetailsScreen(id: s.pathParameters['id']!),
+        ),
+      ),
       GoRoute(
         path: '/akhdimni/create',
         pageBuilder: (_, state) => AppTheme.slidePage(
@@ -296,10 +302,8 @@ GoRouter buildRouter() {
       ),
       GoRoute(
         path: '/faq',
-        pageBuilder: (_, state) => AppTheme.slidePage(
-          key: state.pageKey,
-          child: const FaqScreen(),
-        ),
+        pageBuilder: (_, state) =>
+            AppTheme.slidePage(key: state.pageKey, child: const FaqScreen()),
       ),
       GoRoute(
         path: '/policy/:type',
@@ -320,8 +324,7 @@ GoRouter buildRouter() {
           return AppTheme.slidePage(
             key: state.pageKey,
             child: CmsScreen(
-              title: appController
-                  .t(titles[type] ?? 'privacy_policy'),
+              title: appController.t(titles[type] ?? 'privacy_policy'),
               settingKey: keys[type] ?? 'privacy_policy',
             ),
           );
@@ -348,8 +351,7 @@ GoRouter buildRouter() {
           GoRoute(
             path: '/products',
             // Web parity: in stores_only the catalog is hidden entirely.
-            redirect: (_, __) =>
-                appController.isStoresOnly ? '/sellers' : null,
+            redirect: (_, _) => appController.isStoresOnly ? '/sellers' : null,
             pageBuilder: (_, state) {
               final q = state.uri.queryParameters;
               return AppTheme.slidePage(
@@ -413,15 +415,23 @@ class AppShell extends StatelessWidget {
   /// Bottom tabs: [الرئيسية, الحراج, اخدمني?, طلباتي]. Products & stores now
   /// live inside Home as a toggle (no separate tabs); Cart is reached from the
   /// header shortcut and orders replaced it in the bar.
-  List<_Tab> get tabs {
+  List<AppTab> get tabs {
     return [
-      _Tab('home_tab', '/', Icons.home_outlined, Icons.home),
-      _Tab('haraj', '/haraj', Icons.sell_outlined, Icons.sell),
+      AppTab('home_tab', '/', Icons.home_outlined, Icons.home),
+      AppTab('haraj', '/haraj', Icons.sell_outlined, Icons.sell),
       if (appController.akhdimniEnabled)
-        _Tab('akhdimni', '/akhdimni', Icons.delivery_dining_outlined,
-            Icons.delivery_dining),
-      _Tab('my_orders', '/orders', Icons.receipt_long_outlined,
-          Icons.receipt_long),
+        AppTab(
+          'akhdimni',
+          '/akhdimni',
+          Icons.delivery_dining_outlined,
+          Icons.delivery_dining,
+        ),
+      AppTab(
+        'my_orders',
+        '/orders',
+        Icons.receipt_long_outlined,
+        Icons.receipt_long,
+      ),
     ];
   }
 
@@ -490,8 +500,8 @@ class AppShell extends StatelessWidget {
   }
 }
 
-class _Tab {
-  const _Tab(this.labelKey, this.path, this.icon, this.selectedIcon);
+class AppTab {
+  const AppTab(this.labelKey, this.path, this.icon, this.selectedIcon);
   final String labelKey;
   final String path;
   final IconData icon;
@@ -593,8 +603,11 @@ class _HeaderSearchBarState extends State<_HeaderSearchBar> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.search_outlined,
-                      size: 14, color: AppTheme.accentOrange),
+                  const Icon(
+                    Icons.search_outlined,
+                    size: 14,
+                    color: AppTheme.accentOrange,
+                  ),
                   const SizedBox(width: 4),
                   Text(
                     app.t('search'),
@@ -615,8 +628,11 @@ class _HeaderSearchBarState extends State<_HeaderSearchBar> {
 }
 
 class _BrandHeader extends StatelessWidget {
-  const _BrandHeader(
-      {required this.app, required this.title, required this.location});
+  const _BrandHeader({
+    required this.app,
+    required this.title,
+    required this.location,
+  });
   final AppController app;
   final String title;
   final String location;
@@ -652,17 +668,19 @@ class _BrandHeader extends StatelessWidget {
                     ),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(6),
-                      child: app.brand.logoUrl != null && app.brand.logoUrl!.isNotEmpty
+                      child:
+                          app.brand.logoUrl != null &&
+                              app.brand.logoUrl!.isNotEmpty
                           ? Image.network(
                               app.brand.logoUrl!,
                               width: 32,
                               height: 32,
                               fit: BoxFit.contain,
-                              errorBuilder: (_, __, ___) => Image.asset(
+                              errorBuilder: (_, _, _) => Image.asset(
                                 'assets/brand/sareemart-logo.png',
                                 width: 32,
                                 height: 32,
-                                errorBuilder: (_, __, ___) => const Icon(
+                                errorBuilder: (_, _, _) => const Icon(
                                   Icons.shopping_cart_rounded,
                                   color: AppTheme.accentOrange,
                                   size: 26,
@@ -673,11 +691,11 @@ class _BrandHeader extends StatelessWidget {
                               'assets/brand/sareemart-logo.png',
                               width: 32,
                               height: 32,
-                              errorBuilder: (_, __, ___) => Image.asset(
+                              errorBuilder: (_, _, _) => Image.asset(
                                 'assets/brand/sareemart-mark.png',
                                 width: 32,
                                 height: 32,
-                                errorBuilder: (_, __, ___) => const Icon(
+                                errorBuilder: (_, _, _) => const Icon(
                                   Icons.shopping_cart_rounded,
                                   color: AppTheme.accentOrange,
                                   size: 26,
@@ -705,7 +723,7 @@ class _BrandHeader extends StatelessWidget {
                   // so the badge updates on every cart change.
                   ListenableBuilder(
                     listenable: app,
-                    builder: (_, __) => IconButton(
+                    builder: (_, _) => IconButton(
                       onPressed: () => context.push('/cart'),
                       icon: Badge(
                         isLabelVisible: app.cartCount > 0,
@@ -713,7 +731,9 @@ class _BrandHeader extends StatelessWidget {
                         label: Text(
                           '${app.cartCount}',
                           style: const TextStyle(
-                              fontSize: 10, color: Colors.white),
+                            fontSize: 10,
+                            color: Colors.white,
+                          ),
                         ),
                         child: const Icon(
                           Icons.shopping_cart_outlined,
@@ -753,8 +773,13 @@ class SareemartCustomerApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Chrome-only rebuilds (locale/brand/theme). Cart quantity changes,
+    // shop revalidation, and badge ticks rebuild their own small scopes.
     return ListenableBuilder(
-      listenable: appController,
+      listenable: Listenable.merge([
+        appController.chromeTick,
+        appController.i18n,
+      ]),
       builder: (context, _) {
         final locale = appController.i18n.locale;
         return MaterialApp.router(

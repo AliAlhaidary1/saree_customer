@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
 import '../../widgets/app_image.dart';
+import '../../widgets/offline_banner.dart';
 import '../../widgets/ui_helpers.dart';
 
 void openStoreType(BuildContext context, dynamic category) {
@@ -30,6 +31,7 @@ class CategoriesScreen extends StatefulWidget {
 class _CategoriesScreenState extends State<CategoriesScreen> {
   List<Map<String, dynamic>> items = [];
   bool loading = true;
+  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -54,6 +56,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         }
         return out;
       }
+
       for (final cat in walk(appController.shop?['categories'])) {
         if (J.str(cat['slug']) == widget.slug) {
           match = cat;
@@ -77,6 +80,26 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       return;
     }
     setState(() => loading = true);
+    // Offline-first: paint the persisted categories instantly so a cold
+    // start without connectivity still shows usable rows.
+    if (appController.rootCategories.isNotEmpty) {
+      setState(() {
+        items = List<Map<String, dynamic>>.from(appController.rootCategories);
+        loading = false;
+        _servedFromCache = true;
+      });
+    } else {
+      // Synchronized catalog categories (per-scope, survives restarts).
+      final local = await appController.catalogCategoriesLocal();
+      if (!mounted) return;
+      if (local.isNotEmpty) {
+        setState(() {
+          items = local;
+          loading = false;
+          _servedFromCache = true;
+        });
+      }
+    }
     final slug = widget.slug == 'all' ? null : widget.slug;
     final result = await appController.api.categories(
       categoryId: slug == null ? 0 : null,
@@ -85,10 +108,19 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       offset: 0,
     );
     if (!mounted) return;
-    setState(() {
-      items = result.dataMaps;
-      loading = false;
-    });
+    if (result.ok) {
+      setState(() {
+        items = result.dataMaps;
+        loading = false;
+        _servedFromCache = false;
+      });
+    } else {
+      // Refresh failed: keep the cached rows (if any) with a stale badge.
+      setState(() {
+        loading = false;
+        _servedFromCache = items.isNotEmpty;
+      });
+    }
   }
 
   @override
@@ -96,58 +128,70 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     final app = appController;
     return Scaffold(
       appBar: AppBar(title: Text(app.t('store_types'))),
-      body: loading
-          ? const Center(child: CircularProgressIndicator())
-          : items.isEmpty
-          ? EmptyState(message: app.t('no_categories_found'))
-          : GridView.builder(
-              padding: const EdgeInsets.all(16),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-                childAspectRatio: 0.78,
-              ),
-              itemCount: items.length,
-              itemBuilder: (_, i) {
-                final cat = items[i];
-                return InkWell(
-                  onTap: () => openCategory(context, cat),
-                  borderRadius: BorderRadius.circular(16),
-                  child: Ink(
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Column(
-                      children: [
-                        Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.all(10),
-                            child: AppImage(
-                              J.str(cat['image_url'] ?? cat['image']),
-                              placeholder: app.placeholder,
-                            ),
+      body: Column(
+        children: [
+          if (_servedFromCache) OfflineBanner(stale: true),
+          Expanded(
+            child: loading
+                ? const Center(child: CircularProgressIndicator())
+                : items.isEmpty
+                ? EmptyState(
+                    message: app.t('no_categories_found'),
+                    actionLabel: app.t('retry'),
+                    onAction: _load,
+                  )
+                : GridView.builder(
+                    padding: const EdgeInsets.all(16),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 3,
+                          mainAxisSpacing: 12,
+                          crossAxisSpacing: 12,
+                          childAspectRatio: 0.78,
+                        ),
+                    itemCount: items.length,
+                    itemBuilder: (_, i) {
+                      final cat = items[i];
+                      return InkWell(
+                        onTap: () => openCategory(context, cat),
+                        borderRadius: BorderRadius.circular(16),
+                        child: Ink(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Column(
+                            children: [
+                              Expanded(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(10),
+                                  child: AppImage(
+                                    J.str(cat['image_url'] ?? cat['image']),
+                                    placeholder: app.placeholder,
+                                  ),
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
+                                child: Text(
+                                  J.str(cat['name']),
+                                  maxLines: 2,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
-                          child: Text(
-                            J.str(cat['name']),
-                            maxLines: 2,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
+          ),
+        ],
+      ),
     );
   }
 }

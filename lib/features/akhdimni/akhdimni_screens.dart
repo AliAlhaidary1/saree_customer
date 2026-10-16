@@ -12,6 +12,8 @@ import '../../core/app_theme.dart';
 import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
+import '../../widgets/offline_banner.dart';
+import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
 
 bool _isOn(dynamic v) => v == 1 || v == '1' || v == true;
@@ -35,11 +37,20 @@ String _catDesc(Map<String, dynamic> c, bool isAr) {
 
 String _humanAddress(String raw) {
   if (raw.isEmpty) return '';
-  final parts = raw.split(RegExp(r'[,،]')).map((p) => p.trim()).where((p) => p.isNotEmpty).toList();
+  final parts = raw
+      .split(RegExp(r'[,،]'))
+      .map((p) => p.trim())
+      .where((p) => p.isNotEmpty)
+      .toList();
   final seen = <String>{};
   final kept = <String>[];
   for (final p in parts) {
-    if (RegExp(r'^[A-Z0-9]{4,}\+[A-Z0-9]{2,}$', caseSensitive: false).hasMatch(p)) continue;
+    if (RegExp(
+      r'^[A-Z0-9]{4,}\+[A-Z0-9]{2,}$',
+      caseSensitive: false,
+    ).hasMatch(p)) {
+      continue;
+    }
     if (RegExp(r'^\d{4,}$').hasMatch(p)) continue;
     final k = p.toLowerCase();
     if (seen.contains(k)) continue;
@@ -80,8 +91,24 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
     _load();
   }
 
+  bool _servedFromCache = false;
+
   Future<void> _load() async {
     final app = appController;
+    // Local-first: last categories/config snapshot paints offline.
+    final snap = app.readPublicSnapshot('akhdimni_home') as Map?;
+    if (snap != null && mounted) {
+      final m = J.map(snap);
+      final snapCats = J.maps(m['categories']).where(_catActive).toList();
+      if (snapCats.isNotEmpty) {
+        setState(() {
+          categories = snapCats;
+          enabled = true;
+          loading = false;
+          _servedFromCache = true;
+        });
+      }
+    }
     try {
       List<Map<String, dynamic>> cats = [];
       try {
@@ -109,16 +136,22 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
           return '${a['id']}'.compareTo('${b['id']}');
         });
       if (!mounted) return;
+      final fresh = cats.isNotEmpty;
       setState(() {
-        categories = cats;
+        categories = fresh ? cats : categories;
         enabled = en;
         loading = false;
+        _servedFromCache = !fresh && categories.isNotEmpty;
       });
+      if (fresh) {
+        await app.cachePublicSnapshot('akhdimni_home', {'categories': cats});
+      }
     } catch (_) {
       if (mounted) {
         setState(() {
           enabled = app.akhdimniEnabled;
           loading = false;
+          _servedFromCache = categories.isNotEmpty;
         });
       }
     }
@@ -141,9 +174,21 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
       );
     }
     final steps = [
-      (Icons.assignment_outlined, app.t('akhdimni_step_request'), app.t('akhdimni_step_request_hint')),
-      (Icons.inventory_2_outlined, app.t('akhdimni_step_prepare'), app.t('akhdimni_step_prepare_hint')),
-      (Icons.local_shipping_outlined, app.t('akhdimni_step_delivered'), app.t('akhdimni_step_delivered_hint')),
+      (
+        Icons.assignment_outlined,
+        app.t('akhdimni_step_request'),
+        app.t('akhdimni_step_request_hint'),
+      ),
+      (
+        Icons.inventory_2_outlined,
+        app.t('akhdimni_step_prepare'),
+        app.t('akhdimni_step_prepare_hint'),
+      ),
+      (
+        Icons.local_shipping_outlined,
+        app.t('akhdimni_step_delivered'),
+        app.t('akhdimni_step_delivered_hint'),
+      ),
     ];
     return Scaffold(
       appBar: null,
@@ -152,8 +197,11 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            _sectionHeader(app.t('akhdimni_choose_service'),
-                app.t('akhdimni_choose_service_hint')),
+            OfflineBanner(stale: _servedFromCache),
+            _sectionHeader(
+              app.t('akhdimni_choose_service'),
+              app.t('akhdimni_choose_service_hint'),
+            ),
             const SizedBox(height: 12),
             if (categories.isEmpty)
               EmptyState(message: app.t('no_categories'))
@@ -164,10 +212,14 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
             const SizedBox(height: 12),
             _steps(steps, app),
             const SizedBox(height: 14),
-            Text(app.t('akhdimni_home_footer'),
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: AppTheme.textSecondary, fontSize: 12)),
+            Text(
+              app.t('akhdimni_home_footer'),
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: AppTheme.textSecondary,
+                fontSize: 12,
+              ),
+            ),
           ],
         ),
       ),
@@ -190,26 +242,32 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(title,
-                  style: const TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w800,
-                      color: AppTheme.textPrimary)),
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
             ),
           ],
         ),
         if (hint != null && hint.isNotEmpty) ...[
           const SizedBox(height: 4),
-          Text(hint,
-              style: const TextStyle(
-                  color: AppTheme.textSecondary, fontSize: 12.5)),
+          Text(
+            hint,
+            style: const TextStyle(
+              color: AppTheme.textSecondary,
+              fontSize: 12.5,
+            ),
+          ),
         ],
       ],
     );
   }
 
-  Widget _categoryCard(
-      Map<String, dynamic> cat, bool isAr, AppController app) {
+  Widget _categoryCard(Map<String, dynamic> cat, bool isAr, AppController app) {
     final name = _catName(cat, isAr);
     final desc = _catDesc(cat, isAr);
     final img = J.str(cat['image_url']);
@@ -218,8 +276,7 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
       elevation: 0,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: InkWell(
-        onTap: () =>
-            context.push('/akhdimni/create?category_id=${cat['id']}'),
+        onTap: () => context.push('/akhdimni/create?category_id=${cat['id']}'),
         borderRadius: BorderRadius.circular(16),
         child: Padding(
           padding: const EdgeInsets.all(12),
@@ -230,8 +287,10 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
                 child: SizedBox(
                   width: 72,
                   height: 72,
-                  child:
-                      AppImage(img.isNotEmpty ? img : null, placeholder: app.placeholder),
+                  child: AppImage(
+                    img.isNotEmpty ? img : null,
+                    placeholder: app.placeholder,
+                  ),
                 ),
               ),
               const SizedBox(width: 12),
@@ -239,16 +298,24 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(name,
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700, fontSize: 15.5)),
+                    Text(
+                      name,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15.5,
+                      ),
+                    ),
                     if (desc.isNotEmpty) ...[
                       const SizedBox(height: 4),
-                      Text(desc,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              color: AppTheme.textSecondary, fontSize: 12.5)),
+                      Text(
+                        desc,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppTheme.textSecondary,
+                          fontSize: 12.5,
+                        ),
+                      ),
                     ],
                   ],
                 ),
@@ -260,8 +327,11 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
                   color: app.accentColor.withValues(alpha: 0.1),
                   shape: BoxShape.circle,
                 ),
-                child:
-                    Icon(Icons.arrow_forward, size: 18, color: app.accentColor),
+                child: Icon(
+                  Icons.arrow_forward,
+                  size: 18,
+                  color: app.accentColor,
+                ),
               ),
             ],
           ),
@@ -270,8 +340,7 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
     );
   }
 
-  Widget _steps(
-      List<(IconData, String, String)> steps, AppController app) {
+  Widget _steps(List<(IconData, String, String)> steps, AppController app) {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 8),
       decoration: BoxDecoration(
@@ -284,9 +353,11 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
             if (i > 0)
               Padding(
                 padding: const EdgeInsets.only(bottom: 30),
-                child: Icon(Icons.chevron_left,
-                    size: 20,
-                    color: AppTheme.accentOrange.withValues(alpha: 0.4)),
+                child: Icon(
+                  Icons.chevron_left,
+                  size: 20,
+                  color: AppTheme.accentOrange.withValues(alpha: 0.4),
+                ),
               ),
             Expanded(
               child: Column(
@@ -298,21 +369,30 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
                       color: Colors.white,
                       shape: BoxShape.circle,
                       border: Border.all(
-                          color: app.accentColor.withValues(alpha: 0.18),
-                          width: 1.5),
+                        color: app.accentColor.withValues(alpha: 0.18),
+                        width: 1.5,
+                      ),
                     ),
                     child: Icon(steps[i].$1, color: app.accentColor, size: 22),
                   ),
                   const SizedBox(height: 8),
-                  Text(steps[i].$2,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w700, fontSize: 13)),
+                  Text(
+                    steps[i].$2,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                  ),
                   const SizedBox(height: 3),
-                  Text(steps[i].$3,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          color: AppTheme.textSecondary, fontSize: 11)),
+                  Text(
+                    steps[i].$3,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: AppTheme.textSecondary,
+                      fontSize: 11,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -353,7 +433,8 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
   bool submitting = false;
   Timer? _previewTimer;
 
-  bool get _isCategoryMode => widget.categoryId != null || activeCategory != null;
+  bool get _isCategoryMode =>
+      widget.categoryId != null || activeCategory != null;
 
   bool get _showPickupSection {
     final cat = activeCategory;
@@ -373,9 +454,17 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
 
   bool get _hasPickup => pickupLat != null && pickupLng != null;
 
+  static const _draftFormId = 'akhdimni_create';
+  bool _draftRestored = false;
+  Timer? _draftDeb;
+
   @override
   void initState() {
     super.initState();
+    _restoreDraft();
+    for (final c in [description, dropoffName, dropoffMobile]) {
+      c.addListener(_saveDraftSoon);
+    }
     _loadCategories();
     if (appController.isLoggedIn) {
       appController.loadAddresses().then((_) {
@@ -384,8 +473,66 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
     }
   }
 
+  /// Restores the locally saved request draft (never auto-dispatched).
+  void _restoreDraft() {
+    try {
+      final draft = appController.offline.readDraft(
+        appController.accountScope,
+        _draftFormId,
+      );
+      if (draft == null) return;
+      description.text = J.str(draft['description']);
+      dropoffName.text = J.str(draft['dropoffName']);
+      dropoffMobile.text = J.str(draft['dropoffMobile']);
+      final dl = J.str(draft['dropoffLat']);
+      final dn = J.str(draft['dropoffLng']);
+      if (dl.isNotEmpty && dn.isNotEmpty) {
+        dropoffLat = dl;
+        dropoffLng = dn;
+      }
+      final pl = J.str(draft['pickupLat']);
+      final pn = J.str(draft['pickupLng']);
+      if (pl.isNotEmpty && pn.isNotEmpty) {
+        pickupLat = pl;
+        pickupLng = pn;
+      }
+      final c = J.str(draft['cityId']);
+      if (c.isNotEmpty) cityId = c;
+      _draftRestored =
+          description.text.isNotEmpty ||
+          dropoffName.text.isNotEmpty ||
+          dropoffMobile.text.isNotEmpty;
+    } catch (_) {}
+  }
+
+  void _saveDraftSoon() {
+    _draftDeb?.cancel();
+    _draftDeb = Timer(const Duration(milliseconds: 800), () async {
+      try {
+        await appController.offline
+            .writeDraft(appController.accountScope, _draftFormId, {
+              'description': description.text,
+              'dropoffName': dropoffName.text,
+              'dropoffMobile': dropoffMobile.text,
+              'dropoffLat': dropoffLat ?? '',
+              'dropoffLng': dropoffLng ?? '',
+              'pickupLat': pickupLat ?? '',
+              'pickupLng': pickupLng ?? '',
+              'cityId': cityId ?? '',
+            });
+      } catch (_) {}
+    });
+  }
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    _saveDraftSoon();
+  }
+
   @override
   void dispose() {
+    _draftDeb?.cancel();
     _previewTimer?.cancel();
     description.dispose();
     dropoffName.dispose();
@@ -394,6 +541,17 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
   }
 
   Future<void> _loadCategories() async {
+    try {
+      final snap = appController.readPublicSnapshot('akhdimni_home');
+      if (snap is Map) {
+        final seeded = J.maps(
+          J.map(snap)['categories'],
+        ).where(_catActive).toList();
+        if (seeded.isNotEmpty && mounted) {
+          setState(() => categories = seeded);
+        }
+      }
+    } catch (_) {}
     try {
       final res = await appController.api.akhdimniCategories();
       if (!mounted || !res.ok) return;
@@ -476,7 +634,9 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
     final cat = activeCategory;
     if (cat != null) return _catName(cat, isAr);
     if (widget.type == 'special_items') return app.t('akhdimni_special_items');
-    if (widget.type == 'point_to_point') return app.t('akhdimni_point_to_point');
+    if (widget.type == 'point_to_point') {
+      return app.t('akhdimni_point_to_point');
+    }
     return app.t('akhdimni_what_do_you_need');
   }
 
@@ -484,7 +644,8 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
     return {
       if (widget.categoryId != null) 'akhdimni_category_id': widget.categoryId,
       if (widget.categoryId == null && widget.type != null) 'type': widget.type,
-      if (widget.categoryId == null && widget.type == null) 'type': 'special_items',
+      if (widget.categoryId == null && widget.type == null)
+        'type': 'special_items',
       'dropoff_latitude': dropoffLat,
       'dropoff_longitude': dropoffLng,
       if (cityId != null && cityId!.isNotEmpty) 'city_id': cityId,
@@ -502,10 +663,19 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
       });
       return;
     }
+    if (appController.api.likelyOffline) {
+      setState(() {
+        pricePreview = null;
+        previewLoading = false;
+      });
+      return;
+    }
     setState(() => previewLoading = true);
     _previewTimer = Timer(const Duration(milliseconds: 900), () async {
       try {
-        final result = await appController.api.akhdimniEstimate(_estimateFields());
+        final result = await appController.api.akhdimniEstimate(
+          _estimateFields(),
+        );
         if (!mounted) return;
         setState(() {
           pricePreview = result.ok ? J.map(result.dataMap['data']) : null;
@@ -548,8 +718,9 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
       );
       return;
     }
-    final profileName =
-        dropoffName.text.trim().isNotEmpty ? dropoffName.text.trim() : J.str(app.user?['name']);
+    final profileName = dropoffName.text.trim().isNotEmpty
+        ? dropoffName.text.trim()
+        : J.str(app.user?['name']);
     final profileMobile = dropoffMobile.text.trim().isNotEmpty
         ? dropoffMobile.text.trim()
         : J.str(app.user?['mobile']);
@@ -559,11 +730,16 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
       );
       return;
     }
+    if (!await app.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     setState(() => submitting = true);
     try {
       final dropAddr = _selectedDropoffAddress();
       final fields = <String, dynamic>{
-        if (widget.categoryId != null) 'akhdimni_category_id': widget.categoryId,
+        if (widget.categoryId != null)
+          'akhdimni_category_id': widget.categoryId,
         if (widget.type != null) 'type': widget.type,
         'description': description.text.trim(),
         'customer_description': description.text.trim(),
@@ -581,13 +757,27 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
         if (_hasPickup) 'pickup_name': profileName,
         if (_hasPickup) 'pickup_mobile': profileMobile,
       };
-      final result = await app.api.akhdimniPlace(fields, images: images.isEmpty ? null : images);
+      final result = await app.api.akhdimniPlace(
+        fields,
+        images: images.isEmpty ? null : images,
+      );
       if (!mounted) return;
       if (result.ok) {
+        try {
+          await app.offline.removeDraft(app.accountScope, _draftFormId);
+        } catch (_) {}
         final data = J.map(result.dataMap['data']);
-        final id = J.str(data['id']).isNotEmpty ? J.str(data['id']) : J.str(result.dataMap['id']);
+        final id = J.str(data['id']).isNotEmpty
+            ? J.str(data['id'])
+            : J.str(result.dataMap['id']);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(result.message.isNotEmpty ? result.message : app.t('akhdimni_order_created'))),
+          SnackBar(
+            content: Text(
+              result.message.isNotEmpty
+                  ? result.message
+                  : app.t('akhdimni_order_created'),
+            ),
+          ),
         );
         if (id.isNotEmpty) {
           context.go('/akhdimni/orders/$id');
@@ -596,14 +786,20 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
         }
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(result.message.isNotEmpty ? result.message : app.t('something_went_wrong'))),
+          SnackBar(
+            content: Text(
+              result.message.isNotEmpty
+                  ? result.message
+                  : app.t('something_went_wrong'),
+            ),
+          ),
         );
       }
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(app.t('something_went_wrong'))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(app.t('something_went_wrong'))));
       }
     } finally {
       if (mounted) setState(() => submitting = false);
@@ -612,7 +808,8 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
 
   String _selectedDropoffAddress() {
     for (final a in appController.addresses) {
-      if (J.str(a['latitude']) == dropoffLat && J.str(a['longitude']) == dropoffLng) {
+      if (J.str(a['latitude']) == dropoffLat &&
+          J.str(a['longitude']) == dropoffLng) {
         final line = _formatAddressLine(a);
         if (line.isNotEmpty) return line;
       }
@@ -624,7 +821,8 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
   Widget build(BuildContext context) {
     final app = appController;
     final isAr = app.i18n.code == 'ar';
-    final typeDisabled = (widget.type == 'point_to_point' && !app.akhdimniPointToPointEnabled) ||
+    final typeDisabled =
+        (widget.type == 'point_to_point' && !app.akhdimniPointToPointEnabled) ||
         (widget.type == 'special_items' && !app.akhdimniSpecialItemsEnabled);
     final cat = activeCategory;
     final subtitle = cat == null ? '' : _catDesc(cat, isAr);
@@ -644,7 +842,10 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
               if (subtitle.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
-                  child: Text(subtitle, style: const TextStyle(color: Colors.grey, fontSize: 13)),
+                  child: Text(
+                    subtitle,
+                    style: const TextStyle(color: Colors.grey, fontSize: 13),
+                  ),
                 ),
               // 1 — order details
               _card(
@@ -654,16 +855,25 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    if (!_isCategoryMode && widget.type == null && categories.isNotEmpty)
+                    if (!_isCategoryMode &&
+                        widget.type == null &&
+                        categories.isNotEmpty)
                       DropdownButtonFormField<String>(
                         initialValue: null,
-                        decoration: InputDecoration(labelText: app.t('akhdimni_select_category')),
+                        decoration: InputDecoration(
+                          labelText: app.t('akhdimni_select_category'),
+                        ),
                         items: [
-                          DropdownMenuItem(value: '', child: Text(app.t('akhdimni_choose_option'))),
-                          ...categories.map((c) => DropdownMenuItem(
-                                value: '${c['id']}',
-                                child: Text(_catName(c, isAr)),
-                              )),
+                          DropdownMenuItem(
+                            value: '',
+                            child: Text(app.t('akhdimni_choose_option')),
+                          ),
+                          ...categories.map(
+                            (c) => DropdownMenuItem(
+                              value: '${c['id']}',
+                              child: Text(_catName(c, isAr)),
+                            ),
+                          ),
                         ],
                         onChanged: (v) {
                           if (v != null && v.isNotEmpty) {
@@ -680,20 +890,24 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    Text(app.t('akhdimni_what_need_hint'),
-                        style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                    Text(
+                      app.t('akhdimni_what_need_hint'),
+                      style: const TextStyle(color: Colors.grey, fontSize: 12),
+                    ),
                     const SizedBox(height: 8),
                     TextButton.icon(
                       onPressed: () async {
                         final picked = await ImagePicker().pickMultiImage();
                         if (picked.isNotEmpty && mounted) {
-                          setState(() => images = picked);
+                          setState(() => images = [...images, ...picked]);
                         }
                       },
                       icon: const Icon(Icons.image),
-                      label: Text(images.isEmpty
-                          ? '${app.t('images')} (${app.t('optional')}) — ${app.t('akhdimni_add_photos')}'
-                          : '${images.length} ✓'),
+                      label: Text(
+                        images.isEmpty
+                            ? '${app.t('images')} (${app.t('optional')}) — ${app.t('akhdimni_add_photos')}'
+                            : '${images.length} ✓',
+                      ),
                     ),
                   ],
                 ),
@@ -707,13 +921,15 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                 done: _hasDropoff,
                 child: ListenableBuilder(
                   listenable: app,
-                  builder: (_, __) {
+                  builder: (_, _) {
                     final saved = app.addresses;
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('${app.t('akhdimni_dropoff_label')} *',
-                            style: const TextStyle(fontWeight: FontWeight.w700)),
+                        Text(
+                          '${app.t('akhdimni_dropoff_label')} *',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
                         if (saved.isEmpty)
                           Padding(
                             padding: const EdgeInsets.symmetric(vertical: 8),
@@ -729,59 +945,110 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                             ),
                           )
                         else
-                          ...saved.map((addr) {
-                            final selected = J.str(addr['latitude']) == dropoffLat &&
-                                J.str(addr['longitude']) == dropoffLng;
-                            return RadioListTile<bool>(
-                              value: true,
-                              groupValue: selected ? true : null,
-                              onChanged: (_) => _applySavedDropoff(addr),
-                              title: Row(
-                                children: [
-                                  Expanded(
-                                    child: Text(J.str(addr['name']).isNotEmpty
-                                        ? J.str(addr['name'])
-                                        : app.t('akhdimni_saved_address')),
+                          RadioGroup<String>(
+                            groupValue: dropoffLat != null && dropoffLng != null
+                                ? '${dropoffLat}_${dropoffLng}'
+                                : null,
+                            onChanged: (value) {
+                              final addr = saved.firstWhere(
+                                (a) =>
+                                    '${J.str(a['latitude'])}_${J.str(a['longitude'])}' ==
+                                    value,
+                              );
+                              _applySavedDropoff(addr);
+                            },
+                            child: Column(
+                              children: saved.map((addr) {
+                                return RadioListTile<String>(
+                                  value:
+                                      '${J.str(addr['latitude'])}_${J.str(addr['longitude'])}',
+                                  title: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          J.str(addr['name']).isNotEmpty
+                                              ? J.str(addr['name'])
+                                              : app.t(
+                                                  'akhdimni_saved_address'),
+                                        ),
+                                      ),
+                                      if (J.str(addr['is_default']) == '1')
+                                        Text(
+                                          app.t('default_address_badge'),
+                                          style: TextStyle(
+                                            color: app.accentColor,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                    ],
                                   ),
-                                  if (J.str(addr['is_default']) == '1')
-                                    Text(app.t('default_address_badge'),
-                                        style: TextStyle(color: app.accentColor, fontSize: 11)),
-                                ],
-                              ),
-                              subtitle: Text(_humanAddress(_formatAddressLine(addr))),
-                            );
-                          }),
+                                  subtitle: Text(
+                                    _humanAddress(_formatAddressLine(addr)),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ),
                         if (_showPickupSection) ...[
                           const SizedBox(height: 8),
-                          Text(app.t('akhdimni_pickup_optional'),
-                              style: const TextStyle(fontWeight: FontWeight.w700)),
-                          RadioListTile<bool>(
-                            value: true,
-                            groupValue: !_hasPickup ? true : null,
-                            onChanged: (_) => _clearPickup(),
-                            title: Text(app.t('akhdimni_no_pickup')),
-                            subtitle: Text(app.t('akhdimni_no_pickup_hint')),
+                          Text(
+                            app.t('akhdimni_pickup_optional'),
+                            style: const TextStyle(fontWeight: FontWeight.w700),
                           ),
-                          ...saved.map((addr) {
-                            final selected = _hasPickup &&
-                                J.str(addr['latitude']) == pickupLat &&
-                                J.str(addr['longitude']) == pickupLng;
-                            return RadioListTile<bool>(
-                              value: true,
-                              groupValue: selected ? true : null,
-                              onChanged: (_) => _applySavedPickup(addr),
-                              title: Text(J.str(addr['name']).isNotEmpty
-                                  ? J.str(addr['name'])
-                                  : app.t('akhdimni_saved_address')),
-                              subtitle: Text(_humanAddress(_formatAddressLine(addr))),
-                            );
-                          }),
+                          RadioGroup<String>(
+                            groupValue: !_hasPickup
+                                ? 'none'
+                                : (pickupLat != null && pickupLng != null
+                                    ? '${pickupLat}_${pickupLng}'
+                                    : null),
+                            onChanged: (value) {
+                              if (value == 'none') {
+                                _clearPickup();
+                              } else {
+                                final addr = saved.firstWhere(
+                                  (a) =>
+                                      '${J.str(a['latitude'])}_${J.str(a['longitude'])}' ==
+                                      value,
+                                );
+                                _applySavedPickup(addr);
+                              }
+                            },
+                            child: Column(
+                              children: [
+                                RadioListTile<String>(
+                                  value: 'none',
+                                  title: Text(app.t('akhdimni_no_pickup')),
+                                  subtitle:
+                                      Text(app.t('akhdimni_no_pickup_hint')),
+                                ),
+                                ...saved.map((addr) {
+                                  return RadioListTile<String>(
+                                    value:
+                                        '${J.str(addr['latitude'])}_${J.str(addr['longitude'])}',
+                                    title: Text(
+                                      J.str(addr['name']).isNotEmpty
+                                          ? J.str(addr['name'])
+                                          : app.t('akhdimni_saved_address'),
+                                    ),
+                                    subtitle: Text(
+                                      _humanAddress(_formatAddressLine(addr)),
+                                    ),
+                                  );
+                                }),
+                              ],
+                            ),
+                          ),
                         ],
                         if (!_hasDropoff)
                           Padding(
                             padding: const EdgeInsets.only(top: 6),
-                            child: Text(app.t('akhdimni_select_dropoff_first'),
-                                style: const TextStyle(color: Colors.red, fontSize: 12)),
+                            child: Text(
+                              app.t('akhdimni_select_dropoff_first'),
+                              style: const TextStyle(
+                                color: Colors.red,
+                                fontSize: 12,
+                              ),
+                            ),
                           ),
                       ],
                     );
@@ -801,7 +1068,9 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                       children: [
                         const Icon(Icons.info_outline, size: 18),
                         const SizedBox(width: 8),
-                        Expanded(child: Text(app.t('akhdimni_delivery_may_change'))),
+                        Expanded(
+                          child: Text(app.t('akhdimni_delivery_may_change')),
+                        ),
                       ],
                     ),
                     if (_isManualReviewCategory) ...[
@@ -811,7 +1080,9 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                         children: [
                           const Icon(Icons.info_outline, size: 18),
                           const SizedBox(width: 8),
-                          Expanded(child: Text(app.t('akhdimni_manual_price_note'))),
+                          Expanded(
+                            child: Text(app.t('akhdimni_manual_price_note')),
+                          ),
                         ],
                       ),
                     ],
@@ -833,11 +1104,18 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                       children: [
                         const CircularProgressIndicator(),
                         const SizedBox(height: 12),
-                        Text(app.t('akhdimni_submitting'),
-                            style: const TextStyle(fontWeight: FontWeight.w700)),
+                        Text(
+                          app.t('akhdimni_submitting'),
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
                         const SizedBox(height: 4),
-                        Text(app.t('akhdimni_submitting_wait'),
-                            style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                        Text(
+                          app.t('akhdimni_submitting_wait'),
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -852,7 +1130,12 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
               decoration: BoxDecoration(
                 color: Theme.of(context).scaffoldBackgroundColor,
-                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 12)],
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.08),
+                    blurRadius: 12,
+                  ),
+                ],
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -864,8 +1147,10 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                       child: LinearProgressIndicator(),
                     ),
                   if (previewLoading && pricePreview == null)
-                    Text(app.t('akhdimni_calculating_fee'),
-                        style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                    Text(
+                      app.t('akhdimni_calculating_fee'),
+                      style: const TextStyle(color: Colors.grey, fontSize: 12),
+                    ),
                   if (pricePreview != null) ...[
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -888,7 +1173,11 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                         children: [
                           Text(app.t('akhdimni_service_fee')),
                           Text(
-                            money(pricePreview!['initial_service_fee'], app.currency, app.decimals),
+                            money(
+                              pricePreview!['initial_service_fee'],
+                              app.currency,
+                              app.decimals,
+                            ),
                             style: const TextStyle(fontWeight: FontWeight.w700),
                           ),
                         ],
@@ -897,16 +1186,24 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text(app.t('akhdimni_estimated_total'),
-                              style: const TextStyle(fontWeight: FontWeight.w800)),
                           Text(
-                            money(pricePreview!['estimated_total'], app.currency, app.decimals),
+                            app.t('akhdimni_estimated_total'),
+                            style: const TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                          Text(
+                            money(
+                              pricePreview!['estimated_total'],
+                              app.currency,
+                              app.decimals,
+                            ),
                             style: const TextStyle(fontWeight: FontWeight.w800),
                           ),
                         ],
                       ),
-                    Text(app.t('akhdimni_initial_price_note'),
-                        style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                    Text(
+                      app.t('akhdimni_initial_price_note'),
+                      style: const TextStyle(color: Colors.grey, fontSize: 11),
+                    ),
                   ],
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -914,8 +1211,13 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                       const Icon(Icons.info_outline, size: 16),
                       const SizedBox(width: 6),
                       Expanded(
-                        child: Text(app.t('akhdimni_submit_agree_note'),
-                            style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                        child: Text(
+                          app.t('akhdimni_submit_agree_note'),
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 11,
+                          ),
+                        ),
                       ),
                     ],
                   ),
@@ -926,6 +1228,17 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                         ? const BusySpinner()
                         : Text(app.t('akhdimni_place_order')),
                   ),
+                  if (_draftRestored)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        app.t('draft_saved'),
+                        style: const TextStyle(
+                          color: Colors.black54,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -953,26 +1266,35 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                 CircleAvatar(
                   radius: 13,
                   backgroundColor: appController.accentColor,
-                  child: Text(num,
-                      style: const TextStyle(color: Colors.white, fontSize: 12)),
+                  child: Text(
+                    num,
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                  ),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(title,
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w800, fontSize: 15)),
-                      Text(hint,
-                          style: const TextStyle(
-                              color: Colors.grey, fontSize: 12)),
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                        ),
+                      ),
+                      Text(
+                        hint,
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
+                      ),
                     ],
                   ),
                 ),
                 if (done)
-                  const Icon(Icons.check_circle,
-                      color: Colors.green, size: 20),
+                  const Icon(Icons.check_circle, color: Colors.green, size: 20),
               ],
             ),
             const SizedBox(height: 10),
@@ -1004,10 +1326,21 @@ class _AkhdimniOrdersScreenState extends State<AkhdimniOrdersScreen> {
     _load();
   }
 
+  bool _servedFromCache = false;
+
   Future<void> _load() async {
     if (!appController.isLoggedIn) {
       if (mounted) setState(() => loading = false);
       return;
+    }
+    // Local-first: last synchronized orders paint offline (saved status).
+    final snap = appController.readAccountSnapshot('akhdimni_orders');
+    if (snap is List && snap.isNotEmpty && mounted) {
+      setState(() {
+        items = J.maps(snap);
+        loading = false;
+        _servedFromCache = true;
+      });
     }
     if (mounted) setState(() => error = null);
     try {
@@ -1016,16 +1349,28 @@ class _AkhdimniOrdersScreenState extends State<AkhdimniOrdersScreen> {
           .timeout(const Duration(seconds: 25));
       if (!mounted) return;
       setState(() {
-        items = res.dataMaps;
+        items = res.ok ? res.dataMaps : items;
+        _servedFromCache = !res.ok && items.isNotEmpty;
         if (!res.ok && items.isEmpty) {
           error = res.message.isNotEmpty
               ? res.message
               : appController.t('something_went_wrong');
         }
       });
+      if (res.ok && res.dataMaps.isNotEmpty) {
+        await appController.cacheAccountSnapshot(
+          'akhdimni_orders',
+          res.dataMaps,
+        );
+      }
     } catch (_) {
       if (!mounted) return;
-      setState(() => error = appController.t('something_went_wrong'));
+      setState(() {
+        error = items.isEmpty
+            ? appController.t('not_synced_yet')
+            : appController.t('something_went_wrong');
+        _servedFromCache = items.isNotEmpty;
+      });
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -1039,45 +1384,51 @@ class _AkhdimniOrdersScreenState extends State<AkhdimniOrdersScreen> {
       body: !app.isLoggedIn
           ? const LoginRequired()
           : loading && items.isEmpty
-              ? const Center(child: CircularProgressIndicator())
-              : error != null && items.isEmpty
-                  ? EmptyState(
-                      message: error!,
-                      icon: Icons.cloud_off_outlined,
-                      actionLabel: app.t('retry'),
-                      onAction: _load,
-                    )
-                  : items.isEmpty
-                      ? EmptyState(
-                          message: app.t('akhdimni_no_orders'),
-                          actionLabel: app.t('akhdimni_order_now'),
-                          onAction: () => context.push('/akhdimni'),
-                        )
-                      : RefreshIndicator(
-                          onRefresh: _load,
-                          child: ListView(
-                            children: items
-                                .map(
-                                  (item) => ListTile(
-                                    title: Text(
-                                        '#${item['id']} · ${akhdimniStatusLabel(J.str(item['active_status']))}'),
-                                    subtitle: Text(_orderSubtitle(item)),
-                                    trailing: Text(
-                                      money(
-                                        item['final_total'],
-                                        app.currency,
-                                        app.decimals,
-                                      ),
-                                      style: const TextStyle(
-                                          fontWeight: FontWeight.w700),
-                                    ),
-                                    onTap: () => context.push(
-                                        '/akhdimni/orders/${item['id']}'),
-                                  ),
-                                )
-                                .toList(),
+          ? const Center(child: CircularProgressIndicator())
+          : error != null && items.isEmpty
+          ? EmptyState(
+              message: error!,
+              icon: Icons.cloud_off_outlined,
+              actionLabel: app.t('retry'),
+              onAction: _load,
+            )
+          : items.isEmpty
+          ? EmptyState(
+              message: app.t('akhdimni_no_orders'),
+              actionLabel: app.t('akhdimni_order_now'),
+              // go (not push): /akhdimni is a shell-branch tab and this
+              // screen is top-level; an imperative push would duplicate the
+              // shell match and trip a Navigator page-key assertion (D4).
+              onAction: () => context.go('/akhdimni'),
+            )
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: ListView(
+                children: [
+                  OfflineBanner(stale: _servedFromCache),
+                  ...items
+                      .map(
+                        (item) => ListTile(
+                          title: Text(
+                            '#${item['id']} · ${akhdimniStatusLabel(J.str(item['active_status']))}',
                           ),
+                          subtitle: Text(_orderSubtitle(item)),
+                          trailing: Text(
+                            money(
+                              item['final_total'],
+                              app.currency,
+                              app.decimals,
+                            ),
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          onTap: () =>
+                              context.push('/akhdimni/orders/${item['id']}'),
                         ),
+                      )
+                      ,
+                ],
+              ),
+            ),
     );
   }
 
@@ -1114,18 +1465,44 @@ class _AkhdimniOrderDetailsScreenState
     _load();
   }
 
+  bool _servedFromCache = false;
+
   Future<void> _load() async {
+    // Local-first: last synchronized order paints offline (saved status).
+    final snap = appController.readAccountSnapshot(
+      'akhdimni_order_${widget.id}',
+    );
+    if (snap is Map && order.isEmpty && mounted) {
+      setState(() {
+        order = J.map(snap);
+        loading = false;
+        _servedFromCache = true;
+      });
+    }
     try {
       final res = await appController.api.akhdimniOrder(widget.id);
       if (!mounted) return;
+      final next = res.dataMap.isNotEmpty
+          ? res.dataMap
+          : J.map(res.raw['data'] ?? res.raw);
       setState(() {
-        order = res.dataMap.isNotEmpty
-            ? res.dataMap
-            : J.map(res.raw['data'] ?? res.raw);
+        if (res.ok && next.isNotEmpty) order = next;
         loading = false;
+        _servedFromCache = !res.ok && order.isNotEmpty;
       });
+      if (res.ok && next.isNotEmpty) {
+        await appController.cacheAccountSnapshot(
+          'akhdimni_order_${widget.id}',
+          next,
+        );
+      }
     } catch (_) {
-      if (mounted) setState(() => loading = false);
+      if (mounted) {
+        setState(() {
+          loading = false;
+          _servedFromCache = order.isNotEmpty;
+        });
+      }
     }
   }
 
@@ -1137,18 +1514,23 @@ class _AkhdimniOrderDetailsScreenState
       body: akhdimniStatusLabel(J.str(order['active_status'])),
     );
     if (!ok || !mounted) return;
+    if (!await app.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     setState(() => cancelling = true);
     try {
-      final res = await app.api.akhdimniCancel(
-        widget.id,
-        {'cancel_reason': 'cancelled_by_customer'},
-      );
+      final res = await app.api.akhdimniCancel(widget.id, {
+        'cancel_reason': 'cancelled_by_customer',
+      });
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(res.message.isNotEmpty
-              ? res.message
-              : app.t('akhdimni_order_cancelled')),
+          content: Text(
+            res.message.isNotEmpty
+                ? res.message
+                : app.t('akhdimni_order_cancelled'),
+          ),
         ),
       );
       if (res.ok) {
@@ -1162,15 +1544,18 @@ class _AkhdimniOrderDetailsScreenState
 
   Future<void> _invoice() async {
     final app = appController;
+    if (!await app.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
+      return;
+    }
     setState(() => downloading = true);
     try {
-      final (ok, bytes, _) =
-          await app.api.akhdimniInvoiceBytes(widget.id);
+      final (ok, bytes, _) = await app.api.akhdimniInvoiceBytes(widget.id);
       if (!mounted) return;
       if (!ok || bytes == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(app.t('something_went_wrong'))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(app.t('something_went_wrong'))));
         return;
       }
       final dir = await getTemporaryDirectory();
@@ -1179,14 +1564,16 @@ class _AkhdimniOrderDetailsScreenState
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-            content: Text(
-                '${app.t('invoice_downloaded_successfully')}: ${file.path}')),
+          content: Text(
+            '${app.t('invoice_downloaded_successfully')}: ${file.path}',
+          ),
+        ),
       );
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(app.t('something_went_wrong'))),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(app.t('something_went_wrong'))));
     } finally {
       if (mounted) setState(() => downloading = false);
     }
@@ -1258,7 +1645,8 @@ class _AkhdimniOrderDetailsScreenState
                   ? const SizedBox(
                       width: 18,
                       height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   : const Icon(Icons.picture_as_pdf_outlined),
               tooltip: app.t('get_invoice'),
               onPressed: downloading ? null : _invoice,
@@ -1268,6 +1656,8 @@ class _AkhdimniOrderDetailsScreenState
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          OfflineBanner(stale: _servedFromCache),
+          if (_servedFromCache) const SavedStatusChip(),
           if (!terminalFail)
             Card(
               child: Padding(
@@ -1275,9 +1665,13 @@ class _AkhdimniOrderDetailsScreenState
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(app.t('akhdimni_order_progress'),
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700, fontSize: 13)),
+                    Text(
+                      app.t('akhdimni_order_progress'),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
                     const SizedBox(height: 10),
                     Row(
                       children: [
@@ -1290,22 +1684,27 @@ class _AkhdimniOrderDetailsScreenState
                                   backgroundColor: i < stepIndex
                                       ? Colors.green
                                       : (i == stepIndex
-                                          ? app.accentColor
-                                          : Colors.grey.shade300),
+                                            ? app.accentColor
+                                            : Colors.grey.shade300),
                                   child: Text(
                                     i < stepIndex ? '✓' : '${i + 1}',
                                     style: const TextStyle(
-                                        color: Colors.white, fontSize: 12),
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                    ),
                                   ),
                                 ),
                                 const SizedBox(height: 4),
-                                Text(stepLabels[i],
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: i == stepIndex
-                                            ? FontWeight.w700
-                                            : FontWeight.normal)),
+                                Text(
+                                  stepLabels[i],
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: i == stepIndex
+                                        ? FontWeight.w700
+                                        : FontWeight.normal,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -1315,8 +1714,7 @@ class _AkhdimniOrderDetailsScreenState
                 ),
               ),
             ),
-          if (catName.isNotEmpty)
-            _row(app.t('category'), catName, app),
+          if (catName.isNotEmpty) _row(app.t('category'), catName, app),
           if (desc.isNotEmpty)
             Card(
               child: Padding(
@@ -1324,8 +1722,10 @@ class _AkhdimniOrderDetailsScreenState
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(app.t('description'),
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    Text(
+                      app.t('description'),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
                     const SizedBox(height: 6),
                     Text(desc),
                   ],
@@ -1339,10 +1739,14 @@ class _AkhdimniOrderDetailsScreenState
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(app.t('akhdimni_pickup'),
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    Text(
+                      app.t('akhdimni_pickup'),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
                     const SizedBox(height: 6),
-                    Text('${J.str(o['pickup_name'])} — ${J.str(o['pickup_mobile'])}'),
+                    Text(
+                      '${J.str(o['pickup_name'])} — ${J.str(o['pickup_mobile'])}',
+                    ),
                     Text(J.str(o['pickup_address'])),
                   ],
                 ),
@@ -1354,10 +1758,14 @@ class _AkhdimniOrderDetailsScreenState
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(app.t('akhdimni_dropoff'),
-                      style: const TextStyle(fontWeight: FontWeight.w700)),
+                  Text(
+                    app.t('akhdimni_dropoff'),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                   const SizedBox(height: 6),
-                  Text('${J.str(o['dropoff_name'])} — ${J.str(o['dropoff_mobile'])}'),
+                  Text(
+                    '${J.str(o['dropoff_name'])} — ${J.str(o['dropoff_mobile'])}',
+                  ),
                   Text(J.str(o['dropoff_address'])),
                 ],
               ),
@@ -1370,13 +1778,17 @@ class _AkhdimniOrderDetailsScreenState
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(app.t('delivery_boy'),
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    Text(
+                      app.t('delivery_boy'),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
                     const SizedBox(height: 6),
                     Text(J.str(courier['name'])),
                     if (J.str(courier['mobile']).isNotEmpty)
-                      Text(J.str(courier['mobile']),
-                          style: const TextStyle(color: Colors.grey)),
+                      Text(
+                        J.str(courier['mobile']),
+                        style: const TextStyle(color: Colors.grey),
+                      ),
                   ],
                 ),
               ),
@@ -1388,21 +1800,29 @@ class _AkhdimniOrderDetailsScreenState
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(app.t('akhdimni_price_breakdown'),
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w800, fontSize: 15)),
+                  Text(
+                    app.t('akhdimni_price_breakdown'),
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                    ),
+                  ),
                   const SizedBox(height: 8),
                   if (items.isNotEmpty) ...[
-                    Text(app.t('akhdimni_invoice_items'),
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700, fontSize: 13)),
+                    Text(
+                      app.t('akhdimni_invoice_items'),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
                     const SizedBox(height: 4),
                     ...items.map((it) {
                       final store = J.str(it['store_name']).isNotEmpty
                           ? J.str(it['store_name'])
                           : (it['seller'] is Map
-                              ? J.str(it['seller']['store_name'])
-                              : '');
+                                ? J.str(it['seller']['store_name'])
+                                : '');
                       final qty = _toDouble(it['quantity']);
                       return Padding(
                         padding: const EdgeInsets.symmetric(vertical: 4),
@@ -1413,17 +1833,26 @@ class _AkhdimniOrderDetailsScreenState
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(J.str(it['name']),
-                                      style: const TextStyle(
-                                          fontWeight: FontWeight.w700)),
+                                  Text(
+                                    J.str(it['name']),
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
                                   if (store.isNotEmpty)
-                                    Text('🏪 $store',
-                                        style: const TextStyle(
-                                            color: Colors.grey, fontSize: 12)),
+                                    Text(
+                                      '🏪 $store',
+                                      style: const TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 12,
+                                      ),
+                                    ),
                                   Text(
                                     '${app.t('quantity')}: ${qty.toStringAsFixed(qty.truncateToDouble() == qty ? 0 : 1)} × ${money(it['unit_price'], app.currency, app.decimals)}',
                                     style: const TextStyle(
-                                        color: Colors.grey, fontSize: 12),
+                                      color: Colors.grey,
+                                      fontSize: 12,
+                                    ),
                                   ),
                                 ],
                               ),
@@ -1431,7 +1860,8 @@ class _AkhdimniOrderDetailsScreenState
                             Text(
                               money(it['total'], app.currency, app.decimals),
                               style: const TextStyle(
-                                  fontWeight: FontWeight.w700),
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                           ],
                         ),
@@ -1468,8 +1898,10 @@ class _AkhdimniOrderDetailsScreenState
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(app.t('akhdimni_rejected'),
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    Text(
+                      app.t('akhdimni_rejected'),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
                     const SizedBox(height: 6),
                     Text(J.str(o['cancel_reason'])),
                   ],
@@ -1483,16 +1915,17 @@ class _AkhdimniOrderDetailsScreenState
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(app.t('images'),
-                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                    Text(
+                      app.t('images'),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
                     const SizedBox(height: 8),
                     SizedBox(
                       height: 84,
                       child: ListView.separated(
                         scrollDirection: Axis.horizontal,
                         itemCount: orderImages.length,
-                        separatorBuilder: (_, __) =>
-                            const SizedBox(width: 8),
+                        separatorBuilder: (_, _) => const SizedBox(width: 8),
                         itemBuilder: (_, i) => ClipRRect(
                           borderRadius: BorderRadius.circular(8),
                           child: SizedBox(
@@ -1518,7 +1951,10 @@ class _AkhdimniOrderDetailsScreenState
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
                   : const Icon(Icons.picture_as_pdf_outlined),
               label: Text(app.t('get_invoice')),
             ),
@@ -1526,14 +1962,14 @@ class _AkhdimniOrderDetailsScreenState
           if (canCancel)
             OutlinedButton(
               onPressed: cancelling ? null : _cancel,
-              child: cancelling
-                  ? const BusySpinner()
-                  : Text(app.t('cancel')),
+              child: cancelling ? const BusySpinner() : Text(app.t('cancel')),
             ),
           const SizedBox(height: 8),
           Center(
-            child: Text(akhdimniStatusLabel(status),
-                style: const TextStyle(color: Colors.grey, fontSize: 12)),
+            child: Text(
+              akhdimniStatusLabel(status),
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
           ),
         ],
       ),
@@ -1550,8 +1986,11 @@ class _AkhdimniOrderDetailsScreenState
             Text(label, style: const TextStyle(color: Colors.grey)),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(value, textAlign: TextAlign.end,
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              child: Text(
+                value,
+                textAlign: TextAlign.end,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
             ),
           ],
         ),
@@ -1566,9 +2005,12 @@ class _AkhdimniOrderDetailsScreenState
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(label),
-          Text(value,
-              style: TextStyle(
-                  fontWeight: bold ? FontWeight.w800 : FontWeight.w600)),
+          Text(
+            value,
+            style: TextStyle(
+              fontWeight: bold ? FontWeight.w800 : FontWeight.w600,
+            ),
+          ),
         ],
       ),
     );

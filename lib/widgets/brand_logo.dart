@@ -26,8 +26,8 @@ class BrandLogo extends StatelessWidget {
         imageUrl: url,
         height: height,
         fit: BoxFit.contain,
-        errorWidget: (_, __, ___) => Image.asset(assetFallback, height: height),
-        placeholder: (_, __) => SizedBox(
+        errorWidget: (_, _, _) => Image.asset(assetFallback, height: height),
+        placeholder: (_, _) => SizedBox(
           height: height,
           width: height,
           child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),

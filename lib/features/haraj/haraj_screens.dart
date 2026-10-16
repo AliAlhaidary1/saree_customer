@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -10,7 +13,15 @@ import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../core/search_scope.dart';
 import '../../widgets/app_image.dart';
+import '../../widgets/offline_banner.dart';
+import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
+
+Future<bool> _needInternet(BuildContext context) async {
+  if (await appController.hasInternetAccess()) return true;
+  if (context.mounted) await showRequiresInternetDialog(context);
+  return false;
+}
 
 class HarajListScreen extends StatefulWidget {
   const HarajListScreen({super.key, this.mine = false});
@@ -32,6 +43,9 @@ class _HarajListScreenState extends State<HarajListScreen> {
   bool loading = true;
   bool loadingMore = false;
   final search = TextEditingController();
+  // Generation counter: every filter-affecting load bumps it, so late
+  // responses from older queries/filters can never overwrite newer results.
+  int _seq = 0;
 
   @override
   void initState() {
@@ -65,8 +79,7 @@ class _HarajListScreenState extends State<HarajListScreen> {
       'per_page': 20,
       if (cityFilter == 'current' && currentCityId != null)
         'city_id': currentCityId,
-      if (cityFilter != 'current' && cityFilter != 'all')
-        'city_id': cityFilter,
+      if (cityFilter != 'current' && cityFilter != 'all') 'city_id': cityFilter,
       if (categoryId != null) 'category_id': categoryId,
       if (condition != null) 'condition': condition,
       if (search.text.trim().isNotEmpty) 'search': search.text.trim(),
@@ -75,45 +88,115 @@ class _HarajListScreenState extends State<HarajListScreen> {
     };
   }
 
+  bool _servedFromCache = false;
+
+  /// Snapshot name: my-ads are account-scoped, the public feed is global.
+  String get _snapshotName => widget.mine ? 'haraj_mine' : 'haraj_feed';
+
+  dynamic _readSnapshot(String key) => widget.mine
+      ? appController.readAccountSnapshot(key)
+      : appController.readPublicSnapshot(key);
+
+  Future<void> _writeSnapshot(String key, dynamic payload) => widget.mine
+      ? appController.cacheAccountSnapshot(key, payload)
+      : appController.cachePublicSnapshot(key, payload);
+
   Future<void> _load({bool reset = false}) async {
+    final mySeq = ++_seq;
     if (reset) {
-      setState(() {
-        loading = true;
-        page = 1;
-      });
+      // Local-first: last synchronized feed paints offline (default query).
+      final snap = _readSnapshot(_snapshotName) as Map?;
+      if (snap != null && !_hasActiveFilters && mounted) {
+        setState(() {
+          items = J.maps(snap['items']);
+          categories = J.maps(snap['categories']);
+          page = 1;
+          lastPage = _intOf(snap['lastPage'], 1);
+          loading = false;
+          _servedFromCache = true;
+        });
+      } else {
+        setState(() {
+          loading = true;
+          page = 1;
+        });
+      }
     }
     try {
       final posts = widget.mine
           ? await appController.api.harajMyPosts(_params(1))
           : await appController.api.harajPosts(_params(1));
       final cats = await appController.api.harajCategories();
-      if (!mounted) return;
+      if (!mounted || mySeq != _seq) return;
+      if (!posts.ok) {
+        setState(() {
+          loading = false;
+          _servedFromCache = items.isNotEmpty;
+        });
+        return;
+      }
+      final hasFilters = _hasActiveFilters;
       setState(() {
         items = posts.dataMaps;
-        categories = cats.dataMaps;
+        if (cats.ok && cats.dataMaps.isNotEmpty) categories = cats.dataMaps;
         page = 1;
         lastPage = _intOf(
-            posts.raw['last_page'] ?? posts.dataMap['last_page'], 1);
+          posts.raw['last_page'] ?? posts.dataMap['last_page'],
+          1,
+        );
         loading = false;
+        _servedFromCache = false;
       });
+      if (!hasFilters && (posts.ok || cats.ok)) {
+        await _writeSnapshot(_snapshotName, {
+          'items': posts.dataMaps,
+          'categories': cats.dataMaps,
+          'lastPage': _intOf(
+            posts.raw['last_page'] ?? posts.dataMap['last_page'],
+            1,
+          ),
+        });
+      }
     } catch (_) {
-      if (mounted) setState(() => loading = false);
+      if (mounted) {
+        setState(() {
+          loading = false;
+          _servedFromCache = items.isNotEmpty;
+        });
+      }
     }
   }
 
   Future<void> _loadMore() async {
     if (loadingMore || page >= lastPage) return;
+    // Capture the generation: a filter change bumps _seq via _load, and this
+    // stale continuation must then drop its rows instead of appending them
+    // to the new query (duplicates / wrong page corruption).
+    final mySeq = _seq;
+    final nextPage = page + 1;
     setState(() => loadingMore = true);
     try {
       final posts = widget.mine
-          ? await appController.api.harajMyPosts(_params(page + 1))
-          : await appController.api.harajPosts(_params(page + 1));
+          ? await appController.api.harajMyPosts(_params(nextPage))
+          : await appController.api.harajPosts(_params(nextPage));
       if (!mounted) return;
+      if (!posts.ok) {
+        if (mounted) setState(() => loadingMore = false);
+        return;
+      }
+      if (mySeq != _seq) {
+        // Superseded by a newer query: drop rows but release the spinner so
+        // a fresh load-more can fire for the active filters.
+        setState(() => loadingMore = false);
+        return;
+      }
       setState(() {
-        items = [...items, ...posts.dataMaps];
-        page = page + 1;
-        lastPage =
-            _intOf(posts.raw['last_page'] ?? posts.dataMap['last_page'], page);
+        items = J.appendUnique(items, posts.dataMaps);
+        page = nextPage;
+        lastPage = _intOf(
+          posts.raw['last_page'] ?? posts.dataMap['last_page'],
+          page,
+        );
         loadingMore = false;
       });
     } catch (_) {
@@ -179,7 +262,8 @@ class _HarajListScreenState extends State<HarajListScreen> {
                     onPressed: () => app.isLoggedIn
                         ? context.push('/haraj/create')
                         : context.push(
-                            '/login?next=${Uri.encodeComponent('/haraj/create')}'),
+                            '/login?next=${Uri.encodeComponent('/haraj/create')}',
+                          ),
                     icon: const Icon(Icons.add, size: 18),
                     label: Text(app.t('add_post')),
                     style: FilledButton.styleFrom(
@@ -207,8 +291,10 @@ class _HarajListScreenState extends State<HarajListScreen> {
                 onSubmitted: (_) => _load(reset: true),
                 decoration: InputDecoration(
                   hintText: app.t('search_in_haraj'),
-                  prefixIcon:
-                      const Icon(Icons.search, color: AppTheme.accentOrange),
+                  prefixIcon: const Icon(
+                    Icons.search,
+                    color: AppTheme.accentOrange,
+                  ),
                   filled: true,
                   fillColor: AppTheme.backgroundWhite,
                   isDense: true,
@@ -328,16 +414,16 @@ class _HarajListScreenState extends State<HarajListScreen> {
 
   Widget _categoryTiles(AppController app) {
     return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      cacheExtent: 600, padding: const EdgeInsets.symmetric(horizontal: 16),
       scrollDirection: Axis.horizontal,
-      cacheExtent: 600,
       itemCount: categories.length + 1,
       separatorBuilder: (_, _) => const SizedBox(width: 14),
       itemBuilder: (_, i) {
         final isAll = i == 0;
         final cat = isAll ? null : categories[i - 1];
-        final selected =
-            isAll ? categoryId == null : '$categoryId' == '${cat!['id']}';
+        final selected = isAll
+            ? categoryId == null
+            : '$categoryId' == '${cat!['id']}';
         return GestureDetector(
           onTap: () {
             setState(() => categoryId = isAll ? null : '${cat!['id']}');
@@ -454,23 +540,65 @@ class _HarajListScreenState extends State<HarajListScreen> {
 
   Future<void> _deletePost(dynamic id) async {
     final app = appController;
-    final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: Text(app.t('confirm_delete_post')), actions: [TextButton(onPressed: ()=>Navigator.pop(ctx,false), child: Text(app.t('cancel'))), FilledButton(onPressed: ()=>Navigator.pop(ctx,true), child: Text(app.t('delete')))]));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(app.t('confirm_delete_post')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(app.t('cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(app.t('delete')),
+          ),
+        ],
+      ),
+    );
     if (ok != true) return;
+    if (!await _needInternet(context)) return;
     final res = await appController.api.harajDelete(id);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(res.message.isNotEmpty ? res.message : app.t('post_deleted'))));
+      SnackBar(
+        content: Text(
+          res.message.isNotEmpty ? res.message : app.t('post_deleted'),
+        ),
+      ),
+    );
     if (res.ok) _load(reset: true);
   }
 
   Future<void> _markSold(dynamic id) async {
     final app = appController;
-    final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: Text(app.t('mark_sold_confirm')), actions: [TextButton(onPressed: ()=>Navigator.pop(ctx,false), child: Text(app.t('cancel'))), FilledButton(onPressed: ()=>Navigator.pop(ctx,true), child: Text(app.t('mark_as_sold')))]));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(app.t('mark_sold_confirm')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(app.t('cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(app.t('mark_as_sold')),
+          ),
+        ],
+      ),
+    );
     if (ok != true) return;
+    if (!await _needInternet(context)) return;
     final res = await appController.api.harajMarkSold(id);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(res.message.isNotEmpty ? res.message : app.t('haraj_sold'))));
+      SnackBar(
+        content: Text(
+          res.message.isNotEmpty ? res.message : app.t('haraj_sold'),
+        ),
+      ),
+    );
     if (res.ok) _load(reset: true);
   }
 
@@ -495,26 +623,35 @@ class _HarajListScreenState extends State<HarajListScreen> {
                   onPressed: () => app.isLoggedIn
                       ? context.push('/haraj/create')
                       : context.push(
-                          '/login?next=${Uri.encodeComponent('/haraj/create')}'),
+                          '/login?next=${Uri.encodeComponent('/haraj/create')}',
+                        ),
                   icon: const Icon(Icons.add),
                 ),
               ],
             )
           : null,
-      body: CustomScrollView(
-        slivers: [
-          if (widget.mine)
+      body: RefreshIndicator(
+        onRefresh: () => _load(reset: true),
+        child: CustomScrollView(
+          slivers: [
+            if (widget.mine)
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
               sliver: SliverToBoxAdapter(
                 child: SegmentedButton<int>(
                   segments: [
                     ButtonSegment(
-                        value: 0, label: Text(app.t('haraj_tab_all'))),
+                      value: 0,
+                      label: Text(app.t('haraj_tab_all')),
+                    ),
                     ButtonSegment(
-                        value: 1, label: Text(app.t('haraj_tab_active'))),
+                      value: 1,
+                      label: Text(app.t('haraj_tab_active')),
+                    ),
                     ButtonSegment(
-                        value: 2, label: Text(app.t('haraj_tab_sold'))),
+                      value: 2,
+                      label: Text(app.t('haraj_tab_sold')),
+                    ),
                   ],
                   selected: {mineTab},
                   onSelectionChanged: (s) {
@@ -525,6 +662,7 @@ class _HarajListScreenState extends State<HarajListScreen> {
               ),
             ),
           SliverToBoxAdapter(child: _topSection(app)),
+          SliverToBoxAdapter(child: OfflineBanner(stale: _servedFromCache)),
           if (loading)
             const SliverFillRemaining(
               hasScrollBody: false,
@@ -545,35 +683,35 @@ class _HarajListScreenState extends State<HarajListScreen> {
               ),
             )
           else
-            SliverLayoutBuilder(builder: (ctx, c) {
-              final count = c.crossAxisExtent >= 900
-                  ? 4
-                  : c.crossAxisExtent >= 600
-                      ? 3
-                      : 2;
-              return SliverPadding(
-                padding: const EdgeInsets.all(12),
-                sliver: SliverGrid(
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: count,
-                    mainAxisSpacing: 10,
-                    crossAxisSpacing: 10,
-                    childAspectRatio: 0.68,
-                  ),
-                  delegate: SliverChildBuilderDelegate(
-                    (_, i) {
+            SliverLayoutBuilder(
+              builder: (ctx, c) {
+                final count = c.crossAxisExtent >= 900
+                    ? 4
+                    : c.crossAxisExtent >= 600
+                    ? 3
+                    : 2;
+                return SliverPadding(
+                  padding: const EdgeInsets.all(12),
+                  sliver: SliverGrid(
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: count,
+                      mainAxisSpacing: 10,
+                      crossAxisSpacing: 10,
+                      childAspectRatio: 0.68,
+                    ),
+                    delegate: SliverChildBuilderDelegate((_, i) {
                       if (i >= items.length) {
                         if (!loadingMore) {
                           WidgetsBinding.instance.addPostFrameCallback((_) {
                             if (mounted) _loadMore();
                           });
                         }
-                        return const Center(
-                            child: CircularProgressIndicator());
+                        return const Center(child: CircularProgressIndicator());
                       }
                       final post = items[i];
                       final sold = '${post['status']}' == '2';
-                      final negotiable = post['is_negotiable'] == 1 ||
+                      final negotiable =
+                          post['is_negotiable'] == 1 ||
                           post['is_negotiable'] == true ||
                           post['is_negotiable'] == '1';
                       return InkWell(
@@ -588,9 +726,11 @@ class _HarajListScreenState extends State<HarajListScreen> {
                                     child: ClipRRect(
                                       borderRadius: BorderRadius.circular(12),
                                       child: AppImage(
-                                        J.str(post['main_image_url'] ??
-                                            post['image_url'] ??
-                                            post['thumbnail']),
+                                        J.str(
+                                          post['main_image_url'] ??
+                                              post['image_url'] ??
+                                              post['thumbnail'],
+                                        ),
                                         placeholder: app.placeholder,
                                       ),
                                     ),
@@ -602,17 +742,23 @@ class _HarajListScreenState extends State<HarajListScreen> {
                                       start: 6,
                                       child: Container(
                                         padding: const EdgeInsets.symmetric(
-                                            horizontal: 8, vertical: 3),
+                                          horizontal: 8,
+                                          vertical: 3,
+                                        ),
                                         decoration: BoxDecoration(
                                           color: Colors.red,
-                                          borderRadius:
-                                              BorderRadius.circular(10),
+                                          borderRadius: BorderRadius.circular(
+                                            10,
+                                          ),
                                         ),
-                                        child: Text(app.t('sold'),
-                                            style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 11,
-                                                fontWeight: FontWeight.w700)),
+                                        child: Text(
+                                          app.t('sold'),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
                                       ),
                                     )
                                   else if (negotiable)
@@ -622,80 +768,96 @@ class _HarajListScreenState extends State<HarajListScreen> {
                                       start: 6,
                                       child: Container(
                                         padding: const EdgeInsets.symmetric(
-                                            horizontal: 8, vertical: 3),
+                                          horizontal: 8,
+                                          vertical: 3,
+                                        ),
                                         decoration: BoxDecoration(
                                           color: Colors.green,
-                                          borderRadius:
-                                              BorderRadius.circular(10),
+                                          borderRadius: BorderRadius.circular(
+                                            10,
+                                          ),
                                         ),
-                                        child: Text(app.t('negotiable'),
-                                            style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 11,
-                                                fontWeight: FontWeight.w700)),
+                                        child: Text(
+                                          app.t('negotiable'),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
                                       ),
                                     ),
                                 ],
                               ),
                             ),
                             const SizedBox(height: 4),
-                            Text(J.str(post['title']),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 13)),
+                            Text(
+                              J.str(post['title']),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 13),
+                            ),
                             Text(
                               money(post['price'], app.currency, app.decimals),
                               style: TextStyle(
-                                  color: app.accentColor,
-                                  fontWeight: FontWeight.w700),
+                                color: app.accentColor,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                             Text(
                               [
-                                J.str(post['city'] ??
-                                    post['cityRef']?['name'] ??
-                                    post['city_ref']?['name']),
+                                J.str(
+                                  post['city'] ??
+                                      post['cityRef']?['name'] ??
+                                      post['city_ref']?['name'],
+                                ),
                                 _catNameOf(post),
-                                timeAgo(J.str(
-                                    post['created_at'] ?? post['date'])),
+                                timeAgo(
+                                  J.str(post['created_at'] ?? post['date']),
+                                ),
                               ].where((p) => p.isNotEmpty).join(' • '),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
-                                  color: Colors.grey, fontSize: 11),
+                                color: Colors.grey,
+                                fontSize: 11,
+                              ),
                             ),
                             if (widget.mine)
                               Row(
                                 children: [
                                   IconButton(
-                                      icon: const Icon(Icons.edit, size: 16),
-                                      tooltip: app.t('edit'),
-                                      onPressed: () => context.push(
-                                          '/haraj/edit/${post['id']}')),
+                                    icon: const Icon(Icons.edit, size: 16),
+                                    tooltip: app.t('edit'),
+                                    onPressed: () => context.push(
+                                      '/haraj/edit/${post['id']}',
+                                    ),
+                                  ),
                                   IconButton(
-                                      icon: const Icon(Icons.delete, size: 16),
-                                      tooltip: app.t('delete'),
-                                      onPressed: () =>
-                                          _deletePost(post['id'])),
+                                    icon: const Icon(Icons.delete, size: 16),
+                                    tooltip: app.t('delete'),
+                                    onPressed: () => _deletePost(post['id']),
+                                  ),
                                   if (!sold)
                                     IconButton(
-                                        icon: const Icon(Icons.check, size: 16),
-                                        tooltip: app.t('mark_as_sold'),
-                                        onPressed: () =>
-                                            _markSold(post['id'])),
+                                      icon: const Icon(Icons.check, size: 16),
+                                      tooltip: app.t('mark_as_sold'),
+                                      onPressed: () => _markSold(post['id']),
+                                    ),
                                 ],
                               ),
                           ],
                         ),
                       );
-                    },
-                    childCount: items.length + (page < lastPage ? 1 : 0),
-                  ),
-                ),
-              );
-            }),
-        ],
-      ),
-    );
+                    }, childCount: items.length + (page < lastPage ? 1 : 0)),
+                    ),
+                  );
+                },
+              ),
+          ],
+          ),
+        ),
+      );
   }
 
   String _catNameOf(Map<String, dynamic> post) {
@@ -751,16 +913,40 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     super.dispose();
   }
 
+  bool _servedFromCache = false;
+
   Future<void> _load() async {
+    // Local-first: last synchronized ad paints offline (stale-labeled).
+    final snap =
+        appController.readPublicSnapshot('haraj_detail_${widget.id}') as Map?;
+    if (snap != null && post == null && mounted) {
+      setState(() {
+        post = J.map(snap['post']);
+        comments = J.maps(snap['comments']);
+        loading = false;
+        failed = post == null || post!.isEmpty;
+        _servedFromCache = true;
+      });
+    }
     final result = await appController.api.harajPost(widget.id);
     final c = await appController.api.harajComments(widget.id);
     if (!mounted) return;
+    final next = result.dataMap.isNotEmpty
+        ? result.dataMap
+        : J.map(result.raw['data']);
     setState(() {
-      post = result.dataMap.isNotEmpty ? result.dataMap : J.map(result.raw['data']);
-      comments = c.dataMaps;
+      post = result.ok ? next : post;
+      comments = c.ok ? c.dataMaps : comments;
       loading = false;
-      failed = !result.ok || post == null || post!.isEmpty;
+      failed = post == null || post!.isEmpty;
+      _servedFromCache = !result.ok && post != null;
     });
+    if (result.ok && next.isNotEmpty) {
+      await appController.cachePublicSnapshot('haraj_detail_${widget.id}', {
+        'post': next,
+        'comments': c.ok ? c.dataMaps : comments,
+      });
+    }
     // load ratings if post has user
     final userId = post?['user_id'] ?? post?['user']?['id'];
     if (userId != null) {
@@ -773,61 +959,122 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
 
   Future<void> _openWhatsApp() async {
     final app = appController;
-    final phone = J.str(post?['contact_whatsapp']).replaceAll(RegExp(r'[^\d]'), '');
+    final phone = J
+        .str(post?['contact_whatsapp'])
+        .replaceAll(RegExp(r'[^\d]'), '');
     if (phone.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(app.t('whatsapp_not_available'))),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(app.t('whatsapp_not_available'))));
       return;
     }
     final title = J.str(post?['title']);
     final text = app.t('whatsapp_message').replaceAll('{{title}}', title);
-    final uri = Uri.parse('https://wa.me/$phone?text=${Uri.encodeComponent(text)}');
+    final uri = Uri.parse(
+      'https://wa.me/$phone?text=${Uri.encodeComponent(text)}',
+    );
     final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!opened && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(app.t('whatsapp_not_available'))),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(app.t('whatsapp_not_available'))));
     }
   }
 
   Future<void> _addComment() async {
     final app = appController;
     if (!app.isLoggedIn) {
-      if (mounted) context.push('/login?next=${Uri.encodeComponent('/haraj/${widget.id}')}');
+      if (mounted) {
+        context.push(
+          '/login?next=${Uri.encodeComponent('/haraj/${widget.id}')}',
+        );
+      }
       return;
     }
     if (comment.text.trim().isEmpty) return;
-    final res = await appController.api.harajAddComment(widget.id, comment.text.trim(), parentId: replyTo);
+    if (!await _needInternet(context)) return;
+    final res = await appController.api.harajAddComment(
+      widget.id,
+      comment.text.trim(),
+      parentId: replyTo,
+    );
     if (!mounted) return;
     if (res.ok) {
       comment.clear();
       replyTo = null;
       _load();
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.message)));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(res.message)));
     }
   }
 
   Future<void> _updateComment(dynamic id, String old) async {
     final app = appController;
     final ctrl = TextEditingController(text: old);
-    final ok = await showDialog<bool>(context: context, builder: (ctx)=> AlertDialog(title: Text(app.t('edit')), content: TextField(controller: ctrl), actions: [TextButton(onPressed: ()=>Navigator.pop(ctx,false), child: Text(app.t('cancel'))), FilledButton(onPressed: ()=>Navigator.pop(ctx,true), child: Text(app.t('save')))]));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(app.t('edit')),
+        content: TextField(controller: ctrl),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(app.t('cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(app.t('save')),
+          ),
+        ],
+      ),
+    );
     if (ok != true) return;
-    final res = await appController.api.harajUpdateComment(id, ctrl.text.trim());
+    if (!await _needInternet(context)) return;
+    final res = await appController.api.harajUpdateComment(
+      id,
+      ctrl.text.trim(),
+    );
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.message.isNotEmpty ? res.message : app.t('save'))));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(res.message.isNotEmpty ? res.message : app.t('save')),
+      ),
+    );
     if (res.ok) _load();
   }
 
   Future<void> _deleteComment(dynamic id) async {
     final app = appController;
-    final ok = await showDialog<bool>(context: context, builder: (ctx)=> AlertDialog(title: Text(app.t('confirm_delete_comment')), actions: [TextButton(onPressed: ()=>Navigator.pop(ctx,false), child: Text(app.t('cancel'))), FilledButton(onPressed: ()=>Navigator.pop(ctx,true), child: Text(app.t('delete')))]));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(app.t('confirm_delete_comment')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(app.t('cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(app.t('delete')),
+          ),
+        ],
+      ),
+    );
     if (ok != true) return;
+    if (!await _needInternet(context)) return;
     final res = await appController.api.harajDeleteComment(id);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res.message.isNotEmpty ? res.message : app.t('comment_deleted'))));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          res.message.isNotEmpty ? res.message : app.t('comment_deleted'),
+        ),
+      ),
+    );
     if (res.ok) _load();
   }
 
@@ -836,7 +1083,11 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     final uid = post?['user_id'] ?? post?['user']?['id'];
     if (uid == null) return;
     if (!app.isLoggedIn) {
-      if (mounted) context.push('/login?next=${Uri.encodeComponent('/haraj/${widget.id}')}');
+      if (mounted) {
+        context.push(
+          '/login?next=${Uri.encodeComponent('/haraj/${widget.id}')}',
+        );
+      }
       return;
     }
     int rating = 5;
@@ -871,16 +1122,19 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: Text(app.t('cancel'))),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(app.t('cancel')),
+            ),
             FilledButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: Text(app.t('rate'))),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(app.t('rate')),
+            ),
           ],
         ),
       ),
     );
     if (ok != true) return;
+    if (!await _needInternet(context)) return;
     final res = await appController.api.harajRate({
       'rated_user_id': uid,
       'post_id': widget.id,
@@ -889,7 +1143,14 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(res.message.isNotEmpty ? res.message : app.t('rating_saved_successfully'))));
+      SnackBar(
+        content: Text(
+          res.message.isNotEmpty
+              ? res.message
+              : app.t('rating_saved_successfully'),
+        ),
+      ),
+    );
     if (res.ok) _load();
   }
 
@@ -897,6 +1158,7 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     final app = appController;
     final uid = post?['user_id'] ?? post?['user']?['id'];
     if (uid == null) return;
+    if (!await _needInternet(context)) return;
     if (!blocked) {
       final ok = await confirmAction(
         context,
@@ -911,7 +1173,14 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     if (!mounted) return;
     if (res.ok) setState(() => blocked = !blocked);
     ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(res.message.isNotEmpty ? res.message : (blocked ? app.t('block') : app.t('unblock')))));
+      SnackBar(
+        content: Text(
+          res.message.isNotEmpty
+              ? res.message
+              : (blocked ? app.t('block') : app.t('unblock')),
+        ),
+      ),
+    );
   }
 
   static const _reportReasons = [
@@ -931,7 +1200,11 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
   Future<void> _report() async {
     final app = appController;
     if (!app.isLoggedIn) {
-      if (mounted) context.push('/login?next=${Uri.encodeComponent('/haraj/${widget.id}')}');
+      if (mounted) {
+        context.push(
+          '/login?next=${Uri.encodeComponent('/haraj/${widget.id}')}',
+        );
+      }
       return;
     }
     String reason = 'fake';
@@ -968,16 +1241,19 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: Text(app.t('cancel'))),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(app.t('cancel')),
+            ),
             FilledButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: Text(app.t('haraj_report'))),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(app.t('haraj_report')),
+            ),
           ],
         ),
       ),
     );
     if (ok != true || !mounted) return;
+    if (!await _needInternet(context)) return;
     final res = await appController.api.harajReport(
       widget.id,
       reason: reason,
@@ -986,11 +1262,13 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(res.message.isNotEmpty
-            ? res.message
-            : res.ok
-                ? app.t('haraj_report_sent')
-                : app.t('something_went_wrong')),
+        content: Text(
+          res.message.isNotEmpty
+              ? res.message
+              : res.ok
+              ? app.t('haraj_report_sent')
+              : app.t('something_went_wrong'),
+        ),
       ),
     );
   }
@@ -1003,19 +1281,27 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
         title: Text(app.t('mark_sold_confirm')),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text(app.t('cancel'))),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(app.t('cancel')),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text(app.t('mark_as_sold'))),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(app.t('mark_as_sold')),
+          ),
         ],
       ),
     );
     if (ok != true || !mounted) return;
+    if (!await _needInternet(context)) return;
     final res = await appController.api.harajMarkSold(widget.id);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(res.message.isNotEmpty ? res.message : app.t('haraj_sold'))));
+      SnackBar(
+        content: Text(
+          res.message.isNotEmpty ? res.message : app.t('haraj_sold'),
+        ),
+      ),
+    );
     if (res.ok) _load();
   }
 
@@ -1027,7 +1313,8 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
   @override
   Widget build(BuildContext context) {
     final app = appController;
-    final isMine = '${post?['user_id']}' == '${app.user?['id']}' && app.isLoggedIn;
+    final isMine =
+        '${post?['user_id']}' == '${app.user?['id']}' && app.isLoggedIn;
     if (loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
@@ -1036,7 +1323,7 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
         appBar: AppBar(),
         body: EmptyState(
           icon: Icons.error_outline,
-          message: app.t('network_error'),
+          message: app.t('not_synced_yet'),
           actionLabel: app.t('retry'),
           onAction: () {
             setState(() {
@@ -1050,7 +1337,8 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     }
     final p = post!;
     final sold = '${p['status']}' == '2';
-    final negotiable = p['is_negotiable'] == 1 ||
+    final negotiable =
+        p['is_negotiable'] == 1 ||
         p['is_negotiable'] == true ||
         p['is_negotiable'] == '1';
     final gallery = <String>[
@@ -1062,53 +1350,73 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     final myRating = J.map(p['my_rating']);
     final cat = J.map(p['category']);
     final parentCat = J.map(cat['parent']);
-    final cityName = J.str(p['city'] ?? p['cityRef']?['name'] ?? p['city_ref']?['name']);
+    final cityName = J.str(
+      p['city'] ?? p['cityRef']?['name'] ?? p['city_ref']?['name'],
+    );
     final allComments = J.i(p['all_comments_count']);
-    final contactPhone = J.str(p['contact_phone']).replaceAll(RegExp(r'[^\d+]'), '');
+    final contactPhone = J
+        .str(p['contact_phone'])
+        .replaceAll(RegExp(r'[^\d+]'), '');
     final showContact = !isMine && !sold;
     return Scaffold(
-      appBar: AppBar(title: Text(J.str(p['title'])), actions: [
-        if (isMine) ...[
-          IconButton(
+      appBar: AppBar(
+        title: Text(J.str(p['title'])),
+        actions: [
+          if (isMine) ...[
+            IconButton(
               icon: const Icon(Icons.edit),
               tooltip: app.t('edit'),
-              onPressed: () => context.push('/haraj/edit/${p['id']}')),
-          IconButton(
+              onPressed: () => context.push('/haraj/edit/${p['id']}'),
+            ),
+            IconButton(
               icon: const Icon(Icons.delete),
               tooltip: app.t('delete'),
               onPressed: () async {
+                if (!await _needInternet(context)) return;
                 final r = await appController.api.harajDelete(p['id']);
                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(r.message.isNotEmpty
-                          ? r.message
-                          : app.t('post_deleted'))));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        r.message.isNotEmpty
+                            ? r.message
+                            : app.t('post_deleted'),
+                      ),
+                    ),
+                  );
                   if (r.ok) context.pop();
                 }
-              }),
-          if (!sold)
-            IconButton(
+              },
+            ),
+            if (!sold)
+              IconButton(
                 icon: const Icon(Icons.check),
                 tooltip: app.t('mark_as_sold'),
-                onPressed: _markSold),
-        ] else ...[
-          IconButton(
+                onPressed: _markSold,
+              ),
+          ] else ...[
+            IconButton(
               icon: const Icon(Icons.star_border),
               tooltip: app.t('haraj_rate_seller'),
-              onPressed: _rateUser),
-          IconButton(
+              onPressed: _rateUser,
+            ),
+            IconButton(
               icon: Icon(blocked ? Icons.block : Icons.person_off_outlined),
               tooltip: blocked ? app.t('unblock') : app.t('block'),
-              onPressed: _toggleBlock),
-          IconButton(
+              onPressed: _toggleBlock,
+            ),
+            IconButton(
               icon: const Icon(Icons.flag_outlined),
               tooltip: app.t('haraj_report'),
-              onPressed: _report),
+              onPressed: _report,
+            ),
+          ],
         ],
-      ]),
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          OfflineBanner(stale: _servedFromCache),
           if (gallery.isNotEmpty)
             _Gallery(images: gallery, sold: sold, app: app)
           else
@@ -1127,7 +1435,10 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
               Expanded(
                 child: Text(
                   J.str(p['title']),
-                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
             ],
@@ -1135,22 +1446,41 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
           const SizedBox(height: 4),
           Text(
             '${money(p['price'], app.currency, app.decimals)}${negotiable ? ' • ${app.t('negotiable')}' : ''}',
-            style: TextStyle(color: app.accentColor, fontSize: 18, fontWeight: FontWeight.w700),
+            style: TextStyle(
+              color: app.accentColor,
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+            ),
           ),
           const SizedBox(height: 6),
           Wrap(
             spacing: 12,
             runSpacing: 4,
             children: [
-              _meta(Icons.access_time, timeAgo(J.str(p['created_at'] ?? p['date']))),
-              _meta(Icons.visibility_outlined, '${J.str(p['views_count'])} ${app.t('haraj_views')}'),
+              _meta(
+                Icons.access_time,
+                timeAgo(J.str(p['created_at'] ?? p['date'])),
+              ),
+              _meta(
+                Icons.visibility_outlined,
+                '${J.str(p['views_count'])} ${app.t('haraj_views')}',
+              ),
               if (J.str(p['condition']).isNotEmpty)
-                _meta(Icons.label_outline, _conditionLabel(J.str(p['condition']))),
-              if (cityName.isNotEmpty) _meta(Icons.location_on_outlined, cityName),
-              if (J.str(p['location']).isNotEmpty) _meta(Icons.place_outlined, J.str(p['location'])),
+                _meta(
+                  Icons.label_outline,
+                  _conditionLabel(J.str(p['condition'])),
+                ),
+              if (cityName.isNotEmpty)
+                _meta(Icons.location_on_outlined, cityName),
+              if (J.str(p['location']).isNotEmpty)
+                _meta(Icons.place_outlined, J.str(p['location'])),
               if (_catName(cat).isNotEmpty)
-                _meta(Icons.category_outlined,
-                    parentCat.isNotEmpty ? '${_catName(parentCat)} / ${_catName(cat)}' : _catName(cat)),
+                _meta(
+                  Icons.category_outlined,
+                  parentCat.isNotEmpty
+                      ? '${_catName(parentCat)} / ${_catName(cat)}'
+                      : _catName(cat),
+                ),
               if (allComments > 0)
                 _meta(Icons.comment_outlined, '$allComments'),
             ],
@@ -1166,17 +1496,21 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
                   ? NetworkImage(J.str(seller['profile']))
                   : null,
               child: J.str(seller['profile']).isEmpty
-                  ? Text(J.str(seller['name']).isEmpty
-                      ? '?'
-                      : J.str(seller['name']).substring(0, 1))
+                  ? Text(
+                      J.str(seller['name']).isEmpty
+                          ? '?'
+                          : J.str(seller['name']).substring(0, 1),
+                    )
                   : null,
             ),
             title: Text(J.str(seller['name'])),
             subtitle: _ownerRatingRow(ownerRating, myRating),
           ),
           if (myRating.isNotEmpty)
-            Text('${app.t('haraj_my_rating')}: ${J.str(myRating['rating'])} ★',
-                style: const TextStyle(color: Colors.grey, fontSize: 12)),
+            Text(
+              '${app.t('haraj_my_rating')}: ${J.str(myRating['rating'])} ★',
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
           const SizedBox(height: 8),
           if (showContact) ...[
             Row(
@@ -1201,11 +1535,16 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
               ],
             ),
             const SizedBox(height: 6),
-            Text(app.t('haraj_safety_hint'),
-                style: const TextStyle(color: Colors.grey, fontSize: 12)),
+            Text(
+              app.t('haraj_safety_hint'),
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
           ],
           const Divider(),
-          Text(app.t('comments'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          Text(
+            app.t('comments'),
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+          ),
           const SizedBox(height: 6),
           ...comments.map((item) => _commentTile(item, isMine)),
           if (replyTo != null)
@@ -1214,8 +1553,10 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text('${app.t('haraj_comment_reply')} #$replyTo',
-                        style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                    child: Text(
+                      '${app.t('haraj_comment_reply')} #$replyTo',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
                   ),
                   TextButton(
                     onPressed: () => setState(() => replyTo = null),
@@ -1237,7 +1578,9 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
             )
           else
             TextButton(
-              onPressed: () => context.push('/login?next=${Uri.encodeComponent('/haraj/${widget.id}')}'),
+              onPressed: () => context.push(
+                '/login?next=${Uri.encodeComponent('/haraj/${widget.id}')}',
+              ),
               child: Text(app.t('login_to_comment')),
             ),
         ],
@@ -1269,9 +1612,18 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
   Widget _badge(String text, Color color) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(12)),
-      child: Text(text,
-          style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700)),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
     );
   }
 
@@ -1287,7 +1639,10 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     );
   }
 
-  Widget _ownerRatingRow(Map<String, dynamic> ownerRating, Map<String, dynamic> myRating) {
+  Widget _ownerRatingRow(
+    Map<String, dynamic> ownerRating,
+    Map<String, dynamic> myRating,
+  ) {
     if (ownerRating.isEmpty && myRating.isEmpty) return const SizedBox.shrink();
     final avg = double.tryParse('${ownerRating['average'] ?? ''}') ?? 0;
     final count = J.str(ownerRating['count']);
@@ -1295,10 +1650,15 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
       children: [
         const Icon(Icons.star, size: 14, color: Colors.amber),
         const SizedBox(width: 2),
-        Text(avg > 0 ? avg.toStringAsFixed(1) : '—',
-            style: const TextStyle(fontSize: 12)),
+        Text(
+          avg > 0 ? avg.toStringAsFixed(1) : '—',
+          style: const TextStyle(fontSize: 12),
+        ),
         if (count.isNotEmpty)
-          Text(' ($count)', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          Text(
+            ' ($count)',
+            style: const TextStyle(fontSize: 12, color: Colors.grey),
+          ),
       ],
     );
   }
@@ -1321,21 +1681,37 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
                 ? NetworkImage(J.str(user['profile']))
                 : null,
             child: J.str(user['profile']).isEmpty
-                ? Text(userName.isEmpty ? '?' : userName.substring(0, 1),
-                    style: const TextStyle(fontSize: 12))
+                ? Text(
+                    userName.isEmpty ? '?' : userName.substring(0, 1),
+                    style: const TextStyle(fontSize: 12),
+                  )
                 : null,
           ),
           title: Row(
             children: [
-              Expanded(child: Text(userName, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+              Expanded(
+                child: Text(
+                  userName,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
               if (owner)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
-                      color: app.accentColor.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(8)),
-                  child: Text(app.t('owner'),
-                      style: TextStyle(fontSize: 10, color: app.accentColor)),
+                    color: app.accentColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    app.t('owner'),
+                    style: TextStyle(fontSize: 10, color: app.accentColor),
+                  ),
                 ),
             ],
           ),
@@ -1343,24 +1719,34 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(J.str(item['comment'] ?? item['body'])),
-              Text(timeAgo(J.str(item['created_at'])),
-                  style: const TextStyle(fontSize: 11, color: Colors.grey)),
+              Text(
+                timeAgo(J.str(item['created_at'])),
+                style: const TextStyle(fontSize: 11, color: Colors.grey),
+              ),
             ],
           ),
-          trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-            IconButton(
-                icon: const Icon(Icons.reply, size: 16),
-                onPressed: () => setState(() => replyTo = item['id'])),
-            if (mine)
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               IconButton(
+                icon: const Icon(Icons.reply, size: 16),
+                onPressed: () => setState(() => replyTo = item['id']),
+              ),
+              if (mine)
+                IconButton(
                   icon: const Icon(Icons.edit, size: 16),
                   onPressed: () => _updateComment(
-                      item['id'], J.str(item['comment'] ?? item['body']))),
-            if (mine)
-              IconButton(
+                    item['id'],
+                    J.str(item['comment'] ?? item['body']),
+                  ),
+                ),
+              if (mine)
+                IconButton(
                   icon: const Icon(Icons.delete, size: 16),
-                  onPressed: () => _deleteComment(item['id'])),
-          ]),
+                  onPressed: () => _deleteComment(item['id']),
+                ),
+            ],
+          ),
         ),
         if (replies.isNotEmpty)
           Padding(
@@ -1368,18 +1754,27 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
             child: Column(
               children: replies.map((r) {
                 final ru = J.map(r['user']);
-                final rMine = '${r['user_id']}' == '${app.user?['id']}' && app.isLoggedIn;
+                final rMine =
+                    '${r['user_id']}' == '${app.user?['id']}' && app.isLoggedIn;
                 return ListTile(
                   contentPadding: EdgeInsets.zero,
                   dense: true,
                   leading: CircleAvatar(
                     radius: 13,
                     child: Text(
-                        J.str(ru['name']).isEmpty ? '?' : J.str(ru['name']).substring(0, 1),
-                        style: const TextStyle(fontSize: 11)),
+                      J.str(ru['name']).isEmpty
+                          ? '?'
+                          : J.str(ru['name']).substring(0, 1),
+                      style: const TextStyle(fontSize: 11),
+                    ),
                   ),
-                  title: Text(J.str(ru['name']),
-                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                  title: Text(
+                    J.str(ru['name']),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
                   subtitle: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -1387,20 +1782,24 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(J.str(r['comment'] ?? r['body']),
-                                style: const TextStyle(fontSize: 13)),
-                            Text(timeAgo(J.str(r['created_at'])),
-                                style: const TextStyle(
-                                    fontSize: 11, color: Colors.grey)),
+                            Text(
+                              J.str(r['comment'] ?? r['body']),
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                            Text(
+                              timeAgo(J.str(r['created_at'])),
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey,
+                              ),
+                            ),
                           ],
                         ),
                       ),
                       if (rMine)
                         IconButton(
-                          icon:
-                              const Icon(Icons.delete, size: 16),
-                          onPressed: () =>
-                              _deleteComment(r['id']),
+                          icon: const Icon(Icons.delete, size: 16),
+                          onPressed: () => _deleteComment(r['id']),
                         ),
                     ],
                   ),
@@ -1447,8 +1846,10 @@ class _GalleryState extends State<_Gallery> {
                 onPageChanged: (i) => setState(() => index = i),
                 itemBuilder: (_, i) => ClipRRect(
                   borderRadius: BorderRadius.circular(12),
-                  child: AppImage(widget.images[i],
-                      placeholder: widget.app.placeholder),
+                  child: AppImage(
+                    widget.images[i],
+                    placeholder: widget.app.placeholder,
+                  ),
                 ),
               ),
               if (widget.images.length > 1)
@@ -1457,14 +1858,18 @@ class _GalleryState extends State<_Gallery> {
                   bottom: 8,
                   end: 8,
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
                     decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(10)),
-                    child: Text('${index + 1}/${widget.images.length}',
-                        style: const TextStyle(
-                            color: Colors.white, fontSize: 12)),
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '${index + 1}/${widget.images.length}',
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                    ),
                   ),
                 ),
               if (widget.sold)
@@ -1473,16 +1878,22 @@ class _GalleryState extends State<_Gallery> {
                   top: 8,
                   start: 8,
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
-                        color: Colors.red,
-                        borderRadius: BorderRadius.circular(12)),
-                    child: Text(widget.app.t('sold'),
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700)),
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      widget.app.t('sold'),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
                   ),
                 ),
             ],
@@ -1495,7 +1906,7 @@ class _GalleryState extends State<_Gallery> {
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemCount: widget.images.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
               itemBuilder: (_, i) => GestureDetector(
                 onTap: () => controller.jumpToPage(i),
                 child: Container(
@@ -1511,8 +1922,10 @@ class _GalleryState extends State<_Gallery> {
                   ),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(6),
-                    child: AppImage(widget.images[i],
-                        placeholder: widget.app.placeholder),
+                    child: AppImage(
+                      widget.images[i],
+                      placeholder: widget.app.placeholder,
+                    ),
                   ),
                 ),
               ),
@@ -1549,18 +1962,114 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
 
   static const _maxImageBytes = 5 * 1024 * 1024;
 
+  static const _draftFormId = 'haraj_create';
+  bool _draftRestored = false;
+  Timer? _draftDeb;
+
   @override
   void initState() {
     super.initState();
     cityId = '${appController.city?['id'] ?? ''}';
+    _restoreDraft();
+    for (final c in [
+      title,
+      price,
+      description,
+      whatsapp,
+      contactPhone,
+      location,
+    ]) {
+      c.addListener(_saveDraftSoon);
+    }
+    try {
+      final snap = appController.readPublicSnapshot('haraj_feed');
+      if (snap is Map && snap['categories'] is List) {
+        final seeded = J.maps(snap['categories']);
+        if (seeded.isNotEmpty) categories = seeded;
+      }
+    } catch (_) {}
     appController.api.harajCategoriesAll().then((res) {
       if (!mounted) return;
-      setState(() => categories = res.dataMaps);
+      if (res.ok && res.dataMaps.isNotEmpty) {
+        setState(() => categories = res.dataMaps);
+      }
+    });
+  }
+
+  /// Restores the locally saved ad draft (never auto-published).
+  Future<void> _restoreDraft() async {
+    try {
+      final draft = appController.offline.readDraft(
+        appController.accountScope,
+        _draftFormId,
+      );
+      if (draft == null) return;
+      title.text = J.str(draft['title']);
+      price.text = J.str(draft['price']);
+      description.text = J.str(draft['description']);
+      whatsapp.text = J.str(draft['whatsapp']);
+      contactPhone.text = J.str(draft['contactPhone']);
+      location.text = J.str(draft['location']);
+      final cat = J.str(draft['categoryId']);
+      if (cat.isNotEmpty) categoryId = cat;
+      final cond = J.str(draft['condition']);
+      if (cond.isNotEmpty) condition = cond;
+      negotiable = draft['negotiable'] == true;
+      final c = J.str(draft['cityId']);
+      if (c.isNotEmpty) cityId = c;
+      final paths = (draft['images'] as List? ?? [])
+          .map((e) => J.str(e))
+          .where((e) => e.isNotEmpty)
+          .toList();
+      final kept = <XFile>[];
+      for (final p in paths) {
+        try {
+          if (await File(p).exists()) kept.add(XFile(p));
+        } catch (_) {}
+      }
+      if (kept.isNotEmpty) images = kept;
+      _draftRestored =
+          title.text.isNotEmpty ||
+          description.text.isNotEmpty ||
+          price.text.isNotEmpty;
+      if (mounted) setState(() {});
+    } catch (_) {}
+  }
+
+  void _saveDraftSoon() {
+    _draftDeb?.cancel();
+    _draftDeb = Timer(const Duration(milliseconds: 800), () async {
+      try {
+        await appController.offline.writeDraft(
+          appController.accountScope,
+          _draftFormId,
+          {
+            'title': title.text,
+            'price': price.text,
+            'description': description.text,
+            'whatsapp': whatsapp.text,
+            'contactPhone': contactPhone.text,
+            'location': location.text,
+            'categoryId': categoryId ?? '',
+            'condition': condition ?? '',
+            'negotiable': negotiable,
+            'cityId': cityId ?? '',
+            'images': [...images.map((e) => e.path)],
+          },
+        );
+      } catch (_) {}
     });
   }
 
   @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    _saveDraftSoon();
+  }
+
+  @override
   void dispose() {
+    _draftDeb?.cancel();
     title.dispose();
     price.dispose();
     description.dispose();
@@ -1583,7 +2092,8 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
     if (await picked.length() > _maxImageBytes) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(appController.t('image_too_large'))));
+          SnackBar(content: Text(appController.t('image_too_large'))),
+        );
       }
       return null;
     }
@@ -1597,23 +2107,30 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
         price.text.trim().isEmpty ||
         description.text.trim().isEmpty ||
         categoryId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(title.text.trim().length > 255
-              ? app.t('title_max_length')
-              : app.t('fill_required_fields'))));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            title.text.trim().length > 255
+                ? app.t('title_max_length')
+                : app.t('fill_required_fields'),
+          ),
+        ),
+      );
       return;
     }
     if (whatsapp.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(app.t('whatsapp_required_for_haraj'))));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(app.t('whatsapp_required_for_haraj'))),
+      );
       return;
     }
     if (cityId == null || cityId!.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(app.t('select_city_required'))));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(app.t('select_city_required'))));
       return;
     }
+    if (!await _needInternet(context)) return;
     setState(() => busy = true);
     try {
       final data = FormData();
@@ -1630,17 +2147,31 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
         MapEntry('is_negotiable', negotiable ? '1' : '0'),
       ]);
       if (mainImage != null) {
-        data.files.add(MapEntry('main_image',
-            await MultipartFile.fromFile(mainImage!.path, filename: mainImage!.name)));
+        data.files.add(
+          MapEntry(
+            'main_image',
+            await MultipartFile.fromFile(
+              mainImage!.path,
+              filename: mainImage!.name,
+            ),
+          ),
+        );
       }
       for (final img in images) {
         if (await img.length() > _maxImageBytes) continue;
-        data.files.add(MapEntry(
-            'images[]', await MultipartFile.fromFile(img.path, filename: img.name)));
+        data.files.add(
+          MapEntry(
+            'images[]',
+            await MultipartFile.fromFile(img.path, filename: img.name),
+          ),
+        );
       }
       final result = await app.api.harajCreate(data);
       if (!mounted) return;
       if (result.ok) {
+        try {
+          await app.offline.removeDraft(app.accountScope, _draftFormId);
+        } catch (_) {}
         final created = J.map(result.dataMap['data']);
         final id = J.str(created['id']).isNotEmpty
             ? J.str(created['id'])
@@ -1677,9 +2208,7 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
           TextField(
             controller: title,
             maxLength: 255,
-            decoration: InputDecoration(
-              labelText: app.t('haraj_title'),
-            ),
+            decoration: InputDecoration(labelText: app.t('haraj_title')),
           ),
           TextField(
             controller: price,
@@ -1689,7 +2218,11 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
             ),
           ),
           DropdownButtonFormField<String>(
-            initialValue: categoryId,
+            initialValue:
+                categoryId != null &&
+                        categories.any((c) => '${c['id']}' == '$categoryId')
+                    ? categoryId
+                    : null,
             items: categories
                 .map(
                   (cat) => DropdownMenuItem(
@@ -1704,15 +2237,16 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
           const SizedBox(height: 8),
           SegmentedButton<String?>(
             segments: [
+              ButtonSegment(value: null, label: Text(app.t('haraj_condition'))),
+              ButtonSegment(value: 'new', label: Text(app.t('condition_new'))),
               ButtonSegment(
-                  value: null, label: Text(app.t('haraj_condition'))),
+                value: 'like_new',
+                label: Text(app.t('condition_like_new')),
+              ),
               ButtonSegment(
-                  value: 'new', label: Text(app.t('condition_new'))),
-              ButtonSegment(
-                  value: 'like_new',
-                  label: Text(app.t('condition_like_new'))),
-              ButtonSegment(
-                  value: 'used', label: Text(app.t('condition_used'))),
+                value: 'used',
+                label: Text(app.t('condition_used')),
+              ),
             ],
             selected: {condition},
             onSelectionChanged: (s) => setState(() => condition = s.first),
@@ -1730,9 +2264,10 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
           ),
           DropdownButtonFormField<String>(
             initialValue:
-                cityId!.isEmpty || app.cities.every((c) => '${c['id']}' != cityId)
-                    ? null
-                    : cityId,
+                cityId!.isEmpty ||
+                    app.cities.every((c) => '${c['id']}' != cityId)
+                ? null
+                : cityId,
             items: app.cities
                 .map(
                   (c) => DropdownMenuItem(
@@ -1751,7 +2286,9 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
           TextField(
             controller: contactPhone,
             keyboardType: TextInputType.phone,
-            decoration: InputDecoration(labelText: app.t('haraj_contact_phone')),
+            decoration: InputDecoration(
+              labelText: app.t('haraj_contact_phone'),
+            ),
           ),
           TextField(
             controller: whatsapp,
@@ -1762,17 +2299,19 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
             ),
           ),
           const SizedBox(height: 8),
-          Text(app.t('haraj_main_image'),
-              style: const TextStyle(fontWeight: FontWeight.w700)),
+          Text(
+            app.t('haraj_main_image'),
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
           TextButton.icon(
             onPressed: () async {
               final one = await _pickOne();
               if (one != null && mounted) setState(() => mainImage = one);
             },
             icon: const Icon(Icons.image),
-            label: Text(mainImage == null
-                ? app.t('haraj_main_image')
-                : mainImage!.name),
+            label: Text(
+              mainImage == null ? app.t('haraj_main_image') : mainImage!.name,
+            ),
           ),
           TextButton.icon(
             onPressed: () async {
@@ -1783,23 +2322,44 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
                   if (await p.length() <= _maxImageBytes) ok.add(p);
                 }
                 if (ok.length != picked.length && mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(app.t('image_too_large'))));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(app.t('image_too_large'))),
+                  );
                 }
-                setState(() => images = ok);
+                setState(() => images = [...images, ...ok]);
               }
             },
             icon: const Icon(Icons.photo_library),
-            label: Text(images.isEmpty
-                ? app.t('haraj_photo')
-                : '${images.length} ${app.t('haraj_photo')}'),
+            label: Text(
+              images.isEmpty
+                  ? app.t('haraj_photo')
+                  : '${images.length} ${app.t('haraj_photo')}',
+            ),
           ),
-          if (images.isNotEmpty) Wrap(children: images.map((e)=> Padding(padding: const EdgeInsets.all(4), child: Text(e.name, style: const TextStyle(fontSize: 11)))).toList()),
+          if (images.isNotEmpty)
+            Wrap(
+              children: images
+                  .map(
+                    (e) => Padding(
+                      padding: const EdgeInsets.all(4),
+                      child: Text(e.name, style: const TextStyle(fontSize: 11)),
+                    ),
+                  )
+                  .toList(),
+            ),
           const SizedBox(height: 8),
           FilledButton(
             onPressed: busy ? null : _submit,
             child: busy ? const BusySpinner() : Text(app.t('confirm')),
           ),
+          if (_draftRestored)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                appController.t('draft_saved'),
+                style: const TextStyle(color: Colors.black54, fontSize: 12),
+              ),
+            ),
         ],
       ),
     );
@@ -1834,14 +2394,56 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
 
   static const _maxImageBytes = 5 * 1024 * 1024;
 
+  String get _draftFormId => 'haraj_edit_${widget.id}';
+  bool _draftRestored = false;
+  Timer? _draftDeb;
+
   @override
   void initState() {
     super.initState();
+    for (final c in [
+      title,
+      price,
+      description,
+      whatsapp,
+      contactPhone,
+      location,
+    ]) {
+      c.addListener(_saveDraftSoon);
+    }
     _load();
+  }
+
+  void _saveDraftSoon() {
+    _draftDeb?.cancel();
+    _draftDeb = Timer(const Duration(milliseconds: 800), () async {
+      try {
+        await appController.offline
+            .writeDraft(appController.accountScope, _draftFormId, {
+              'title': title.text,
+              'price': price.text,
+              'description': description.text,
+              'whatsapp': whatsapp.text,
+              'contactPhone': contactPhone.text,
+              'location': location.text,
+              'categoryId': categoryId ?? '',
+              'condition': condition ?? '',
+              'negotiable': negotiable,
+              'cityId': cityId ?? '',
+            });
+      } catch (_) {}
+    });
+  }
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    _saveDraftSoon();
   }
 
   @override
   void dispose() {
+    _draftDeb?.cancel();
     title.dispose();
     price.dispose();
     description.dispose();
@@ -1858,13 +2460,53 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
     return isAr ? (ar.isNotEmpty ? ar : en) : (en.isNotEmpty ? en : ar);
   }
 
+  bool _loadFailed = false;
+
   Future<void> _load() async {
+    try {
+      final snap = appController.readPublicSnapshot('haraj_feed');
+      if (snap is Map && snap['categories'] is List) {
+        final seeded = J.maps(snap['categories']);
+        if (seeded.isNotEmpty && mounted) setState(() => categories = seeded);
+      }
+    } catch (_) {}
     final catRes = await appController.api.harajCategoriesAll();
     final postRes = await appController.api.harajPost(widget.id);
     if (!mounted) return;
+    Map<String, dynamic> post = postRes.ok
+        ? postRes.dataMap
+        : <String, dynamic>{};
+    if (post.isEmpty) {
+      try {
+        final snap = appController.readPublicSnapshot(
+          'haraj_detail_${widget.id}',
+        );
+        if (snap is Map) post = J.map(snap['post']);
+      } catch (_) {}
+    }
+    if (post.isEmpty) {
+      setState(() {
+        if (catRes.ok && catRes.dataMaps.isNotEmpty) {
+          categories = catRes.dataMaps;
+        }
+        loading = false;
+        _loadFailed = true;
+      });
+      return;
+    }
+    // A locally edited draft wins over the server snapshot for text fields
+    // (never auto-submitted; explicit Save still required).
+    Map<String, dynamic>? draft;
+    try {
+      draft = appController.offline.readDraft(
+        appController.accountScope,
+        _draftFormId,
+      );
+    } catch (_) {}
     setState(() {
-      categories = catRes.dataMaps;
-      final post = postRes.dataMap;
+      if (catRes.ok && catRes.dataMaps.isNotEmpty) {
+        categories = catRes.dataMaps;
+      }
       title.text = J.str(post['title']);
       price.text = J.str(post['price']);
       description.text = J.str(post['description']);
@@ -1874,7 +2516,8 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
       categoryId = '${post['category_id'] ?? ''}';
       final cond = J.str(post['condition']);
       condition = ['new', 'used', 'like_new'].contains(cond) ? cond : null;
-      negotiable = post['is_negotiable'] == 1 ||
+      negotiable =
+          post['is_negotiable'] == 1 ||
           post['is_negotiable'] == true ||
           post['is_negotiable'] == '1';
       cityId = J.str(post['city_id']);
@@ -1882,6 +2525,21 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
           ? J.str(post['main_image_url'])
           : null;
       existingImages = J.maps(post['images']);
+      if (draft != null) {
+        final t = J.str(draft['title']);
+        if (t.isNotEmpty) title.text = t;
+        final pr = J.str(draft['price']);
+        if (pr.isNotEmpty) price.text = pr;
+        final d = J.str(draft['description']);
+        if (d.isNotEmpty) description.text = d;
+        final w = J.str(draft['whatsapp']);
+        if (w.isNotEmpty) whatsapp.text = w;
+        final cp = J.str(draft['contactPhone']);
+        if (cp.isNotEmpty) contactPhone.text = cp;
+        final loc = J.str(draft['location']);
+        if (loc.isNotEmpty) location.text = loc;
+        _draftRestored = true;
+      }
       loading = false;
     });
   }
@@ -1889,17 +2547,24 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
   Future<void> _submit() async {
     final app = appController;
     if (title.text.trim().isEmpty || title.text.trim().length > 255) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(title.text.trim().length > 255
-              ? app.t('title_max_length')
-              : app.t('fill_required_fields'))));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            title.text.trim().length > 255
+                ? app.t('title_max_length')
+                : app.t('fill_required_fields'),
+          ),
+        ),
+      );
       return;
     }
     if (whatsapp.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(app.t('whatsapp_required_for_haraj'))));
+        SnackBar(content: Text(app.t('whatsapp_required_for_haraj'))),
+      );
       return;
     }
+    if (!await _needInternet(context)) return;
     setState(() => busy = true);
     try {
       final data = FormData();
@@ -1918,21 +2583,36 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
         MapEntry('is_negotiable', negotiable ? '1' : '0'),
       ]);
       if (mainImage != null) {
-        data.files.add(MapEntry('main_image',
-            await MultipartFile.fromFile(mainImage!.path, filename: mainImage!.name)));
+        data.files.add(
+          MapEntry(
+            'main_image',
+            await MultipartFile.fromFile(
+              mainImage!.path,
+              filename: mainImage!.name,
+            ),
+          ),
+        );
       }
       for (final img in newImages) {
         if (await img.length() > _maxImageBytes) continue;
-        data.files.add(MapEntry('images[]',
-            await MultipartFile.fromFile(img.path, filename: img.name)));
+        data.files.add(
+          MapEntry(
+            'images[]',
+            await MultipartFile.fromFile(img.path, filename: img.name),
+          ),
+        );
       }
       final res = await app.api.harajUpdate(widget.id, data);
       if (!mounted) return;
       if (res.ok) {
+        try {
+          await app.offline.removeDraft(app.accountScope, _draftFormId);
+        } catch (_) {}
         context.pop();
       } else {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(res.message)));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(res.message)));
       }
     } finally {
       if (mounted) setState(() => busy = false);
@@ -1947,25 +2627,34 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
         title: Text(app.t('confirm_delete_image')),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text(app.t('cancel'))),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(app.t('cancel')),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text(app.t('delete'))),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(app.t('delete')),
+          ),
         ],
       ),
     );
     if (ok != true) return;
+    if (!await _needInternet(context)) return;
     final res = await appController.api.harajDeleteImage(widget.id, imageId);
     if (!mounted) return;
     if (res.ok) {
-      setState(() => existingImages
-          .removeWhere((e) => '${e['id']}' == '$imageId'));
+      setState(
+        () => existingImages.removeWhere((e) => '${e['id']}' == '$imageId'),
+      );
     }
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(res.message.isNotEmpty
-            ? res.message
-            : app.t(res.ok ? 'image_deleted' : 'something_went_wrong'))));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          res.message.isNotEmpty
+              ? res.message
+              : app.t(res.ok ? 'image_deleted' : 'something_went_wrong'),
+        ),
+      ),
+    );
   }
 
   @override
@@ -1974,143 +2663,217 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
     if (loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
+    if (_loadFailed) {
+      return Scaffold(
+        appBar: AppBar(title: Text(app.t('edit_post'))),
+        body: EmptyState(
+          icon: Icons.error_outline,
+          message: app.t('something_went_wrong'),
+          actionLabel: app.t('retry'),
+          onAction: () {
+            setState(() {
+              loading = true;
+              _loadFailed = false;
+            });
+            _load();
+          },
+        ),
+      );
+    }
     return Scaffold(
       appBar: AppBar(title: Text(app.t('edit_post'))),
-      body: ListView(padding: const EdgeInsets.all(16), children: [
-        TextField(
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          TextField(
             controller: title,
             maxLength: 255,
-            decoration: InputDecoration(labelText: app.t('haraj_title'))),
-        TextField(
+            decoration: InputDecoration(labelText: app.t('haraj_title')),
+          ),
+          TextField(
             controller: price,
             keyboardType: TextInputType.number,
-            decoration:
-                InputDecoration(labelText: '${app.t('price')} (${app.currency})')),
-        DropdownButtonFormField<String>(
+            decoration: InputDecoration(
+              labelText: '${app.t('price')} (${app.currency})',
+            ),
+          ),
+          DropdownButtonFormField<String>(
             initialValue: categories.any((c) => '${c['id']}' == '$categoryId')
                 ? '$categoryId'
                 : null,
             items: categories
-                .map((cat) => DropdownMenuItem(
-                    value: '${cat['id']}', child: Text(_catName(cat))))
+                .map(
+                  (cat) => DropdownMenuItem(
+                    value: '${cat['id']}',
+                    child: Text(_catName(cat)),
+                  ),
+                )
                 .toList(),
             onChanged: (v) => setState(() => categoryId = v),
-            decoration:
-                InputDecoration(labelText: app.t('haraj_categories'))),
-        const SizedBox(height: 8),
-        SegmentedButton<String?>(
-          segments: [
-            ButtonSegment(
-                value: null, label: Text(app.t('haraj_condition'))),
-            ButtonSegment(
-                value: 'new', label: Text(app.t('condition_new'))),
-            ButtonSegment(
+            decoration: InputDecoration(labelText: app.t('haraj_categories')),
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<String?>(
+            segments: [
+              ButtonSegment(value: null, label: Text(app.t('haraj_condition'))),
+              ButtonSegment(value: 'new', label: Text(app.t('condition_new'))),
+              ButtonSegment(
                 value: 'like_new',
-                label: Text(app.t('condition_like_new'))),
-            ButtonSegment(
-                value: 'used', label: Text(app.t('condition_used'))),
-          ],
-          selected: {condition},
-          onSelectionChanged: (s) => setState(() => condition = s.first),
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: Text(app.t('haraj_is_negotiable')),
-          value: negotiable,
-          onChanged: (v) => setState(() => negotiable = v),
-        ),
-        TextField(
+                label: Text(app.t('condition_like_new')),
+              ),
+              ButtonSegment(
+                value: 'used',
+                label: Text(app.t('condition_used')),
+              ),
+            ],
+            selected: {condition},
+            onSelectionChanged: (s) => setState(() => condition = s.first),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(app.t('haraj_is_negotiable')),
+            value: negotiable,
+            onChanged: (v) => setState(() => negotiable = v),
+          ),
+          TextField(
             controller: description,
             maxLines: 4,
-            decoration:
-                InputDecoration(labelText: app.t('haraj_description'))),
-        DropdownButtonFormField<String>(
-          initialValue: cityId!.isEmpty ||
-                  app.cities.every((c) => '${c['id']}' != cityId)
-              ? null
-              : cityId,
-          items: app.cities
-              .map((c) => DropdownMenuItem(
-                  value: '${c['id']}', child: Text(J.str(c['name']))))
-              .toList(),
-          onChanged: (v) => setState(() => cityId = v),
-          decoration: InputDecoration(labelText: app.t('haraj_city')),
-        ),
-        TextField(
+            decoration: InputDecoration(labelText: app.t('haraj_description')),
+          ),
+          DropdownButtonFormField<String>(
+            initialValue:
+                cityId!.isEmpty ||
+                    app.cities.every((c) => '${c['id']}' != cityId)
+                ? null
+                : cityId,
+            items: app.cities
+                .map(
+                  (c) => DropdownMenuItem(
+                    value: '${c['id']}',
+                    child: Text(J.str(c['name'])),
+                  ),
+                )
+                .toList(),
+            onChanged: (v) => setState(() => cityId = v),
+            decoration: InputDecoration(labelText: app.t('haraj_city')),
+          ),
+          TextField(
             controller: location,
-            decoration:
-                InputDecoration(labelText: app.t('haraj_location'))),
-        TextField(
+            decoration: InputDecoration(labelText: app.t('haraj_location')),
+          ),
+          TextField(
             controller: contactPhone,
             keyboardType: TextInputType.phone,
             decoration: InputDecoration(
-                labelText: app.t('haraj_contact_phone'))),
-        TextField(
+              labelText: app.t('haraj_contact_phone'),
+            ),
+          ),
+          TextField(
             controller: whatsapp,
             keyboardType: TextInputType.phone,
             decoration: InputDecoration(
-                labelText: '${app.t('whatsapp_number')} *')),
-        const SizedBox(height: 8),
-        Text(app.t('haraj_main_image'),
-            style: const TextStyle(fontWeight: FontWeight.w700)),
-        if (mainImageUrl != null && mainImage == null)
-          SizedBox(
-            height: 120,
-            child: AppImage(mainImageUrl, placeholder: app.placeholder),
+              labelText: '${app.t('whatsapp_number')} *',
+            ),
           ),
-        TextButton.icon(
+          const SizedBox(height: 8),
+          Text(
+            app.t('haraj_main_image'),
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          if (mainImageUrl != null && mainImage == null)
+            SizedBox(
+              height: 120,
+              child: AppImage(mainImageUrl, placeholder: app.placeholder),
+            ),
+          TextButton.icon(
             onPressed: () async {
-              final one = await ImagePicker()
-                  .pickImage(source: ImageSource.gallery);
+              final one = await ImagePicker().pickImage(
+                source: ImageSource.gallery,
+              );
               if (one == null || !mounted) return;
               if (await one.length() > _maxImageBytes) {
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                    content: Text(app.t('image_too_large'))));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(app.t('image_too_large'))),
+                );
                 return;
               }
               setState(() => mainImage = one);
             },
             icon: const Icon(Icons.image),
-            label: Text(mainImage == null
-                ? app.t('haraj_main_image')
-                : mainImage!.name)),
-        if (existingImages.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Text(app.t('images')),
-          Wrap(
+            label: Text(
+              mainImage == null ? app.t('haraj_main_image') : mainImage!.name,
+            ),
+          ),
+          if (existingImages.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(app.t('images')),
+            Wrap(
               children: existingImages
-                  .map((img) => Stack(children: [
+                  .map(
+                    (img) => Stack(
+                      children: [
                         Padding(
-                            padding: const EdgeInsets.all(4),
-                            child: SizedBox(
-                                width: 80,
-                                height: 80,
-                                child: AppImage(J.str(
-                                    img['image_url'] ?? img['url'])))),
+                          padding: const EdgeInsets.all(4),
+                          child: SizedBox(
+                            width: 80,
+                            height: 80,
+                            child: AppImage(
+                              J.str(img['image_url'] ?? img['url']),
+                            ),
+                          ),
+                        ),
                         Positioned(
-                            top: 0,
-                            right: 0,
-                            child: IconButton(
-                                icon: const Icon(Icons.close, size: 16),
-                                onPressed: () =>
-                                    _deleteImage(img['id']))),
-                      ]))
-                  .toList()),
-        ],
-        TextButton.icon(
+                          top: 0,
+                          right: 0,
+                          child: IconButton(
+                            icon: const Icon(Icons.close, size: 16),
+                            onPressed: () => _deleteImage(img['id']),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+          TextButton.icon(
             onPressed: () async {
               final picked = await ImagePicker().pickMultiImage();
-              if (mounted) setState(() => newImages = picked);
+              if (picked.isNotEmpty && mounted) {
+                final ok = <XFile>[];
+                for (final p in picked) {
+                  if (await p.length() <= _maxImageBytes) ok.add(p);
+                }
+                if (ok.length != picked.length && mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(app.t('image_too_large'))),
+                  );
+                }
+                setState(() => newImages = [...newImages, ...ok]);
+              }
             },
             icon: const Icon(Icons.photo_library),
-            label: Text(newImages.isEmpty
-                ? app.t('haraj_photo')
-                : '${newImages.length} ${app.t('haraj_photo')}')),
-        const SizedBox(height: 8),
-        FilledButton(
+            label: Text(
+              newImages.isEmpty
+                  ? app.t('haraj_photo')
+                  : '${newImages.length} ${app.t('haraj_photo')}',
+            ),
+          ),
+          const SizedBox(height: 8),
+          FilledButton(
             onPressed: busy ? null : _submit,
-            child: busy ? const BusySpinner() : Text(app.t('save'))),
-      ]),
+            child: busy ? const BusySpinner() : Text(app.t('save')),
+          ),
+          if (_draftRestored)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                appController.t('draft_saved'),
+                style: const TextStyle(color: Colors.black54, fontSize: 12),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

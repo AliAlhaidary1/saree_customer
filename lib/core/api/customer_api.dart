@@ -31,6 +31,39 @@ class CustomerApi {
   /// Bounded in-memory cache for public catalog GETs (device-safe, short TTL).
   final ApiCache cache = ApiCache(maxEntries: 80);
 
+  /// Reachability evidence derived from actual API results (never from an
+  /// interface flag: Wi-Fi without internet still fails here). Updated on
+  /// every guarded request. The checkout/cart UI uses [likelyOffline] for
+  /// fast "requires internet" feedback; the API result itself stays the
+  /// authoritative guard — a stale hint never blocks or allows an operation.
+  DateTime? lastSuccessAt;
+  DateTime? lastFailureAt;
+  ClassifiedApiError? lastFailure;
+
+  /// Best-effort hint that the backend looks unreachable: the most recent
+  /// terminal result was a network-class failure with no success since.
+  /// Server/auth/validation failures do NOT count (internet may be fine).
+  bool get likelyOffline {
+    final fail = lastFailureAt;
+    if (fail == null) return false;
+    if (lastSuccessAt != null && !lastSuccessAt!.isBefore(fail)) return false;
+    if (DateTime.now().difference(fail) > const Duration(minutes: 2)) {
+      return false;
+    }
+    return lastFailure?.category == ApiErrorCategory.network;
+  }
+
+  /// Test seam (also called by [_guard]): records a proven result.
+  void recordSuccess() {
+    lastSuccessAt = DateTime.now();
+  }
+
+  /// Test seam (also called by [_guard]): records a classified failure.
+  void recordFailure(ClassifiedApiError error) {
+    lastFailure = error;
+    lastFailureAt = DateTime.now();
+  }
+
   static const _catalogTtls = <String, Duration>{
     'sliders': Duration(minutes: 10),
     'offers': Duration(minutes: 5),
@@ -98,7 +131,9 @@ class CustomerApi {
     var attempt = 0;
     while (true) {
       try {
-        return _parse(await request());
+        final parsed = _parse(await request());
+        recordSuccess();
+        return parsed;
       } on DioException catch (error) {
         final classified = classifyDio(error, release: release);
         logApiFailure(classified, path: error.requestOptions.path);
@@ -112,10 +147,12 @@ class CustomerApi {
           await Future<void>.delayed(const Duration(milliseconds: 250));
           continue;
         }
+        recordFailure(classified);
         return ApiResult(classified.toResultMap());
       } catch (error) {
         final classified = classifyUnknown(error, release: release);
         logApiFailure(classified);
+        recordFailure(classified);
         return ApiResult(classified.toResultMap());
       }
     }
@@ -227,7 +264,7 @@ class CustomerApi {
       'country_code': countryCode,
       'platform': AppConfig.devicePlatform,
       if (otp != null && otp.isNotEmpty) 'otp': otp,
-      if (cityId != null) 'city_id': cityId,
+      'city_id': ?cityId,
       if (backupPhone.isNotEmpty) 'backup_phone': backupPhone,
     });
   }
@@ -255,10 +292,10 @@ class CustomerApi {
     String fcm = '',
   }) {
     return _post('login', {
-      if (email != null) 'email': email,
-      if (password != null) 'password': password,
-      if (id != null) 'id': id,
-      if (type != null) 'type': type,
+      'email': ?email,
+      'password': ?password,
+      'id': ?id,
+      'type': ?type,
       'fcm_token': fcm,
       'platform': AppConfig.devicePlatform,
     });
@@ -337,18 +374,18 @@ class CustomerApi {
   }) {
     return _post('send_sms', {
       'phone': phone,
-      if (cityId != null) 'city_id': cityId,
-      if (channel != null) 'channel': channel,
+      'city_id': ?cityId,
+      'channel': ?channel,
       'purpose': purpose,
-      if (countryCode != null) 'country_code': countryCode,
+      'country_code': ?countryCode,
     });
   }
 
   Future<ApiResult> cityConfig({int? cityId, double? latitude, double? longitude}) {
     return _get('city-config', {
-      if (cityId != null) 'city_id': cityId,
-      if (latitude != null) 'latitude': latitude,
-      if (longitude != null) 'longitude': longitude,
+      'city_id': ?cityId,
+      'latitude': ?latitude,
+      'longitude': ?longitude,
     });
   }
 
@@ -358,10 +395,10 @@ class CustomerApi {
     String? countryCode,
   }) {
     return _post('verify_user', {
-      if (mobile != null) 'phone': mobile,
-      if (mobile != null) 'mobile': mobile,
-      if (otp != null) 'otp': otp,
-      if (countryCode != null) 'country_code': countryCode,
+      'phone': ?mobile,
+      'mobile': ?mobile,
+      'otp': ?otp,
+      'country_code': ?countryCode,
     });
   }
 
@@ -378,7 +415,7 @@ class CustomerApi {
   Future<ApiResult> timeSlots() => _get('settings/time_slots');
 
   Future<ApiResult> businessHours({List<dynamic> sellerIds = const []}) {
-    final ids = sellerIds.where((e) => '${e}'.isNotEmpty).join(',');
+    final ids = sellerIds.where((e) => e.isNotEmpty).join(',');
     return _get('settings/business_hours', {
       if (ids.isNotEmpty) 'seller_ids': ids,
     });
@@ -464,9 +501,9 @@ class CustomerApi {
     double? longitude,
   }) {
     return _get('sections', {
-      if (cityId != null) 'city_id': cityId,
-      if (latitude != null) 'latitude': latitude,
-      if (longitude != null) 'longitude': longitude,
+      'city_id': ?cityId,
+      'latitude': ?latitude,
+      'longitude': ?longitude,
     });
   }
 
@@ -477,10 +514,10 @@ class CustomerApi {
     String? slug,
   }) {
     return _get('categories', {
-      if (categoryId != null) 'category_id': categoryId,
-      if (limit != null) 'limit': limit,
-      if (offset != null) 'offset': offset,
-      if (slug != null) 'slug': slug,
+      'category_id': ?categoryId,
+      'limit': ?limit,
+      'offset': ?offset,
+      'slug': ?slug,
     });
   }
 
@@ -499,8 +536,8 @@ class CustomerApi {
     dynamic minRating,
   }) {
     return _get('sellers', {
-      if (latitude != null) 'latitude': latitude,
-      if (longitude != null) 'longitude': longitude,
+      'latitude': ?latitude,
+      'longitude': ?longitude,
       'limit': limit,
       'offset': offset,
       if (search != null && search.isNotEmpty) 'search': search,
@@ -515,9 +552,9 @@ class CustomerApi {
   Future<ApiResult> publishedStorefront(String slug, {String? host, bool isSubdomain = false, String? customDomain}) {
     return _get('storefront/published', {
       'slug': slug,
-      if (host != null) 'host': host,
+      'host': ?host,
       if (isSubdomain) 'is_subdomain': 1,
-      if (customDomain != null) 'custom_domain': customDomain,
+      'custom_domain': ?customDomain,
     });
   }
 
@@ -565,8 +602,8 @@ class CustomerApi {
   Future<ApiResult> managedCampaigns() => _get('managed-campaigns');
   Future<ApiResult> deliveryOfferHint({double? amount, dynamic cityId}) {
     return _get('delivery_offers/hint', {
-      if (amount != null) 'amount': amount,
-      if (cityId != null) 'city_id': cityId,
+      'amount': ?amount,
+      'city_id': ?cityId,
     });
   }
 
@@ -596,7 +633,7 @@ class CustomerApi {
     return _post('product_by_id', {
       'latitude': latitude,
       'longitude': longitude,
-      if (id != null) 'id': id,
+      'id': ?id,
       if (slug.isNotEmpty) 'slug': slug,
       if (_dio.options.headers['X-Viewer-Key'] != null)
         'viewer_key': _dio.options.headers['X-Viewer-Key'],
@@ -667,8 +704,8 @@ class CustomerApi {
       'product_id': productId,
       'rate': rate,
       'review': review,
-      if (orderItemId != null) 'order_item_id': orderItemId,
-      if (orderId != null) 'order_id': orderId,
+      'order_item_id': ?orderItemId,
+      'order_id': ?orderId,
     });
     for (var i = 0; i < images.length; i++) {
       data.files.add(MapEntry('image[$i]', images[i]));
@@ -802,9 +839,9 @@ class CustomerApi {
       'use_wallet': useWallet ? '1' : '0',
       if (deliveryTime.isNotEmpty) 'delivery_time': deliveryTime,
       if (orderNote.isNotEmpty) 'order_note': orderNote,
-      if (promocodeId != null) 'promocode_id': promocodeId,
-      if (campaignId != null) 'campaign_id': campaignId,
-      if (idempotencyKey != null) 'idempotency_key': idempotencyKey,
+      'promocode_id': ?promocodeId,
+      'campaign_id': ?campaignId,
+      'idempotency_key': ?idempotencyKey,
     });
   }
 
@@ -948,12 +985,12 @@ class CustomerApi {
         'invoice_download',
         data: FormData.fromMap({'order_id': '$orderId'}),
         options: Options(
-          contentType: Headers.multipartFormDataContentType,
+contentType: Headers.multipartFormDataContentType,
           responseType: ResponseType.bytes,
           validateStatus: (s) => s != null && s < 500,
         ),
       );
-      final contentType = '${res.headers.map['content-type']?.join(',') ?? ''}';
+      final contentType = res.headers.map['content-type']?.join(',') ?? '';
       if ((res.statusCode ?? 0) >= 200 &&
           (res.statusCode ?? 0) < 300 &&
           !contentType.contains('application/json')) {
@@ -1016,7 +1053,7 @@ class CustomerApi {
   Future<ApiResult> harajAddComment(dynamic postId, String comment, {dynamic parentId}) {
     return _post('haraj/posts/$postId/comments', {
       'comment': comment,
-      if (parentId != null) 'parent_id': parentId,
+      'parent_id': ?parentId,
     });
   }
   Future<ApiResult> harajUpdateComment(dynamic commentId, String comment) =>
@@ -1088,7 +1125,7 @@ class CustomerApi {
           validateStatus: (s) => s != null && s < 500,
         ),
       );
-      final contentType = '${res.headers.map['content-type']?.join(',') ?? ''}';
+      final contentType = res.headers.map['content-type']?.join(',') ?? '';
       if ((res.statusCode ?? 0) >= 200 &&
           (res.statusCode ?? 0) < 300 &&
           !contentType.contains('application/json')) {

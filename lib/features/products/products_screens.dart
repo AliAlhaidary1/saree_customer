@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/app_theme.dart';
+import '../../core/catalog_store.dart';
 import '../../core/config.dart';
 import '../../core/json_util.dart';
 import '../../core/product_media.dart';
@@ -12,10 +13,73 @@ import '../../core/promo_price.dart';
 import '../../core/search_scope.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/closed_store_badge.dart';
+import '../../widgets/offline_banner.dart';
 import '../../widgets/product_card.dart';
 import '../../widgets/product_filter_drawer.dart';
 import '../../widgets/product_variant_sheet.dart';
+import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
+
+/// Catalog sync progress + retry strip. Visible only while a best-effort
+/// sync runs or when the last run parked with an error (saved data kept).
+class _CatalogSyncStrip extends StatelessWidget {
+  const _CatalogSyncStrip();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = appController;
+    return ValueListenableBuilder<CatalogSyncProgress>(
+      valueListenable: app.catalogSync.progress,
+      builder: (_, p, _) {
+        if (p.phase == CatalogSyncPhase.syncing) {
+          final indeterminate = p.total <= 0;
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: LinearProgressIndicator(
+                    value: indeterminate
+                        ? null
+                        : (p.completed / (p.total == 0 ? 1 : p.total)).clamp(
+                            0.0,
+                            1.0,
+                          ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  app.t('catalog_syncing'),
+                  style: const TextStyle(fontSize: 11, color: Colors.black54),
+                ),
+              ],
+            ),
+          );
+        }
+        if (p.phase == CatalogSyncPhase.error && p.scope.isNotEmpty) {
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    app.t('catalog_sync_failed'),
+                    style: const TextStyle(fontSize: 11, color: Colors.black54),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => app.syncCatalogNow(),
+                  child: Text(app.t('retry')),
+                ),
+              ],
+            ),
+          );
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
+}
 
 class ProductsScreen extends StatefulWidget {
   const ProductsScreen({
@@ -93,7 +157,8 @@ class _ProductsScreenState extends State<ProductsScreen>
     canDeliver = widget.canDeliver;
     isReturnable = widget.isReturnable;
     _search.text =
-        widget.search ?? (widget.listenHeaderSearch ? headerSearch.productQuery : '');
+        widget.search ??
+        (widget.listenHeaderSearch ? headerSearch.productQuery : '');
     if (widget.listenHeaderSearch) {
       headerSearch.addListener(_onHeaderSearch);
     }
@@ -126,12 +191,12 @@ class _ProductsScreenState extends State<ProductsScreen>
   }
 
   // parity with front productFilterReducer + getProductbyFilter
-  String priceMin='';
-  String priceMax='';
-  String minRating='';
-  bool canDeliver=false;
-  bool isHome=false;
-  bool isReturnable=false;
+  String priceMin = '';
+  String priceMax = '';
+  String minRating = '';
+  bool canDeliver = false;
+  bool isHome = false;
+  bool isReturnable = false;
 
   String _catName(Map<String, dynamic> cat) {
     final isAr = appController.i18n.code == 'ar';
@@ -171,8 +236,10 @@ class _ProductsScreenState extends State<ProductsScreen>
       indicatorColor: AppTheme.accentOrange,
       indicatorWeight: 3,
       labelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-      unselectedLabelStyle:
-          const TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
+      unselectedLabelStyle: const TextStyle(
+        fontWeight: FontWeight.w500,
+        fontSize: 14,
+      ),
       onTap: (i) {
         final next = i == 0 ? null : '${cats[i - 1]['id']}';
         if ('$next' == '$categoryId') return;
@@ -187,16 +254,16 @@ class _ProductsScreenState extends State<ProductsScreen>
   }
 
   ProductFilterValue get _drawerValue => ProductFilterValue(
-        sort: sort,
-        categoryId: categoryId,
-        priceMin: priceMin,
-        priceMax: priceMax,
-        minRating: minRating,
-        inStock: inStock,
-        onlyOffers: onlyOffers,
-        canDeliver: canDeliver,
-        isReturnable: isReturnable,
-      );
+    sort: sort,
+    categoryId: categoryId,
+    priceMin: priceMin,
+    priceMax: priceMax,
+    minRating: minRating,
+    inStock: inStock,
+    onlyOffers: onlyOffers,
+    canDeliver: canDeliver,
+    isReturnable: isReturnable,
+  );
 
   void _applyDrawer(ProductFilterValue v) {
     sort = v.sort;
@@ -254,6 +321,16 @@ class _ProductsScreenState extends State<ProductsScreen>
     'longitude': appController.browseCoords.longitude,
   };
 
+  bool _servedFromCache = false;
+
+  /// Honest data state of the current scope (never inferred from a row count:
+  /// zero rows can mean unsynchronized, failed, or genuinely empty).
+  CatalogScopeStatus _catalogStatus = CatalogScopeStatus.neverSynced;
+
+  /// Empty-state copy for the current [_catalogStatus]. `ready` (or any
+  /// unknown future state) with zero items means the query matched nothing.
+  String _emptyMessage() => catalogEmptyMessage(_catalogStatus, appController.t);
+
   Future<void> _load({bool reset = false}) async {
     if (!reset && (loadingMore || !hasMore)) return;
     final mySeq = ++_seq;
@@ -261,24 +338,147 @@ class _ProductsScreenState extends State<ProductsScreen>
     if (reset) {
       offset = 0;
       hasMore = true;
-      setState(() => loading = true);
+      _catalogStatus = (await appController.catalogScopeState()).status;
+      if (!mounted || mySeq != _seq) return;
+      // Local-first: paint cached page instantly (offline-capable), then
+      // refresh from network. Stale rows stay visible on refresh failure.
+      final cached = appController.readCachedProductPage(_filters);
+      if (cached.isNotEmpty) {
+        setState(() {
+          items = cached;
+          offset = items.length;
+          loading = false;
+          _servedFromCache = true;
+        });
+      } else {
+        // Synchronized catalog covers queries never visited (full local
+        // browsing, not just the last visited page).
+        final local = await appController.catalogProductsLocal(
+          categoryId: int.tryParse(categoryId ?? ''),
+          storeId: int.tryParse(widget.sellerId ?? ''),
+          search: _search.text.trim(),
+          sort: sort,
+          priceMin: priceMin,
+          priceMax: priceMax,
+          minRating: minRating,
+          inStock: inStock,
+          onlyOffers: widget.hasOffer || onlyOffers,
+          limit: AppConfig.productPageSize,
+        );
+        if (!mounted || mySeq != _seq) return;
+        if (local.isNotEmpty) {
+          setState(() {
+            items = local;
+            offset = items.length;
+            loading = false;
+            hasMore = local.length >= AppConfig.productPageSize;
+            _servedFromCache = true;
+          });
+        } else {
+          setState(() => loading = true);
+        }
+      }
     } else {
       setState(() => loadingMore = true);
     }
-    final result = await appController.api.products(
-      latitude: point.latitude,
-      longitude: point.longitude,
-      filters: _filters,
-    );
-    if (!mounted || mySeq != _seq) return; // stale response: ignore.
-    final next = result.dataMaps;
-    setState(() {
-      items = reset ? next : [...items, ...next];
-      offset = items.length;
-      hasMore = next.length >= AppConfig.productPageSize;
-      loading = false;
-      loadingMore = false;
-    });
+    try {
+      final result = await appController.api.products(
+        latitude: point.latitude,
+        longitude: point.longitude,
+        filters: _filters,
+      );
+      if (!mounted || mySeq != _seq) return; // stale response: ignore.
+      if (result.ok) {
+        final next = result.dataMaps;
+        if (reset && next.isNotEmpty) {
+          await appController.cacheProductPage(_filters, next);
+        }
+        setState(() {
+          // Dedupe by stable server id: offset pages over live backend data
+          // can repeat rows when items are inserted between requests.
+          items = reset ? next : J.appendUnique(items, next);
+          offset = items.length;
+          hasMore = next.length >= AppConfig.productPageSize;
+          loading = false;
+          loadingMore = false;
+          _servedFromCache = false;
+        });
+      } else {
+        // Refresh failed: fall back to the synchronized catalog (offline
+        // pagination over all synced rows), then keep cached rows (if any).
+        final local = reset
+            ? await appController.catalogProductsLocal(
+                categoryId: int.tryParse(categoryId ?? ''),
+                storeId: int.tryParse(widget.sellerId ?? ''),
+                search: _search.text.trim(),
+                sort: sort,
+                priceMin: priceMin,
+                priceMax: priceMax,
+                minRating: minRating,
+                inStock: inStock,
+                onlyOffers: widget.hasOffer || onlyOffers,
+                limit: AppConfig.productPageSize,
+              )
+            : await appController.catalogProductsLocal(
+                categoryId: int.tryParse(categoryId ?? ''),
+                storeId: int.tryParse(widget.sellerId ?? ''),
+                search: _search.text.trim(),
+                sort: sort,
+                priceMin: priceMin,
+                priceMax: priceMax,
+                minRating: minRating,
+                inStock: inStock,
+                onlyOffers: widget.hasOffer || onlyOffers,
+                limit: AppConfig.productPageSize,
+                offset: items.length,
+              );
+        if (!mounted || mySeq != _seq) return;
+        setState(() {
+          if (local.isNotEmpty) {
+            items = reset ? local : J.appendUnique(items, local);
+            offset = items.length;
+            hasMore = local.length >= AppConfig.productPageSize;
+            _servedFromCache = true;
+            loading = false;
+          } else {
+            // Nothing to show and nothing coming: stop spinning so the
+            // empty state (with status copy + retry) paints instead.
+            loading = false;
+            if (reset && items.isEmpty) _servedFromCache = false;
+          }
+          loadingMore = false;
+        });
+      }
+    } catch (_) {
+      if (!mounted || mySeq != _seq) return;
+      // Network threw (offline/timeout): same local-catalog fallback.
+      final local = await appController.catalogProductsLocal(
+        categoryId: int.tryParse(categoryId ?? ''),
+        storeId: int.tryParse(widget.sellerId ?? ''),
+        search: _search.text.trim(),
+        sort: sort,
+        priceMin: priceMin,
+        priceMax: priceMax,
+        minRating: minRating,
+        inStock: inStock,
+        onlyOffers: widget.hasOffer || onlyOffers,
+        limit: AppConfig.productPageSize,
+        offset: reset ? 0 : items.length,
+      );
+      if (!mounted || mySeq != _seq) return;
+      setState(() {
+        if (local.isNotEmpty) {
+          items = reset ? local : J.appendUnique(items, local);
+          offset = items.length;
+          hasMore = local.length >= AppConfig.productPageSize;
+          _servedFromCache = true;
+          loading = false;
+        } else {
+          loading = false;
+        }
+        loadingMore = false;
+      });
+    }
   }
 
   @override
@@ -295,102 +495,128 @@ class _ProductsScreenState extends State<ProductsScreen>
     ].where((e) => e).length;
     return Scaffold(
       body: Column(
-      children: [
-        // When embedded in a store page [hideHeader] is true: skip the global
-        // store-type tabs + filter button entirely. The store renders its own
-        // sections as tabs above.
-        if (!widget.hideHeader)
-        Container(
-          color: Colors.white,
-          padding: const EdgeInsetsDirectional.only(start: 8),
-          child: Row(
-            children: [
-              Expanded(child: _categoryTabs(app)),
-              Stack(
-                alignment: Alignment.topRight,
+        children: [
+          // When embedded in a store page [hideHeader] is true: skip the global
+          // store-type tabs + filter button entirely. The store renders its own
+          // sections as tabs above.
+          if (!widget.hideHeader)
+            Container(
+              color: Colors.white,
+              padding: const EdgeInsetsDirectional.only(start: 8),
+              child: Row(
                 children: [
-                  IconButton(
-                    onPressed: _openFilters,
-                    icon: const Icon(Icons.tune),
-                    tooltip: app.t('filters'),
-                  ),
-                  if (activeCount > 0)
-                    Positioned(
-                      right: 6,
-                      top: 6,
-                      child: Container(
-                        padding: const EdgeInsets.all(4),
-                        decoration: BoxDecoration(
-                          color: AppTheme.accentOrange,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 1.5),
-                        ),
-                        child: Text(
-                          '$activeCount',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 9,
-                            fontWeight: FontWeight.bold,
+                  Expanded(child: _categoryTabs(app)),
+                  Stack(
+                    alignment: Alignment.topRight,
+                    children: [
+                      IconButton(
+                        onPressed: _openFilters,
+                        icon: const Icon(Icons.tune),
+                        tooltip: app.t('filters'),
+                      ),
+                      if (activeCount > 0)
+                        Positioned(
+                          right: 6,
+                          top: 6,
+                          child: Container(
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: AppTheme.accentOrange,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: Colors.white,
+                                width: 1.5,
+                              ),
+                            ),
+                            child: Text(
+                              '$activeCount',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 9,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ),
                         ),
-                      ),
-                    ),
+                    ],
+                  ),
                 ],
               ),
-            ],
-          ),
-        ),
-        if (!widget.hideHeader) const Divider(height: 1),
-        Expanded(
-          child: loading
-              ? const Center(child: CircularProgressIndicator())
-              : items.isEmpty
-              ? EmptyState(message: app.t('no_products_found'))
-              : NotificationListener<ScrollNotification>(
-                  onNotification: (n) {
-                    if (n.metrics.pixels > n.metrics.maxScrollExtent - 240 &&
-                        !loadingMore &&
-                        hasMore) {
-                      _load();
-                    }
-                    return false;
-                  },
-                  child: LayoutBuilder(builder: (ctx, c){
-                    final count = c.maxWidth >= 900 ? 4 : c.maxWidth >= 600 ? 3 : 2;
-                    final aspect = c.maxWidth >= 600 ? 0.6 : 0.55;
-                    return GridView.builder(
-                    padding: const EdgeInsets.all(16),
-                    addRepaintBoundaries: true,
-                    addAutomaticKeepAlives: false,
-                    gridDelegate:
-                        SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: count,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          childAspectRatio: aspect,
-                        ),
-                    itemCount: items.length + (loadingMore ? 1 : 0),
-                    itemBuilder: (_, i) {
-                      if (i >= items.length)
-                        return const Center(child: CircularProgressIndicator());
-                      final product = items[i];
-                      return ProductCard(
-                        product: product,
-                        onTap: () {
-                          final slug = J.str(product['slug']);
-                          context.push(
-                            slug.isNotEmpty
-                                ? '/product/$slug'
-                                : '/product/${product['id']}',
-                          );
-                        },
-                        onAdd: () => addProductFromCatalog(context, product),
-                      );
+            ),
+          if (!widget.hideHeader) const Divider(height: 1),
+          OfflineBanner(stale: _servedFromCache),
+          const _CatalogSyncStrip(),
+          Expanded(
+            child: loading
+                ? const Center(child: CircularProgressIndicator())
+                : items.isEmpty
+                ? EmptyState(
+                    message: _emptyMessage(),
+                    actionLabel: app.t('retry'),
+                    onAction: () {
+                      if (_catalogStatus == CatalogScopeStatus.neverSynced ||
+                          _catalogStatus == CatalogScopeStatus.failed) {
+                        appController.syncCatalogNow();
+                      }
+                      _load(reset: true);
                     },
-                  );}),
-                ),
-        ),
-      ],
+                  )
+                : NotificationListener<ScrollNotification>(
+                    onNotification: (n) {
+                      if (n.metrics.pixels > n.metrics.maxScrollExtent - 240 &&
+                          !loadingMore &&
+                          hasMore) {
+                        _load();
+                      }
+                      return false;
+                    },
+                    child: LayoutBuilder(
+                      builder: (ctx, c) {
+                        final count = c.maxWidth >= 900
+                            ? 4
+                            : c.maxWidth >= 600
+                            ? 3
+                            : 2;
+                        final aspect = c.maxWidth >= 600 ? 0.6 : 0.55;
+                        return GridView.builder(
+                          padding: const EdgeInsets.all(16),
+                          addRepaintBoundaries: true,
+                          addAutomaticKeepAlives: false,
+                          gridDelegate:
+                              SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: count,
+                                mainAxisSpacing: 12,
+                                crossAxisSpacing: 12,
+                                childAspectRatio: aspect,
+                              ),
+                          itemCount: items.length + (loadingMore ? 1 : 0),
+                          itemBuilder: (_, i) {
+                            if (i >= items.length) {
+                              return const Center(
+                                child: CircularProgressIndicator(),
+                              );
+                            }
+                            final product = items[i];
+                            return ProductCard(
+                              product: product,
+                              onTap: () {
+                                final slug = J.str(product['slug']);
+                                context.push(
+                                  slug.isNotEmpty
+                                      ? '/product/$slug'
+                                      : '/product/${product['id']}',
+                                );
+                              },
+                              onAdd: () =>
+                                  addProductFromCatalog(context, product),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+          ),
+        ],
       ),
     );
   }
@@ -416,6 +642,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   int ratingCount = 0;
   int _imgIndex = 0;
   final _pageC = PageController();
+  bool _servedFromCache = false;
 
   @override
   void dispose() {
@@ -432,6 +659,37 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   Future<void> _load() async {
     final point = appController.browseCoords;
     final id = int.tryParse(widget.slug);
+
+    // Local-first: paint cached details instantly, then refresh. The
+    // synchronized catalog covers products never opened before (unlike the
+    // visit-scoped JSON cache); the network refresh below still revalidates.
+    if (product == null) {
+      final cached = appController.readCachedProductDetails(widget.slug);
+      if (cached != null) {
+        final variants = J.maps(cached['variants']);
+        setState(() {
+          product = cached;
+          variant = variants.isNotEmpty ? variants.first : cached;
+          loading = false;
+          _servedFromCache = true;
+        });
+      } else {
+        final local = await appController.catalogProductLocal(
+          id: id,
+          slug: id == null ? widget.slug : '',
+        );
+        if (local != null && mounted) {
+          final variants = J.maps(local['variants']);
+          setState(() {
+            product = local;
+            variant = variants.isNotEmpty ? variants.first : local;
+            loading = false;
+            _servedFromCache = true;
+          });
+        }
+      }
+    }
+
     final result = await appController.api.productById(
       latitude: point.latitude,
       longitude: point.longitude,
@@ -440,9 +698,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     );
     if (!result.ok) {
       if (!mounted) return;
+      // Keep cached row if available; show a retry button when nothing cached.
       setState(() {
-        loading = false;
-        error = result.message;
+        loading = product == null;
+        error = product == null ? result.message : null;
       });
       return;
     }
@@ -452,11 +711,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
               ? result.dataMaps.first
               : <String, dynamic>{});
     final variants = J.maps(data['variants']);
+    await appController.cacheProductDetails(widget.slug, data);
     if (!mounted) return;
     setState(() {
       product = data;
       variant = variants.isNotEmpty ? variants.first : data;
       loading = false;
+      _servedFromCache = false;
     });
     _loadExtras(data);
   }
@@ -469,8 +730,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     final results = await Future.wait([
       app.api
           .productRatings(productId: data['id'], limit: 5)
-          .timeout(const Duration(seconds: 12),
-              onTimeout: () => ApiResult({'status': 0}))
+          .timeout(
+            const Duration(seconds: 12),
+            onTimeout: () => ApiResult({'status': 0}),
+          )
           .catchError((_) => ApiResult({'status': 0})),
       if (tags.isNotEmpty)
         app.api
@@ -480,13 +743,17 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
               tagNames: tags,
               filters: {'limit': 10, 'in_stock': 1},
             )
-            .timeout(const Duration(seconds: 12),
-                onTimeout: () => ApiResult({'status': 0}))
+            .timeout(
+              const Duration(seconds: 12),
+              onTimeout: () => ApiResult({'status': 0}),
+            )
             .catchError((_) => ApiResult({'status': 0})),
       app.api
           .catalogOffers(productId: data['id'])
-          .timeout(const Duration(seconds: 12),
-              onTimeout: () => ApiResult({'status': 0}))
+          .timeout(
+            const Duration(seconds: 12),
+            onTimeout: () => ApiResult({'status': 0}),
+          )
           .catchError((_) => ApiResult({'status': 0})),
     ]);
     if (!mounted) return;
@@ -500,11 +767,15 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
             ? J.maps(r.dataMap['data'])
             : r.dataMaps;
         ratings = list;
-        ratingAvg = double.tryParse(
-                '${d['average'] ?? data['average_rating'] ?? ''}') ??
+        ratingAvg =
+            double.tryParse(
+              '${d['average'] ?? data['average_rating'] ?? ''}',
+            ) ??
             0;
-        ratingCount = int.tryParse(
-                '${d['count'] ?? d['total'] ?? data['rating_count'] ?? ''}') ??
+        ratingCount =
+            int.tryParse(
+              '${d['count'] ?? d['total'] ?? data['rating_count'] ?? ''}',
+            ) ??
             list.length;
       }
       if (s != null && s.ok) {
@@ -527,8 +798,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     final encoded = Uri.encodeComponent(text);
     final actions = <String, String>{
       'whatsapp': 'https://wa.me/?text=$encoded',
-      'telegram': 'https://t.me/share/url?url=${Uri.encodeComponent(link)}&text=${Uri.encodeComponent(name)}',
-      'facebook': 'https://www.facebook.com/sharer/sharer.php?u=${Uri.encodeComponent(link)}',
+      'telegram':
+          'https://t.me/share/url?url=${Uri.encodeComponent(link)}&text=${Uri.encodeComponent(name)}',
+      'facebook':
+          'https://www.facebook.com/sharer/sharer.php?u=${Uri.encodeComponent(link)}',
     };
     final choice = await showModalBottomSheet<String>(
       context: context,
@@ -553,7 +826,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.copy),
-              title: Text(app.t('copied') == 'copied' ? 'نسخ الرابط' : app.t('share_product')),
+              title: Text(
+                app.t('copied') == 'copied'
+                    ? 'نسخ الرابط'
+                    : app.t('share_product'),
+              ),
               onTap: () => Navigator.pop(ctx, 'copy'),
             ),
           ],
@@ -564,8 +841,9 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     if (choice == 'copy') {
       await Clipboard.setData(ClipboardData(text: link));
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(app.t('copied'))));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(app.t('copied'))));
       }
       return;
     }
@@ -580,7 +858,8 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     if (!app.isLoggedIn) {
       if (mounted) {
         context.push(
-            '/login?next=${Uri.encodeComponent('/product/${widget.slug}')}');
+          '/login?next=${Uri.encodeComponent('/product/${widget.slug}')}',
+        );
       }
       return;
     }
@@ -616,19 +895,26 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: Text(app.t('cancel'))),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(app.t('cancel')),
+            ),
             FilledButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: Text(app.t('submit_rating'))),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(app.t('submit_rating')),
+            ),
           ],
         ),
       ),
     );
     if (ok != true || !mounted) return;
     if (stars == 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(app.t('rating_required'))));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(app.t('rating_required'))));
+      return;
+    }
+    if (!await app.hasInternetAccess()) {
+      if (mounted) await showRequiresInternetDialog(context);
       return;
     }
     final res = await app.api.addProductRating({
@@ -638,7 +924,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(res.message.isNotEmpty ? res.message : app.t('rating_saved_successfully'))));
+      SnackBar(
+        content: Text(
+          res.message.isNotEmpty
+              ? res.message
+              : app.t('rating_saved_successfully'),
+        ),
+      ),
+    );
     if (res.ok) _loadExtras(product!);
   }
 
@@ -651,22 +944,23 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           shrinkWrap: true,
           padding: const EdgeInsets.all(16),
           children: [
-            Text(app.t('other_sellers'),
-                style:
-                    const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+            Text(
+              app.t('other_sellers'),
+              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+            ),
             const SizedBox(height: 8),
             ...offers.map(
               (o) => ListTile(
-                title: Text(J.str(
-                    o['store_name'] ?? o['seller_name'] ?? o['name'])),
+                title: Text(
+                  J.str(o['store_name'] ?? o['seller_name'] ?? o['name']),
+                ),
                 subtitle: o['price'] != null
                     ? Text(money(o['price'], app.currency, app.decimals))
                     : null,
                 trailing: Text(app.t('add_to_cart')),
                 onTap: () {
                   Navigator.pop(ctx);
-                  context.push(
-                      '/seller/${o['seller_id'] ?? o['id']}');
+                  context.push('/seller/${o['seller_id'] ?? o['id']}');
                 },
               ),
             ),
@@ -679,9 +973,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   @override
   Widget build(BuildContext context) {
     final app = appController;
-    if (loading)
+    if (loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    if (product == null || product!.isEmpty)
+    }
+    if (product == null || product!.isEmpty) {
       return Scaffold(
         appBar: AppBar(),
         body: EmptyState(
@@ -692,11 +987,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
             setState(() {
               loading = true;
               error = null;
+              _servedFromCache = false;
             });
             _load();
           },
         ),
       );
+    }
     final price = variantDisplayPrice(variant);
     final variants = J.maps(product!['variants']);
     final stock = J.i(variant?['stock']);
@@ -712,17 +1009,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
         actions: [
           ListenableBuilder(
             listenable: app,
-            builder: (_, __) => IconButton(
+            builder: (_, _) => IconButton(
               onPressed: () => context.push('/cart'),
               icon: Badge(
                 isLabelVisible: app.cartCount > 0,
                 backgroundColor: AppTheme.accentOrange,
                 label: Text(
                   '${app.cartCount}',
-                  style: const TextStyle(
-                    fontSize: 10,
-                    color: Colors.white,
-                  ),
+                  style: const TextStyle(fontSize: 10, color: Colors.white),
                 ),
                 child: const Icon(Icons.shopping_cart_outlined),
               ),
@@ -753,6 +1047,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       ),
       body: ListView(
         children: [
+          OfflineBanner(stale: _servedFromCache),
           // ---- Gallery with dots + badges ----
           Stack(
             clipBehavior: Clip.none,
@@ -769,8 +1064,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                         : PageView.builder(
                             controller: _pageC,
                             itemCount: images.length,
-                            onPageChanged: (i) =>
-                                setState(() => _imgIndex = i),
+                            onPageChanged: (i) => setState(() => _imgIndex = i),
                             itemBuilder: (_, i) => AppImage(
                               images[i],
                               placeholder: app.placeholder,
@@ -825,9 +1119,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           decoration: BoxDecoration(
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: const Color(0xFFDC2626),
-                            ),
+                            border: Border.all(color: const Color(0xFFDC2626)),
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
@@ -869,8 +1161,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           children: [
                             for (var i = 0; i < images.length; i++)
                               AnimatedContainer(
-                                duration:
-                                    const Duration(milliseconds: 200),
+                                duration: const Duration(milliseconds: 200),
                                 margin: const EdgeInsets.symmetric(
                                   horizontal: 3,
                                 ),
@@ -963,11 +1254,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                       Row(
                         children: [
                           Text(
-                            money(
-                              price.finalPrice,
-                              app.currency,
-                              app.decimals,
-                            ),
+                            money(price.finalPrice, app.currency, app.decimals),
                             style: const TextStyle(
                               fontSize: 22,
                               color: AppTheme.accentOrange,
@@ -977,11 +1264,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           const SizedBox(width: 8),
                           if (price.hasDiscount)
                             Text(
-                              money(
-                                price.original,
-                                app.currency,
-                                app.decimals,
-                              ),
+                              money(price.original, app.currency, app.decimals),
                               style: const TextStyle(
                                 decoration: TextDecoration.lineThrough,
                                 color: AppTheme.textSecondary,
@@ -1028,8 +1311,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                         spacing: 6,
                         runSpacing: 6,
                         children: [
-                          if (J.flag(product!['is_returnable'] ??
-                              product!['return_status']))
+                          if (J.flag(
+                            product!['is_returnable'] ??
+                                product!['return_status'],
+                          ))
                             _featureChip(
                               Icons.restart_alt_outlined,
                               app.t('returnable'),
@@ -1047,9 +1332,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                               Icons.delivery_dining_outlined,
                               app.t('delivery'),
                               AppTheme.accentOrange,
-                              bg: AppTheme.accentOrange.withValues(
-                                alpha: 0.1,
-                              ),
+                              bg: AppTheme.accentOrange.withValues(alpha: 0.1),
                             ),
                           if (!unlimited && stock <= 0)
                             _featureChip(
@@ -1098,22 +1381,18 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                       spacing: 8,
                       runSpacing: 8,
                       children: variants.map((item) {
-                        final helperLabel =
-                            AppController.variantLabelOf(
+                        final helperLabel = AppController.variantLabelOf(
                           item,
                           J.str(product!['name']),
                         );
                         final label = helperLabel.isEmpty
                             ? J.str(item['name'] ?? item['id'])
                             : helperLabel;
-                        final selected =
-                            '${item['id']}' == '${variant?['id']}';
+                        final selected = '${item['id']}' == '${variant?['id']}';
                         return GestureDetector(
-                          onTap: () =>
-                              setState(() => variant = item),
+                          onTap: () => setState(() => variant = item),
                           child: AnimatedContainer(
-                            duration:
-                                const Duration(milliseconds: 180),
+                            duration: const Duration(milliseconds: 180),
                             padding: const EdgeInsets.symmetric(
                               horizontal: 14,
                               vertical: 9,
@@ -1133,8 +1412,9 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                               boxShadow: selected
                                   ? [
                                       BoxShadow(
-                                        color: AppTheme.accentOrange
-                                            .withValues(alpha: 0.3),
+                                        color: AppTheme.accentOrange.withValues(
+                                          alpha: 0.3,
+                                        ),
                                         blurRadius: 8,
                                         offset: const Offset(0, 3),
                                       ),
@@ -1216,9 +1496,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                         )
                       : Column(
                           children: [
-                            for (var i = 0;
-                                i < ratings.take(3).length;
-                                i++) ...[
+                            for (
+                              var i = 0;
+                              i < ratings.take(3).length;
+                              i++
+                            ) ...[
                               if (i > 0) const Divider(height: 16),
                               _reviewTile(ratings.take(3).toList()[i]),
                             ],
@@ -1254,23 +1536,23 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   SizedBox(
                     height: 296,
                     child: ListView.separated(
-                      scrollDirection: Axis.horizontal,
-                      cacheExtent: 600,
+                      cacheExtent: 600, scrollDirection: Axis.horizontal,
                       itemCount: similar.length,
-                      separatorBuilder: (_, __) =>
-                          const SizedBox(width: 10),
+                      separatorBuilder: (_, _) => const SizedBox(width: 10),
                       itemBuilder: (_, i) => SizedBox(
                         width: 160,
                         child: ProductCard(
                           product: similar[i],
                           onTap: () {
                             final slug = J.str(similar[i]['slug']);
-                            context.push(slug.isNotEmpty
-                                ? '/product/$slug'
-                                : '/product/${similar[i]['id']}');
+                            context.push(
+                              slug.isNotEmpty
+                                  ? '/product/$slug'
+                                  : '/product/${similar[i]['id']}',
+                            );
                           },
-                          onAdd: () => addProductFromCatalog(
-                              context, similar[i]),
+                          onAdd: () =>
+                              addProductFromCatalog(context, similar[i]),
                         ),
                       ),
                     ),
@@ -1291,12 +1573,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     );
   }
 
-  Widget _featureChip(
-    IconData icon,
-    String label,
-    Color color, {
-    Color? bg,
-  }) {
+  Widget _featureChip(IconData icon, String label, Color color, {Color? bg}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
@@ -1355,7 +1632,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   ),
                 ),
               ),
-              if (trailing != null) trailing,
+              ?trailing,
             ],
           ),
           const SizedBox(height: 10),
@@ -1465,9 +1742,7 @@ class _CartBottomBarState extends State<_CartBottomBar> {
   void _fail(String message) {
     if (!mounted) return;
     setState(() => _optimistic = null);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    showCartError(context, message);
   }
 
   Future<void> _setQty(int next) async {
@@ -1495,7 +1770,10 @@ class _CartBottomBarState extends State<_CartBottomBar> {
         productPrice: widget.price,
         sellerId: J.sellerId(widget.product),
         storeName: app.storeNameOf(widget.product),
-            variantLabel: AppController.variantLabelOf(widget.variant, J.str(widget.product['name'])),
+        variantLabel: AppController.variantLabelOf(
+          widget.variant,
+          J.str(widget.product['name']),
+        ),
       );
       if (mySeq != _seq || !mounted) return;
       if (err == 'same_seller') {
@@ -1523,7 +1801,10 @@ class _CartBottomBarState extends State<_CartBottomBar> {
             productPrice: widget.price,
             sellerId: J.sellerId(widget.product),
             storeName: app.storeNameOf(widget.product),
-            variantLabel: AppController.variantLabelOf(widget.variant, J.str(widget.product['name'])),
+            variantLabel: AppController.variantLabelOf(
+              widget.variant,
+              J.str(widget.product['name']),
+            ),
             replaceSeller: true,
           );
           if (mySeq != _seq || !mounted) return;
@@ -1556,9 +1837,7 @@ class _CartBottomBarState extends State<_CartBottomBar> {
       decoration: BoxDecoration(
         color: Colors.white,
         border: Border(
-          top: BorderSide(
-            color: AppTheme.primaryNavy.withValues(alpha: 0.08),
-          ),
+          top: BorderSide(color: AppTheme.primaryNavy.withValues(alpha: 0.08)),
         ),
         boxShadow: [
           BoxShadow(
@@ -1573,17 +1852,14 @@ class _CartBottomBarState extends State<_CartBottomBar> {
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
           child: ListenableBuilder(
             listenable: app,
-            builder: (_, __) {
+            builder: (_, _) {
               final qty = _optimistic ?? app.cartQtyFor(_variantId);
               if (qty <= 0) {
                 return SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(
                     onPressed: widget.outOfStock ? null : () => _setQty(1),
-                    icon: const Icon(
-                      Icons.shopping_cart_outlined,
-                      size: 18,
-                    ),
+                    icon: const Icon(Icons.shopping_cart_outlined, size: 18),
                     label: Text(
                       '${app.t('add_to_cart')} • ${money(widget.price, app.currency, app.decimals)}',
                       maxLines: 1,
@@ -1594,10 +1870,7 @@ class _CartBottomBarState extends State<_CartBottomBar> {
               }
               return Row(
                 children: [
-                  _stepBtn(
-                    Icons.remove_rounded,
-                    onTap: () => _setQty(qty - 1),
-                  ),
+                  _stepBtn(Icons.remove_rounded, onTap: () => _setQty(qty - 1)),
                   Container(
                     margin: const EdgeInsets.symmetric(horizontal: 10),
                     padding: const EdgeInsets.symmetric(
@@ -1617,10 +1890,7 @@ class _CartBottomBarState extends State<_CartBottomBar> {
                       ),
                     ),
                   ),
-                  _stepBtn(
-                    Icons.add_rounded,
-                    onTap: () => _setQty(qty + 1),
-                  ),
+                  _stepBtn(Icons.add_rounded, onTap: () => _setQty(qty + 1)),
                   const SizedBox(width: 12),
                   Expanded(
                     child: FilledButton(

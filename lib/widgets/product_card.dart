@@ -7,6 +7,7 @@ import '../core/product_media.dart';
 import '../core/promo_price.dart';
 import 'app_image.dart';
 import 'closed_store_badge.dart';
+import 'requires_internet_dialog.dart';
 
 class ProductCard extends StatelessWidget {
   const ProductCard({
@@ -86,7 +87,7 @@ class ProductCard extends StatelessWidget {
                       right: 4,
                       child: ListenableBuilder(
                         listenable: app,
-                        builder: (_, __) {
+                        builder: (_, _) {
                           final fav = app.isLoggedIn &&
                               app.isFavorite(product['id']);
                           return Material(
@@ -355,9 +356,7 @@ class _CardAddControlState extends State<_CardAddControl> {
         if (mySeq != _seq || !mounted) return;
         setState(() => _optimistic = null);
         if (err != null && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(err)),
-          );
+          await showCartError(context, err);
         }
         return;
       }
@@ -401,15 +400,11 @@ class _CardAddControlState extends State<_CardAddControl> {
             replaceSeller: true,
           );
           if (mounted && retry != null) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(retry)),
-            );
+            await showCartError(context, retry);
           }
         }
       } else if (err != null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(err)),
-        );
+        await showCartError(context, err);
       }
     } catch (_) {
       if (mySeq != _seq || !mounted) return;
@@ -425,7 +420,7 @@ class _CardAddControlState extends State<_CardAddControl> {
     final app = appController;
     return ListenableBuilder(
       listenable: app,
-      builder: (_, __) {
+      builder: (_, _) {
         final qty = _optimistic ?? app.cartQtyFor(_variantId);
         if (qty <= 0) {
           return FilledButton(
