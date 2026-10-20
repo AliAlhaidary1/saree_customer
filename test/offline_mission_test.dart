@@ -80,10 +80,9 @@ Future<AppController> _controller(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  group('operation policy', () {
+   group('operation policy', () {
     test('financial and state-transition ops are online-only', () {
       for (final op in [
-        CustomerOp.editCart,
         CustomerOp.checkout,
         CustomerOp.createOrder,
         CustomerOp.initiatePayment,
@@ -104,6 +103,7 @@ void main() {
         CustomerOp.searchLocal,
         CustomerOp.toggleFavorite,
         CustomerOp.manageAddressesLocal,
+        CustomerOp.editCart,
       ]) {
         expect(OperationPolicy.isOnlineOnly(op), isFalse, reason: '$op');
       }

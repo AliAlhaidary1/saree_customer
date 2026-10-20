@@ -912,6 +912,8 @@
   "accept_terms_required": "يجب الموافقة على الشروط وسياسة الخصوصية",
   "i_agree_to": "أوافق على",
   "logout_confirm": "هل تريد تسجيل الخروج؟",
+  "exit_confirm": "هل تريد الخروج من التطبيق؟",
+  "exit_app": "خروج",
   "delete_address_confirm": "حذف هذا العنوان؟",
   "add_address_first": "أضف عنوان توصيل أولاً",
   "fill_required_fields": "أكمل الحقول المطلوبة",
@@ -1209,5 +1211,8 @@
   "catalog_sync_failed": "فشلت مزامنة الكتالوج — تم الاحتفاظ بالبيانات المحفوظة.",
   "catalog_incomplete": "قد يكون الكتالوج غير مكتمل.",
   "offline_images_title": "صور المنتجات دون إنترنت",
-  "offline_images_subtitle": "تنزيل المصغرات للتصفح دون إنترنت (يُفضّل Wi-Fi)."
+  "offline_images_subtitle": "تنزيل المصغرات للتصفح دون إنترنت (يُفضّل Wi-Fi).",
+  "checkout_groups": "مجموعات الطلبات",
+  "checkout_group": "مجموعة",
+  "cancel_not_available": "الإلغاء غير متاح"
 }

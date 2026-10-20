@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:drift/drift.dart';
+import 'package:drift/isolate.dart' show DriftRemoteException;
 import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart';
 
@@ -197,17 +198,35 @@ class CatalogDatabase extends _$CatalogDatabase {
 
   /// Opens + probes (migrations run). Closes its own handle on failure so
   /// callers (and Windows file locking) never inherit a broken connection.
+  ///
+  /// The database runs in a background isolate: every query (catalog walks,
+  /// FTS writes, store/product reads) is executed off the UI thread, so
+  /// scanning and syncing never drop frames. Errors raised in that isolate
+  /// arrive wrapped as [DriftRemoteException]; they are unwrapped so callers
+  /// (and [classifyOpenFailure]) see SQLite's real error and result code.
   static Future<CatalogDatabase> _openAndProbe(File file) async {
-    final db = CatalogDatabase(NativeDatabase(file));
+    final db = CatalogDatabase(NativeDatabase.createInBackground(file));
     try {
       await db.customSelect('SELECT 1;').getSingle();
       return db;
-    } catch (e) {
+    } catch (e, st) {
       try {
         await db.close();
       } catch (_) {}
-      rethrow;
+      Error.throwWithStackTrace(unwrapRemoteError(e), st);
     }
+  }
+
+  /// Drift wraps errors raised in a background isolate in one (or, for
+  /// migration failures, several nested) [DriftRemoteException]s. Collapses
+  /// any nesting so callers see SQLite's real error and result code.
+  @visibleForTesting
+  static Object unwrapRemoteError(Object error) {
+    var e = error;
+    while (e is DriftRemoteException) {
+      e = e.remoteCause;
+    }
+    return e;
   }
 
   /// In-memory database for tests.
@@ -284,6 +303,33 @@ class CatalogDao {
   static String ftsPhrase(String query) {
     final q = query.replaceAll('"', '""').trim();
     return '"$q"*';
+  }
+
+  /// SQL AND-clause that keeps rows whose raw payload carries a truthy JSON
+  /// flag [key] (accepting JSON `true`, numeric `1`, or string `'1'`). A
+  /// missing key extracts to NULL and passes (unknown never hides a row).
+  /// JSON1 is guaranteed by the bundled SQLite (verified by probe test).
+  static String _jsonFlagClause(String key) {
+    final path = '\$.$key';
+    return " AND (json_extract(p.payload,'$path') IS NULL "
+        "OR json_extract(p.payload,'$path') IN (1,'1','true'))";
+  }
+
+  /// True when at least one listed product in [scope] carries a non-null JSON
+  /// key [key] in its raw payload. Gates payload-only filters (sections) so
+  /// they degrade to a no-op instead of hiding every row when the field is
+  /// not part of the backend payload shape.
+  Future<bool> _payloadHasKey(String scope, String key) async {
+    final path = '\$.$key';
+    final row = await _db
+        .customSelect(
+          'SELECT 1 AS x FROM products WHERE scope = ? AND is_listed = 1 '
+          "AND json_extract(payload, '$path') IS NOT NULL LIMIT 1;",
+          variables: [Variable.withString(scope)],
+          readsFrom: {_db.products},
+        )
+        .getSingleOrNull();
+    return row != null;
   }
 
   /// Upserts one committed batch: products + variants + FTS rows, atomically.
@@ -489,8 +535,31 @@ class CatalogDao {
         .get();
   }
 
-  Future<Store?> getStoreById(String scope, int serverId) {
-    return (_db.select(_db.stores)
+  /// All scoped stores without paging. The stores table is small and always
+  /// fully walked, so offline callers page/filter/sort it in memory.
+  Future<List<Store>> allStores(String scope) {
+    return (_db.select(
+      _db.stores,
+    )..where((s) => s.scope.equals(scope))).get();
+  }
+
+  /// Store ids having at least one listed product in [categoryId]. Mirrors the
+  /// server's seller `type` filter semantics for offline store browsing.
+  Future<Set<int>> storeIdsWithCategory(String scope, int categoryId) async {
+    final expr = _db.products.storeId;
+    final q = _db.selectOnly(_db.products)
+      ..addColumns([expr])
+      ..where(
+        _db.products.scope.equals(scope) &
+            _db.products.isListed.equals(true) &
+            _db.products.categoryId.equals(categoryId),
+      )
+      ..groupBy([expr]);
+    final rows = await q.get();
+    return rows.map((r) => r.read(expr)).whereType<int>().toSet();
+  }
+
+  Future<Store?> getStoreById(String scope, int serverId) {    return (_db.select(_db.stores)
           ..where((s) => s.scope.equals(scope) & s.serverId.equals(serverId)))
         .getSingleOrNull();
   }
@@ -538,14 +607,18 @@ class CatalogDao {
     int? storeId,
     String search = '',
     String sort = '',
+    String sectionId = '',
+    String sellerSectionId = '',
     double? priceMin,
     double? priceMax,
     double? minRating,
     bool inStockOnly = false,
     bool offersOnly = false,
+    bool canDeliverOnly = false,
+    bool returnableOnly = false,
     int limit = 50,
     int offset = 0,
-  }) {
+  }) async {
     final where = StringBuffer('p.scope = ? AND p.is_listed = 1');
     final vars = <Variable>[Variable.withString(scope)];
     if (search.trim().isNotEmpty) {
@@ -577,6 +650,31 @@ class CatalogDao {
     }
     if (offersOnly) {
       where.write(' AND (p.has_offer IS NULL OR p.has_offer = 1)');
+    }
+    // Boolean flags that live only in the raw payload (no dedicated column):
+    // filtered via SQLite JSON1. A missing key means "unknown" and never
+    // hides a row (mirrors the column-based filters above).
+    if (canDeliverOnly) {
+      where.write(_jsonFlagClause('can_deliver'));
+    }
+    if (returnableOnly) {
+      where.write(_jsonFlagClause('is_returnable'));
+    }
+    // Store/section scoping: only applied when the cached payload actually
+    // carries the section key for this scope (graceful no-op otherwise, so
+    // the section tabs never show nothing just because the key is absent).
+    if (sellerSectionId.isNotEmpty &&
+        await _payloadHasKey(scope, 'seller_section_id')) {
+      where.write(
+        " AND CAST(json_extract(p.payload,'\$.seller_section_id') AS TEXT) = ?",
+      );
+      vars.add(Variable.withString(sellerSectionId));
+    }
+    if (sectionId.isNotEmpty && await _payloadHasKey(scope, 'section_id')) {
+      where.write(
+        " AND CAST(json_extract(p.payload,'\$.section_id') AS TEXT) = ?",
+      );
+      vars.add(Variable.withString(sectionId));
     }
     final order = switch (sort) {
       'low' => 'p.min_price ASC NULLS LAST, p.server_id ASC',
@@ -620,11 +718,15 @@ class CatalogDao {
     int? categoryId,
     int? storeId,
     String search = '',
+    String sectionId = '',
+    String sellerSectionId = '',
     double? priceMin,
     double? priceMax,
     double? minRating,
     bool inStockOnly = false,
     bool offersOnly = false,
+    bool canDeliverOnly = false,
+    bool returnableOnly = false,
   }) async {
     final where = StringBuffer('p.scope = ? AND p.is_listed = 1');
     final vars = <Variable>[Variable.withString(scope)];
@@ -657,6 +759,25 @@ class CatalogDao {
     }
     if (offersOnly) {
       where.write(' AND (p.has_offer IS NULL OR p.has_offer = 1)');
+    }
+    if (canDeliverOnly) {
+      where.write(_jsonFlagClause('can_deliver'));
+    }
+    if (returnableOnly) {
+      where.write(_jsonFlagClause('is_returnable'));
+    }
+    if (sellerSectionId.isNotEmpty &&
+        await _payloadHasKey(scope, 'seller_section_id')) {
+      where.write(
+        " AND CAST(json_extract(p.payload,'\$.seller_section_id') AS TEXT) = ?",
+      );
+      vars.add(Variable.withString(sellerSectionId));
+    }
+    if (sectionId.isNotEmpty && await _payloadHasKey(scope, 'section_id')) {
+      where.write(
+        " AND CAST(json_extract(p.payload,'\$.section_id') AS TEXT) = ?",
+      );
+      vars.add(Variable.withString(sectionId));
     }
     final from = search.trim().isNotEmpty
         ? 'products_fts AS f JOIN products AS p '

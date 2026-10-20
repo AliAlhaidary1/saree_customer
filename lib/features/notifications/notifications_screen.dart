@@ -7,7 +7,6 @@ import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
 import '../../core/notification_read.dart';
 import '../../widgets/app_image.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/ui_helpers.dart';
 
 /// Parity with front Notification.js + notificationRead.js + Header polling:
@@ -29,12 +28,12 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   int offset = 0;
   int total = 0;
   List<String> readIds = [];
-  bool _servedFromCache = false;
   static const _limit = 10;
   Timer? _markTimer;
   // Generation counter: a refresh (or account switch) invalidates in-flight
   // load-more continuations so stale pages can't append to the new list.
   int _seq = 0;
+  int _autoSeq = -1;
 
   @override
   void initState() {
@@ -68,12 +67,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           items = cached;
           total = cached.length;
           loading = false;
-          _servedFromCache = true;
         });
       }
     }
     final nextOffset = more ? offset + _limit : 0;
-    final res = await appController.api.notifications(limit: _limit, offset: nextOffset);
+    final res = await appController.api.notifications(
+      limit: _limit,
+      offset: nextOffset,
+    );
     if (!res.ok) {
       // Refresh failed: keep existing/cached rows with a stale badge instead
       // of replacing them with an empty list.
@@ -81,7 +82,6 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       setState(() {
         loading = false;
         loadingMore = false;
-        _servedFromCache = items.isNotEmpty;
       });
       return;
     }
@@ -95,7 +95,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       serverTotal = J.i(dataNode['total'] ?? serverTotal);
     }
     var reads = await NotificationRead.getReadIds(uid);
-    reads = await NotificationRead.prune(uid, serverTotal > 0 ? serverTotal : reads.length);
+    reads = await NotificationRead.prune(
+      uid,
+      serverTotal > 0 ? serverTotal : reads.length,
+    );
     if (!mounted) return;
     if (mySeq != _seq) return;
     if (!appController.isLoggedIn || appController.accountScope != scope) {
@@ -108,7 +111,6 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       readIds = reads;
       loading = false;
       loadingMore = false;
-      _servedFromCache = false;
     });
     // Persist only confirmed first-page rows (account-scoped fallback).
     if (!more && rows.isNotEmpty) {
@@ -117,7 +119,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     // Front marks the viewed page as read after 1200ms.
     _markTimer?.cancel();
     _markTimer = Timer(const Duration(milliseconds: 1200), () async {
-      final ids = items.map((e) => '${e['id']}').where((e) => e.isNotEmpty).toList();
+      final ids = items
+          .map((e) => '${e['id']}')
+          .where((e) => e.isNotEmpty)
+          .toList();
       final updated = await NotificationRead.markAsRead(uid, ids);
       if (mounted) setState(() => readIds = updated);
     });
@@ -199,9 +204,11 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         title: Text(app.t('notification')),
         actions: [
           if (items.any(_isUnread))
-            TextButton(
+            TextButton.icon(
               onPressed: _markAllRead,
-              child: Text(app.t('mark_all_read')),
+              icon: const Icon(Icons.done_all, size: 18),
+              style: TextButton.styleFrom(foregroundColor: Colors.white),
+              label: Text(app.t('mark_all_read')),
             ),
         ],
       ),
@@ -210,10 +217,13 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           : RefreshIndicator(
               onRefresh: () => _load(),
               child: items.isEmpty
-                  ? ListView(children: [EmptyState(message: app.t('no_notifications'))])
+                  ? ListView(
+                      children: [
+                        EmptyState(message: app.t('no_notifications')),
+                      ],
+                    )
                   : Column(
                       children: [
-                        if (_servedFromCache) OfflineBanner(stale: true),
                         Expanded(
                           child: NotificationListener<ScrollNotification>(
                             onNotification: (n) {
@@ -227,127 +237,154 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                               return false;
                             },
                             child: ListView.separated(
-                      padding: const EdgeInsets.all(12),
-                      itemCount: items.length + (total > items.length ? 1 : 0),
-                      separatorBuilder: (_, _) => const SizedBox(height: 8),
-                      itemBuilder: (_, i) {
-                        if (i >= items.length) {
-                          if (!loadingMore) {
-                            WidgetsBinding.instance.addPostFrameCallback((_) {
-                              if (mounted &&
-                                  !loadingMore &&
-                                  total > items.length) {
-                                _load(more: true);
-                              }
-                            });
-                          }
-                          return const Center(
-                            child: Padding(
-                              padding: EdgeInsets.all(12),
-                              child: SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              ),
-                            ),
-                          );
-                        }
-                        final item = items[i];
-                        final unread = _isUnread(item);
-                        final link = J.str(item['link_url'] ?? item['link']);
-                        final img = J.str(
-                            item['image_url'] ?? item['image'] ?? '');
-                        final date = J.str(item['date_sent'] ??
-                            item['date'] ??
-                            item['created_at'] ??
-                            '');
-                        return Card(
-                          color: unread
-                              ? app.accentColor.withValues(alpha: 0.05)
-                              : null,
-                          child: ListTile(
-                            leading: Stack(
-                              alignment: Alignment.topRight,
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(10),
-                                  child: SizedBox(
-                                    width: 52,
-                                    height: 52,
-                                    child: img.isNotEmpty
-                                        ? AppImage(img,
-                                            placeholder:
-                                                app.placeholder)
-                                        : Container(
-                                            color: app.accentColor
-                                                .withValues(alpha: 0.12),
-                                            child: Icon(
-                                                Icons.notifications_outlined,
-                                                color: app.accentColor),
+                              padding: const EdgeInsets.all(12),
+                              itemCount:
+                                  items.length + (total > items.length ? 1 : 0),
+                              separatorBuilder: (_, _) =>
+                                  const SizedBox(height: 8),
+                              itemBuilder: (_, i) {
+                                if (i >= items.length) {
+                                  if (!loadingMore) {
+                                    WidgetsBinding.instance
+                                        .addPostFrameCallback((_) {
+                                          if (mounted &&
+                                              !loadingMore &&
+                                              total > items.length &&
+                                              _autoSeq != _seq) {
+                                            _autoSeq = _seq;
+                                            _load(more: true);
+                                          }
+                                        });
+                                  }
+                                  return const Center(
+                                    child: Padding(
+                                      padding: EdgeInsets.all(12),
+                                      child: SizedBox(
+                                        width: 22,
+                                        height: 22,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                }
+                                final item = items[i];
+                                final unread = _isUnread(item);
+                                final link = J.str(
+                                  item['link_url'] ?? item['link'],
+                                );
+                                final img = J.str(
+                                  item['image_url'] ?? item['image'] ?? '',
+                                );
+                                final date = J.str(
+                                  item['date_sent'] ??
+                                      item['date'] ??
+                                      item['created_at'] ??
+                                      '',
+                                );
+                                return Card(
+                                  color: unread
+                                      ? app.accentColor.withValues(alpha: 0.05)
+                                      : null,
+                                  child: ListTile(
+                                    leading: Stack(
+                                      alignment: Alignment.topRight,
+                                      children: [
+                                        ClipRRect(
+                                          borderRadius: BorderRadius.circular(
+                                            10,
                                           ),
-                                  ),
-                                ),
-                                if (unread)
-                                  Container(
-                                    width: 12,
-                                    height: 12,
-                                    decoration: BoxDecoration(
-                                      color: app.accentColor,
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                          color: Colors.white, width: 2),
+                                          child: SizedBox(
+                                            width: 52,
+                                            height: 52,
+                                            child: img.isNotEmpty
+                                                ? AppImage(
+                                                    img,
+                                                    placeholder:
+                                                        app.placeholder,
+                                                  )
+                                                : Container(
+                                                    color: app.accentColor
+                                                        .withValues(
+                                                          alpha: 0.12,
+                                                        ),
+                                                    child: Icon(
+                                                      Icons
+                                                          .notifications_outlined,
+                                                      color: app.accentColor,
+                                                    ),
+                                                  ),
+                                          ),
+                                        ),
+                                        if (unread)
+                                          Container(
+                                            width: 12,
+                                            height: 12,
+                                            decoration: BoxDecoration(
+                                              color: app.accentColor,
+                                              shape: BoxShape.circle,
+                                              border: Border.all(
+                                                color: Colors.white,
+                                                width: 2,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
                                     ),
-                                  ),
-                              ],
-                            ),
-                            title: Text(
-                              J.str(item['title'] ??
-                                  item['message'] ??
-                                  item['id']),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontWeight: unread
-                                    ? FontWeight.bold
-                                    : FontWeight.normal,
-                              ),
-                            ),
-                            subtitle: Column(
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.start,
-                              children: [
-                                if (item['message'] != null &&
-                                    item['title'] != null)
-                                  Text(
-                                    J.str(item['message']),
-                                    maxLines: 3,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                if (date.isNotEmpty)
-                                  Padding(
-                                    padding:
-                                        const EdgeInsets.only(top: 4),
-                                    child: Text(
-                                      date,
-                                      style: const TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.grey),
+                                    title: Text(
+                                      J.str(
+                                        item['title'] ??
+                                            item['message'] ??
+                                            item['id'],
+                                      ),
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontWeight: unread
+                                            ? FontWeight.bold
+                                            : FontWeight.normal,
+                                      ),
                                     ),
+                                    subtitle: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        if (item['message'] != null &&
+                                            item['title'] != null)
+                                          Text(
+                                            J.str(item['message']),
+                                            maxLines: 3,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        if (date.isNotEmpty)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              top: 4,
+                                            ),
+                                            child: Text(
+                                              date,
+                                              style: const TextStyle(
+                                                fontSize: 11,
+                                                color: Colors.grey,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                    trailing: link.isNotEmpty
+                                        ? const Icon(
+                                            Icons.chevron_left,
+                                            size: 18,
+                                          )
+                                        : null,
+                                    onTap: link.isNotEmpty
+                                        ? () => _openLink(context, link)
+                                        : null,
                                   ),
-                              ],
+                                );
+                              },
                             ),
-                            trailing: link.isNotEmpty
-                                ? const Icon(Icons.chevron_left, size: 18)
-                                : null,
-                            onTap: link.isNotEmpty
-                                ? () => _openLink(context, link)
-                                : null,
-                          ),
-                        );
-                      },
-                    ),
                           ),
                         ),
                       ],
@@ -439,7 +476,9 @@ class _NotificationBellState extends State<NotificationBell>
       var reads = await NotificationRead.getReadIds(uid);
       reads = await NotificationRead.prune(uid, total);
       if (!mounted) return;
-      setState(() => unread = NotificationRead.computeUnreadCount(total, reads));
+      setState(
+        () => unread = NotificationRead.computeUnreadCount(total, reads),
+      );
     } catch (_) {}
   }
 
@@ -452,7 +491,6 @@ class _NotificationBellState extends State<NotificationBell>
       },
       icon: Badge(
         isLabelVisible: unread > 0,
-        backgroundColor: Colors.orange,
         label: Text(
           unread > 99 ? '99+' : '$unread',
           style: const TextStyle(fontSize: 10, color: Colors.white),

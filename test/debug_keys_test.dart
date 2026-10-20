@@ -42,7 +42,7 @@ void main() {
     router.push('/product/some-slug');
     await tester.pump(const Duration(seconds: 1));
     dumpKeys('after product push');
-    router.push('/cart');
+    router.go('/cart');
     await tester.pump(const Duration(seconds: 1));
     dumpKeys('after cart push');
   });

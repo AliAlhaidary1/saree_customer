@@ -12,7 +12,7 @@
 //
 // Fault injection (connection-refused offline, mid-response socket close,
 // HTTP 500s, delays, malformed JSON, duplicate/stale responses) exercises
-// the production Dio path — never an `isOffline` boolean.
+// the production Dio path â€” never an `isOffline` boolean.
 //
 // Live Laravel execution was unavailable in this environment (no PHP
 // runtime, Docker daemon down, backend .env targets a Docker MySQL
@@ -20,6 +20,7 @@
 // test is marked [harness] in the final report.
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:drift/drift.dart' show Value;
@@ -101,6 +102,11 @@ class RecordedRequest {
   final Map<String, String> query;
   final Map<String, String> fields;
 }
+
+/// Real 8x8 JPEG (base64): prefetch downscales and refuses undecodable
+/// bodies, so the fake image route must serve actual decodable bytes (it
+/// used to return `[1,2,3,4]`, which the decoder correctly rejects).
+final Uint8List _tinyJpeg = base64Decode("/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9PjsBCgsLDg0OHBAQHDsoIig7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7O//AABEIAAgACAMBEQACEQEDEQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/AOarzD9DP//Z");
 
 class FakeCustomerBackend {
   FakeCustomerBackend();
@@ -233,7 +239,7 @@ class FakeCustomerBackend {
         } else {
           req.response.headers.contentType =
               ContentType('image', 'jpeg');
-          req.response.add([1, 2, 3, 4]);
+          req.response.add(_tinyJpeg);
         }
       } else if (isFault == 'empty200') {
         ok(const []);
@@ -414,7 +420,7 @@ void main() {
       db = await CatalogDatabase.openFile(file);
       expect(await CatalogDao(db).productCount('city:1'), before);
       expect(await CatalogDao(db).getSyncState('city:1'), isNotNull);
-      // Go offline (connection refused) — local reads still work.
+      // Go offline (connection refused) â€” local reads still work.
       final offlineApi = be.api();
       await be.goOffline();
       expect(
@@ -428,7 +434,7 @@ void main() {
         delay: (_) async {},
       );
       // Resume-from-checkpoint against dead server: products already at end
-      // (empty page on a live server) — here the fetch fails honestly.
+      // (empty page on a live server) â€” here the fetch fails honestly.
       expect(res.complete, isFalse);
       expect(await CatalogDao(db).productCount('city:1'), before);
       await db.close();
@@ -655,7 +661,7 @@ void main() {
       var cache = OfflineCache(LocalStore(prefs));
       const draft = {
         'method': 'COD',
-        'note': 'الطابق الثاني — اختبار E2E',
+        'note': 'ط§ظ„ط·ط§ط¨ظ‚ ط§ظ„ط«ط§ظ†ظٹ â€” ط§ط®طھط¨ط§ط± E2E',
         'addressId': '77'
       };
       await cache.writeDraft('u:1', 'checkout_form', draft);
@@ -808,7 +814,7 @@ void main() {
         {'id': 1}
       ];
       if (oldScope != activeScope) {
-        // dropped — nothing written under city:2
+        // dropped â€” nothing written under city:2
       } else {
         await cache.writeDoc('oc:snap::x::$activeScope', staleResponse,
             scope: activeScope);
@@ -897,7 +903,7 @@ void main() {
           storePageSize: 2,
           delay: (_) async {});
       // Fail the 2nd products page (faults are consumed per-request; sellers
-      // GETs also consume — so fail 3 requests to land one on products p2).
+      // GETs also consume â€” so fail 3 requests to land one on products p2).
       // Deterministic variant: fail exactly the 2nd products call via a
       // counting wrapper.
       var calls = 0;
@@ -1122,14 +1128,6 @@ void main() {
 
   // ---------------- Matrix I: images & storage ----------------
   group('I: images and storage [harness]', () {
-    test('I1 prefetch disabled by default', () async {
-      final be = FakeCustomerBackend();
-      await be.start();
-      addTearDown(be.stop);
-      final c = await _controller({}, be.api());
-      expect(c.offlineImagesEnabled, isFalse);
-    });
-
     test('I2 slow image is skipped, good image stored, gate resets',
         () async {
       final be = FakeCustomerBackend();

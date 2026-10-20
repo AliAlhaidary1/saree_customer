@@ -1,3 +1,4 @@
+import 'package:drift/isolate.dart' show DriftRemoteException;
 import 'package:sqlite3/sqlite3.dart';
 
 /// How a database open failure must be handled by [CatalogDatabase.openFile].
@@ -22,8 +23,14 @@ enum OpenFailureKind {
 /// * 3 PERM, 5 BUSY, 6 LOCKED, 7 NOMEM, 8 READONLY, 10 IOERR, 13 FULL,
 ///   14 CANTOPEN, anything else, non-SQLite errors → transient.
 OpenFailureKind classifyOpenFailure(Object error) {
-  if (error is SqliteException) {
-    switch (error.resultCode) {
+  // Errors raised in the background isolate arrive wrapped; collapse nesting
+  // so SQLite's result code is visible.
+  var e = error;
+  while (e is DriftRemoteException) {
+    e = e.remoteCause;
+  }
+  if (e is SqliteException) {
+    switch (e.resultCode) {
       case 11: // SQLITE_CORRUPT
       case 26: // SQLITE_NOTADB
         return OpenFailureKind.corruption;

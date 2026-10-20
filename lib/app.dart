@@ -1,13 +1,11 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:go_router/go_router.dart';
 
 import 'core/app_controller.dart';
 import 'core/app_theme.dart';
 import 'core/json_util.dart';
-import 'core/search_scope.dart';
 import 'features/account/account_screens.dart';
 import 'features/akhdimni/akhdimni_screens.dart';
 import 'features/assistant/assistant_screen.dart';
@@ -21,6 +19,7 @@ import 'features/more/more_screens.dart';
 import 'features/notifications/notifications_screen.dart';
 import 'features/products/categories_screen.dart';
 import 'features/products/products_screens.dart';
+import 'widgets/brand_header.dart';
 import 'widgets/ui_helpers.dart';
 
 GoRouter buildRouter() {
@@ -453,9 +452,22 @@ class AppShell extends StatelessWidget {
     return AppTheme.brandNameAr;
   }
 
-  /// Orders renders its own AppBar (title + actions), so the brand header
-  /// must not stack on top of it. Haraj now uses the shared brand header.
-  bool get _hasOwnAppBar => location == '/orders';
+  /// Pages that render their own AppBar must not stack the shell brand header
+  /// on top of them. Keep this list explicit so a new standalone AppBar page
+  /// only needs a single entry here.
+  static const _ownAppBarPaths = <String>{'/orders'};
+
+  bool get _hasOwnAppBar => _ownAppBarPaths.contains(location);
+
+  /// Search exists only on searchable pages (home, products, haraj).
+  Widget? _headerSearchFor(String location) {
+    if (location == '/') return const HeaderSearchBar();
+    if (location.startsWith('/products')) {
+      return const HeaderSearchBar(onProducts: true);
+    }
+    if (location == '/haraj') return const HeaderSearchBar(onHaraj: true);
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -468,33 +480,58 @@ class AppShell extends StatelessWidget {
         ),
       );
     }
-    return Scaffold(
-      body: Column(
-        children: [
-          if (!_hasOwnAppBar)
-            _BrandHeader(app: app, title: _brandTitle(), location: location),
-          Expanded(child: child),
-        ],
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+        statusBarBrightness: Brightness.dark,
       ),
-      floatingActionButton: FloatingActionButton(
-        heroTag: 'assistant_fab',
-        mini: true,
-        backgroundColor: AppTheme.accentOrange,
-        tooltip: app.t('assistant_title'),
-        onPressed: () => context.push('/assistant'),
-        child: const Icon(Icons.smart_toy_outlined, color: Colors.white),
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: index,
-        onDestinationSelected: (i) => context.go(tabs[i].path),
-        destinations: [
-          for (final tab in tabs)
-            NavigationDestination(
-              icon: Icon(tab.icon),
-              selectedIcon: Icon(tab.selectedIcon),
-              label: app.t(tab.labelKey),
+      child: Scaffold(
+        backgroundColor: AppTheme.primaryNavy,
+        body: Column(
+          children: [
+            if (!_hasOwnAppBar)
+              BrandHeader(
+                app: app,
+                title: _brandTitle(),
+                searchChild: _headerSearchFor(location),
+              ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 24),
+                child: ClipRRect(
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(48),
+                  ),
+                  // Material (not Container): ListTile paints background/ink
+                  // on the nearest Material ancestor; a bare ColoredBox would
+                  // hide those and trips a framework assertion.
+                  child: Material(color: AppTheme.surfaceGrey, child: child),
+                ),
+              ),
             ),
-        ],
+          ],
+        ),
+        floatingActionButton: FloatingActionButton(
+          heroTag: 'assistant_fab',
+          mini: true,
+          backgroundColor: AppTheme.accentOrange,
+          tooltip: app.t('assistant_title'),
+          onPressed: () => context.push('/assistant'),
+          child: const Icon(Icons.smart_toy_outlined, color: Colors.white),
+        ),
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: index,
+          onDestinationSelected: (i) => context.go(tabs[i].path),
+          destinations: [
+            for (final tab in tabs)
+              NavigationDestination(
+                icon: Icon(tab.icon),
+                selectedIcon: Icon(tab.selectedIcon),
+                label: app.t(tab.labelKey),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -508,271 +545,29 @@ class AppTab {
   final IconData selectedIcon;
 }
 
-/// The single page-aware search field (under the app header).
-/// Visible only on home + products; searches the page you are on.
-class _HeaderSearchBar extends StatefulWidget {
-  const _HeaderSearchBar({required this.onProducts, this.onHaraj = false});
-  final bool onProducts;
-  final bool onHaraj;
-
-  @override
-  State<_HeaderSearchBar> createState() => _HeaderSearchBarState();
-}
-
-class _HeaderSearchBarState extends State<_HeaderSearchBar> {
-  final _ctrl = TextEditingController();
-  Timer? _deb;
-
-  @override
-  void dispose() {
-    _deb?.cancel();
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  void _submit(String raw) {
-    final q = raw.trim();
-    if (widget.onProducts) {
-      headerSearch.submitProducts(q);
-    } else if (widget.onHaraj) {
-      headerSearch.submitHaraj(q);
-    } else if (q.isNotEmpty) {
-      context.push('/products?search=${Uri.encodeComponent(q)}');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final app = appController;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      height: 44,
-      decoration: BoxDecoration(
-        color: AppTheme.backgroundWhite,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.search,
-            color: AppTheme.primaryNavy.withValues(alpha: 0.5),
-            size: 22,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: TextField(
-              controller: _ctrl,
-              textInputAction: TextInputAction.search,
-              onSubmitted: _submit,
-              onChanged: (_) {
-                // Debounced live search while on the products/haraj page.
-                if (!widget.onProducts && !widget.onHaraj) return;
-                _deb?.cancel();
-                _deb = Timer(
-                  const Duration(milliseconds: 450),
-                  () => _submit(_ctrl.text),
-                );
-              },
-              decoration: InputDecoration(
-                hintText: widget.onHaraj
-                    ? app.t('search_in_haraj')
-                    : app.t('i_am_looking_for'),
-                hintStyle: TextStyle(
-                  color: AppTheme.textSecondary,
-                  fontSize: 14,
-                ),
-                filled: false,
-                isDense: true,
-                contentPadding: EdgeInsets.zero,
-                border: InputBorder.none,
-                enabledBorder: InputBorder.none,
-                focusedBorder: InputBorder.none,
-                disabledBorder: InputBorder.none,
-              ),
-            ),
-          ),
-          InkWell(
-            onTap: () => context.push('/search'),
-            borderRadius: BorderRadius.circular(8),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: AppTheme.accentOrange.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.search_outlined,
-                    size: 14,
-                    color: AppTheme.accentOrange,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    app.t('search'),
-                    style: const TextStyle(
-                      color: AppTheme.accentOrange,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BrandHeader extends StatelessWidget {
-  const _BrandHeader({
-    required this.app,
-    required this.title,
-    required this.location,
-  });
-  final AppController app;
-  final String title;
-  final String location;
-
-  /// Search exists only on searchable pages (home, products, haraj).
-  /// Cart/account/orders never show it — like the web header.
-  bool get _searchable =>
-      location == '/' ||
-      location.startsWith('/products') ||
-      location == '/haraj';
-
-  bool get _onProducts => location.startsWith('/products');
-
-  bool get _onHaraj => location == '/haraj';
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: AppTheme.primaryNavy,
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(4),
-                    decoration: BoxDecoration(
-                      color: AppTheme.backgroundWhite,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child:
-                          app.brand.logoUrl != null &&
-                              app.brand.logoUrl!.isNotEmpty
-                          ? Image.network(
-                              app.brand.logoUrl!,
-                              width: 32,
-                              height: 32,
-                              fit: BoxFit.contain,
-                              errorBuilder: (_, _, _) => Image.asset(
-                                'assets/brand/sareemart-logo.png',
-                                width: 32,
-                                height: 32,
-                                errorBuilder: (_, _, _) => const Icon(
-                                  Icons.shopping_cart_rounded,
-                                  color: AppTheme.accentOrange,
-                                  size: 26,
-                                ),
-                              ),
-                            )
-                          : Image.asset(
-                              'assets/brand/sareemart-logo.png',
-                              width: 32,
-                              height: 32,
-                              errorBuilder: (_, _, _) => Image.asset(
-                                'assets/brand/sareemart-mark.png',
-                                width: 32,
-                                height: 32,
-                                errorBuilder: (_, _, _) => const Icon(
-                                  Icons.shopping_cart_rounded,
-                                  color: AppTheme.accentOrange,
-                                  size: 26,
-                                ),
-                              ),
-                            ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: const TextStyle(
-                        color: AppTheme.backgroundWhite,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 17,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  // Notification bell with unread count (parity with front Header)
-                  const NotificationBell(),
-                  // Cart shortcut in the header. Wrapped in its own listener
-                  // so the badge updates on every cart change.
-                  ListenableBuilder(
-                    listenable: app,
-                    builder: (_, _) => IconButton(
-                      onPressed: () => context.push('/cart'),
-                      icon: Badge(
-                        isLabelVisible: app.cartCount > 0,
-                        backgroundColor: AppTheme.accentOrange,
-                        label: Text(
-                          '${app.cartCount}',
-                          style: const TextStyle(
-                            fontSize: 10,
-                            color: Colors.white,
-                          ),
-                        ),
-                        child: const Icon(
-                          Icons.shopping_cart_outlined,
-                          color: AppTheme.backgroundWhite,
-                        ),
-                      ),
-                      tooltip: app.t('cart'),
-                    ),
-                  ),
-                  // My-account lives here now (bottom bar hosts Akhdimni).
-                  IconButton(
-                    onPressed: () => context.push('/account'),
-                    icon: const Icon(
-                      Icons.person_outline,
-                      color: AppTheme.backgroundWhite,
-                    ),
-                    tooltip: app.t('my_account'),
-                  ),
-                ],
-              ),
-              // Single page-aware search bar: only on home/products,
-              // searching the page you are on.
-              if (_searchable) const SizedBox(height: 10),
-              if (_searchable)
-                _HeaderSearchBar(onProducts: _onProducts, onHaraj: _onHaraj),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class SareemartCustomerApp extends StatelessWidget {
+class SareemartCustomerApp extends StatefulWidget {
   const SareemartCustomerApp({super.key, required this.router});
   final GoRouter router;
 
   @override
+  State<SareemartCustomerApp> createState() => _SareemartCustomerAppState();
+}
+
+class _SareemartCustomerAppState extends State<SareemartCustomerApp> {
+  late final AppBackButtonDispatcher _backDispatcher = AppBackButtonDispatcher(
+    widget.router,
+  );
+
+  @override
   Widget build(BuildContext context) {
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+        statusBarBrightness: Brightness.dark,
+      ),
+    );
+    final router = widget.router;
     // Chrome-only rebuilds (locale/brand/theme). Cart quantity changes,
     // shop revalidation, and badge ticks rebuild their own small scopes.
     return ListenableBuilder(
@@ -795,7 +590,10 @@ class SareemartCustomerApp extends StatelessWidget {
             GlobalWidgetsLocalizations.delegate,
             GlobalCupertinoLocalizations.delegate,
           ],
-          routerConfig: router,
+          routeInformationProvider: router.routeInformationProvider,
+          routeInformationParser: router.routeInformationParser,
+          routerDelegate: router.routerDelegate,
+          backButtonDispatcher: _backDispatcher,
           builder: (context, child) => Directionality(
             textDirection: appController.i18n.direction,
             child: child ?? const SizedBox.shrink(),
@@ -804,5 +602,58 @@ class SareemartCustomerApp extends StatelessWidget {
         );
       },
     );
+  }
+}
+
+/// Root back-button dispatcher that keeps the Android/system back button
+/// inside the app.
+///
+/// go_router only consults a [ShellRoute]'s nested navigator when it can pop
+/// (`_findCurrentNavigator`), so on a single-page tab like `/haraj` the back
+/// press falls through to the root navigator, returns "not handled", and
+/// Android closes the app. When nothing could be popped, this returns to the
+/// home tab instead. From home, exiting requires explicit confirmation.
+class AppBackButtonDispatcher extends RootBackButtonDispatcher {
+  AppBackButtonDispatcher(this.router);
+
+  final GoRouter router;
+  bool _askingExit = false;
+
+  @override
+  Future<bool> didPopRoute() async {
+    final handled = await super.didPopRoute();
+    if (handled) return true;
+    final location = router.routerDelegate.currentConfiguration.uri.path;
+    if (location != '/') {
+      router.go('/');
+      return true;
+    }
+    // On the home tab: ask before actually leaving the app.
+    if (_askingExit) return true;
+    final context = router.routerDelegate.navigatorKey.currentContext;
+    if (context == null || !context.mounted) return false;
+    _askingExit = true;
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(appController.t('exit_app')),
+          content: Text(appController.t('exit_confirm')),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: Text(appController.t('cancel')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text(appController.t('exit_app')),
+            ),
+          ],
+        ),
+      );
+      return confirmed != true;
+    } finally {
+      _askingExit = false;
+    }
   }
 }

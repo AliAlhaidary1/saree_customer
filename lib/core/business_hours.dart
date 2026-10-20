@@ -4,11 +4,15 @@ class BusinessHoursSlot {
   BusinessHoursSlot({
     required this.isOpen,
     this.nextOpeningAt,
+    this.openingTime,
+    this.closingTime,
     this.storeName,
     this.sellerId,
   });
   final bool isOpen;
   final String? nextOpeningAt;
+  final String? openingTime;
+  final String? closingTime;
   final String? storeName;
   final String? sellerId;
 
@@ -19,6 +23,8 @@ class BusinessHoursSlot {
     return BusinessHoursSlot(
       isOpen: m['is_open'] == true || m['is_open'] == 1 || m['is_open'] == '1',
       nextOpeningAt: m['next_opening_at']?.toString(),
+      openingTime: m['opening_time']?.toString(),
+      closingTime: m['closing_time']?.toString(),
       storeName: J.str(m['store_name']).isEmpty ? null : J.str(m['store_name']),
       sellerId: m['seller_id']?.toString() ?? m['id']?.toString(),
     );

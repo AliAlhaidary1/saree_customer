@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:dio/dio.dart';
@@ -13,7 +14,6 @@ import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../core/search_scope.dart';
 import '../../widgets/app_image.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
 
@@ -46,6 +46,8 @@ class _HarajListScreenState extends State<HarajListScreen> {
   // Generation counter: every filter-affecting load bumps it, so late
   // responses from older queries/filters can never overwrite newer results.
   int _seq = 0;
+  // Auto-fill may fire at most once per generation (see home/sellers).
+  int _autoSeq = -1;
 
   @override
   void initState() {
@@ -88,8 +90,6 @@ class _HarajListScreenState extends State<HarajListScreen> {
     };
   }
 
-  bool _servedFromCache = false;
-
   /// Snapshot name: my-ads are account-scoped, the public feed is global.
   String get _snapshotName => widget.mine ? 'haraj_mine' : 'haraj_feed';
 
@@ -113,7 +113,6 @@ class _HarajListScreenState extends State<HarajListScreen> {
           page = 1;
           lastPage = _intOf(snap['lastPage'], 1);
           loading = false;
-          _servedFromCache = true;
         });
       } else {
         setState(() {
@@ -123,34 +122,51 @@ class _HarajListScreenState extends State<HarajListScreen> {
       }
     }
     try {
-      final posts = widget.mine
-          ? await appController.api.harajMyPosts(_params(1))
-          : await appController.api.harajPosts(_params(1));
-      final cats = await appController.api.harajCategories();
+      // Categories are reference data: fetch them only once per screen
+      // lifetime instead of on every filter/search keystroke (halves the
+      // requests per interaction). The posts request is bounded so a stalled
+      // network falls back to the painted snapshot instead of spinning.
+      final needCats = categories.isEmpty;
+      Future<ApiResult> bounded(Future<ApiResult> f) => f
+          .timeout(
+            const Duration(seconds: 10),
+            onTimeout: () => ApiResult({'status': 0}),
+          )
+          .catchError((_) => ApiResult({'status': 0}));
+      final results = await Future.wait([
+        bounded(
+          widget.mine
+              ? appController.api.harajMyPosts(_params(1))
+              : appController.api.harajPosts(_params(1)),
+        ),
+        if (needCats) bounded(appController.api.harajCategories()),
+      ]);
+      final posts = results[0];
+      final cats = needCats && results.length > 1 ? results[1] : null;
       if (!mounted || mySeq != _seq) return;
       if (!posts.ok) {
         setState(() {
           loading = false;
-          _servedFromCache = items.isNotEmpty;
         });
         return;
       }
       final hasFilters = _hasActiveFilters;
       setState(() {
         items = posts.dataMaps;
-        if (cats.ok && cats.dataMaps.isNotEmpty) categories = cats.dataMaps;
+        if (cats != null && cats.ok && cats.dataMaps.isNotEmpty) {
+          categories = cats.dataMaps;
+        }
         page = 1;
         lastPage = _intOf(
           posts.raw['last_page'] ?? posts.dataMap['last_page'],
           1,
         );
         loading = false;
-        _servedFromCache = false;
       });
-      if (!hasFilters && (posts.ok || cats.ok)) {
+      if (!hasFilters && (posts.ok || (cats?.ok ?? false))) {
         await _writeSnapshot(_snapshotName, {
           'items': posts.dataMaps,
-          'categories': cats.dataMaps,
+          'categories': cats != null && cats.ok ? cats.dataMaps : categories,
           'lastPage': _intOf(
             posts.raw['last_page'] ?? posts.dataMap['last_page'],
             1,
@@ -161,7 +177,6 @@ class _HarajListScreenState extends State<HarajListScreen> {
       if (mounted) {
         setState(() {
           loading = false;
-          _servedFromCache = items.isNotEmpty;
         });
       }
     }
@@ -176,9 +191,16 @@ class _HarajListScreenState extends State<HarajListScreen> {
     final nextPage = page + 1;
     setState(() => loadingMore = true);
     try {
-      final posts = widget.mine
-          ? await appController.api.harajMyPosts(_params(nextPage))
-          : await appController.api.harajPosts(_params(nextPage));
+      Future<ApiResult> next() =>
+          (widget.mine
+                  ? appController.api.harajMyPosts(_params(nextPage))
+                  : appController.api.harajPosts(_params(nextPage)))
+              .timeout(
+                const Duration(seconds: 10),
+                onTimeout: () => ApiResult({'status': 0}),
+              )
+              .catchError((_) => ApiResult({'status': 0}));
+      final posts = await next();
       if (!mounted) return;
       if (!posts.ok) {
         if (mounted) setState(() => loadingMore = false);
@@ -414,7 +436,8 @@ class _HarajListScreenState extends State<HarajListScreen> {
 
   Widget _categoryTiles(AppController app) {
     return ListView.separated(
-      cacheExtent: 600, padding: const EdgeInsets.symmetric(horizontal: 16),
+      scrollCacheExtent: ScrollCacheExtent.pixels(250),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       scrollDirection: Axis.horizontal,
       itemCount: categories.length + 1,
       separatorBuilder: (_, _) => const SizedBox(width: 14),
@@ -557,6 +580,7 @@ class _HarajListScreenState extends State<HarajListScreen> {
       ),
     );
     if (ok != true) return;
+    if (!mounted) return;
     if (!await _needInternet(context)) return;
     final res = await appController.api.harajDelete(id);
     if (!mounted) return;
@@ -589,6 +613,7 @@ class _HarajListScreenState extends State<HarajListScreen> {
       ),
     );
     if (ok != true) return;
+    if (!mounted) return;
     if (!await _needInternet(context)) return;
     final res = await appController.api.harajMarkSold(id);
     if (!mounted) return;
@@ -625,7 +650,8 @@ class _HarajListScreenState extends State<HarajListScreen> {
                       : context.push(
                           '/login?next=${Uri.encodeComponent('/haraj/create')}',
                         ),
-                  icon: const Icon(Icons.add),
+                  icon: const Icon(Icons.add_outlined),
+                  tooltip: app.t('new_haraj'),
                 ),
               ],
             )
@@ -635,229 +661,241 @@ class _HarajListScreenState extends State<HarajListScreen> {
         child: CustomScrollView(
           slivers: [
             if (widget.mine)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-              sliver: SliverToBoxAdapter(
-                child: SegmentedButton<int>(
-                  segments: [
-                    ButtonSegment(
-                      value: 0,
-                      label: Text(app.t('haraj_tab_all')),
-                    ),
-                    ButtonSegment(
-                      value: 1,
-                      label: Text(app.t('haraj_tab_active')),
-                    ),
-                    ButtonSegment(
-                      value: 2,
-                      label: Text(app.t('haraj_tab_sold')),
-                    ),
-                  ],
-                  selected: {mineTab},
-                  onSelectionChanged: (s) {
-                    setState(() => mineTab = s.first);
-                    _load(reset: true);
-                  },
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                sliver: SliverToBoxAdapter(
+                  child: SegmentedButton<int>(
+                    segments: [
+                      ButtonSegment(
+                        value: 0,
+                        label: Text(app.t('haraj_tab_all')),
+                      ),
+                      ButtonSegment(
+                        value: 1,
+                        label: Text(app.t('haraj_tab_active')),
+                      ),
+                      ButtonSegment(
+                        value: 2,
+                        label: Text(app.t('haraj_tab_sold')),
+                      ),
+                    ],
+                    selected: {mineTab},
+                    onSelectionChanged: (s) {
+                      setState(() => mineTab = s.first);
+                      _load(reset: true);
+                    },
+                  ),
                 ),
               ),
-            ),
-          SliverToBoxAdapter(child: _topSection(app)),
-          SliverToBoxAdapter(child: OfflineBanner(stale: _servedFromCache)),
-          if (loading)
-            const SliverFillRemaining(
-              hasScrollBody: false,
-              child: Center(child: CircularProgressIndicator()),
-            )
-          else if (items.isEmpty)
-            SliverFillRemaining(
-              hasScrollBody: false,
-              child: EmptyState(
-                icon: Icons.campaign_outlined,
-                message: widget.mine
-                    ? app.t('haraj_my_posts_hint')
-                    : app.t('no_haraj_posts'),
-                actionLabel: app.isLoggedIn ? app.t('new_haraj') : null,
-                onAction: app.isLoggedIn
-                    ? () => context.push('/haraj/create')
-                    : null,
-              ),
-            )
-          else
-            SliverLayoutBuilder(
-              builder: (ctx, c) {
-                final count = c.crossAxisExtent >= 900
-                    ? 4
-                    : c.crossAxisExtent >= 600
-                    ? 3
-                    : 2;
-                return SliverPadding(
-                  padding: const EdgeInsets.all(12),
-                  sliver: SliverGrid(
-                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: count,
-                      mainAxisSpacing: 10,
-                      crossAxisSpacing: 10,
-                      childAspectRatio: 0.68,
-                    ),
-                    delegate: SliverChildBuilderDelegate((_, i) {
-                      if (i >= items.length) {
-                        if (!loadingMore) {
-                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (mounted) _loadMore();
-                          });
+            SliverToBoxAdapter(child: _topSection(app)),
+            if (loading)
+              const SliverFillRemaining(
+                hasScrollBody: false,
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (items.isEmpty)
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: EmptyState(
+                  icon: Icons.campaign_outlined,
+                  message: widget.mine
+                      ? app.t('haraj_my_posts_hint')
+                      : app.t('no_haraj_posts'),
+                  actionLabel: app.isLoggedIn ? app.t('new_haraj') : null,
+                  onAction: app.isLoggedIn
+                      ? () => context.push('/haraj/create')
+                      : null,
+                ),
+              )
+            else
+              SliverLayoutBuilder(
+                builder: (ctx, c) {
+                  final count = c.crossAxisExtent >= 900
+                      ? 4
+                      : c.crossAxisExtent >= 600
+                      ? 3
+                      : 2;
+                  return SliverPadding(
+                    padding: const EdgeInsets.all(12),
+                    sliver: SliverGrid(
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: count,
+                        mainAxisSpacing: 10,
+                        crossAxisSpacing: 10,
+                        childAspectRatio: 0.68,
+                      ),
+                      delegate: SliverChildBuilderDelegate((_, i) {
+                        if (i >= items.length) {
+                          if (!loadingMore) {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (mounted && !loadingMore && _autoSeq != _seq) {
+                                _autoSeq = _seq;
+                                _loadMore();
+                              }
+                            });
+                          }
+                          return const Center(
+                            child: CircularProgressIndicator(),
+                          );
                         }
-                        return const Center(child: CircularProgressIndicator());
-                      }
-                      final post = items[i];
-                      final sold = '${post['status']}' == '2';
-                      final negotiable =
-                          post['is_negotiable'] == 1 ||
-                          post['is_negotiable'] == true ||
-                          post['is_negotiable'] == '1';
-                      return InkWell(
-                        onTap: () => context.push('/haraj/${post['id']}'),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: Stack(
-                                children: [
-                                  Positioned.fill(
-                                    child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(12),
-                                      child: AppImage(
-                                        J.str(
-                                          post['main_image_url'] ??
-                                              post['image_url'] ??
-                                              post['thumbnail'],
-                                        ),
-                                        placeholder: app.placeholder,
-                                      ),
-                                    ),
-                                  ),
-                                  if (sold)
-                                    Positioned.directional(
-                                      textDirection: Directionality.of(context),
-                                      top: 6,
-                                      start: 6,
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 8,
-                                          vertical: 3,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: Colors.red,
-                                          borderRadius: BorderRadius.circular(
-                                            10,
+                        final post = items[i];
+                        final sold = '${post['status']}' == '2';
+                        final negotiable =
+                            post['is_negotiable'] == 1 ||
+                            post['is_negotiable'] == true ||
+                            post['is_negotiable'] == '1';
+                        return InkWell(
+                          onTap: () => context.push('/haraj/${post['id']}'),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: Stack(
+                                  children: [
+                                    Positioned.fill(
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(12),
+                                        child: AppImage(
+                                          J.str(
+                                            post['main_image_url'] ??
+                                                post['image_url'] ??
+                                                post['thumbnail'],
                                           ),
-                                        ),
-                                        child: Text(
-                                          app.t('sold'),
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                      ),
-                                    )
-                                  else if (negotiable)
-                                    Positioned.directional(
-                                      textDirection: Directionality.of(context),
-                                      top: 6,
-                                      start: 6,
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 8,
-                                          vertical: 3,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: Colors.green,
-                                          borderRadius: BorderRadius.circular(
-                                            10,
-                                          ),
-                                        ),
-                                        child: Text(
-                                          app.t('negotiable'),
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w700,
-                                          ),
+                                          placeholder: app.placeholder,
                                         ),
                                       ),
                                     ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              J.str(post['title']),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 13),
-                            ),
-                            Text(
-                              money(post['price'], app.currency, app.decimals),
-                              style: TextStyle(
-                                color: app.accentColor,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            Text(
-                              [
-                                J.str(
-                                  post['city'] ??
-                                      post['cityRef']?['name'] ??
-                                      post['city_ref']?['name'],
+                                    if (sold)
+                                      Positioned.directional(
+                                        textDirection: Directionality.of(
+                                          context,
+                                        ),
+                                        top: 6,
+                                        start: 6,
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 3,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.red,
+                                            borderRadius: BorderRadius.circular(
+                                              10,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            app.t('sold'),
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    else if (negotiable)
+                                      Positioned.directional(
+                                        textDirection: Directionality.of(
+                                          context,
+                                        ),
+                                        top: 6,
+                                        start: 6,
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 3,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.green,
+                                            borderRadius: BorderRadius.circular(
+                                              10,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            app.t('negotiable'),
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
                                 ),
-                                _catNameOf(post),
-                                timeAgo(
-                                  J.str(post['created_at'] ?? post['date']),
-                                ),
-                              ].where((p) => p.isNotEmpty).join(' • '),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Colors.grey,
-                                fontSize: 11,
                               ),
-                            ),
-                            if (widget.mine)
-                              Row(
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.edit, size: 16),
-                                    tooltip: app.t('edit'),
-                                    onPressed: () => context.push(
-                                      '/haraj/edit/${post['id']}',
-                                    ),
+                              const SizedBox(height: 4),
+                              Text(
+                                J.str(post['title']),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                              Text(
+                                money(
+                                  post['price'],
+                                  app.currency,
+                                  app.decimals,
+                                ),
+                                style: TextStyle(
+                                  color: app.accentColor,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              Text(
+                                [
+                                  J.str(
+                                    post['city'] ??
+                                        post['cityRef']?['name'] ??
+                                        post['city_ref']?['name'],
                                   ),
-                                  IconButton(
-                                    icon: const Icon(Icons.delete, size: 16),
-                                    tooltip: app.t('delete'),
-                                    onPressed: () => _deletePost(post['id']),
+                                  _catNameOf(post),
+                                  timeAgo(
+                                    J.str(post['created_at'] ?? post['date']),
                                   ),
-                                  if (!sold)
+                                ].where((p) => p.isNotEmpty).join(' • '),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 11,
+                                ),
+                              ),
+                              if (widget.mine)
+                                Row(
+                                  children: [
                                     IconButton(
-                                      icon: const Icon(Icons.check, size: 16),
-                                      tooltip: app.t('mark_as_sold'),
-                                      onPressed: () => _markSold(post['id']),
+                                      icon: const Icon(Icons.edit, size: 16),
+                                      tooltip: app.t('edit'),
+                                      onPressed: () => context.push(
+                                        '/haraj/edit/${post['id']}',
+                                      ),
                                     ),
-                                ],
-                              ),
-                          ],
-                        ),
-                      );
-                    }, childCount: items.length + (page < lastPage ? 1 : 0)),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete, size: 16),
+                                      tooltip: app.t('delete'),
+                                      onPressed: () => _deletePost(post['id']),
+                                    ),
+                                    if (!sold)
+                                      IconButton(
+                                        icon: const Icon(Icons.check, size: 16),
+                                        tooltip: app.t('mark_as_sold'),
+                                        onPressed: () => _markSold(post['id']),
+                                      ),
+                                  ],
+                                ),
+                            ],
+                          ),
+                        );
+                      }, childCount: items.length + (page < lastPage ? 1 : 0)),
                     ),
                   );
                 },
               ),
           ],
-          ),
         ),
-      );
+      ),
+    );
   }
 
   String _catNameOf(Map<String, dynamic> post) {
@@ -913,8 +951,6 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     super.dispose();
   }
 
-  bool _servedFromCache = false;
-
   Future<void> _load() async {
     // Local-first: last synchronized ad paints offline (stale-labeled).
     final snap =
@@ -925,11 +961,23 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
         comments = J.maps(snap['comments']);
         loading = false;
         failed = post == null || post!.isEmpty;
-        _servedFromCache = true;
       });
     }
-    final result = await appController.api.harajPost(widget.id);
-    final c = await appController.api.harajComments(widget.id);
+    // Bounded refresh: a stalled network keeps the painted snapshot instead
+    // of holding the page. Both reads are idempotent, so a late response is
+    // safely discarded.
+    Future<ApiResult> bounded(Future<ApiResult> f) => f
+        .timeout(
+          const Duration(seconds: 12),
+          onTimeout: () => ApiResult({'status': 0}),
+        )
+        .catchError((_) => ApiResult({'status': 0}));
+    final results = await Future.wait([
+      bounded(appController.api.harajPost(widget.id)),
+      bounded(appController.api.harajComments(widget.id)),
+    ]);
+    final result = results[0];
+    final c = results[1];
     if (!mounted) return;
     final next = result.dataMap.isNotEmpty
         ? result.dataMap
@@ -939,7 +987,6 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
       comments = c.ok ? c.dataMaps : comments;
       loading = false;
       failed = post == null || post!.isEmpty;
-      _servedFromCache = !result.ok && post != null;
     });
     if (result.ok && next.isNotEmpty) {
       await appController.cachePublicSnapshot('haraj_detail_${widget.id}', {
@@ -947,14 +994,9 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
         'comments': c.ok ? c.dataMaps : comments,
       });
     }
-    // load ratings if post has user
-    final userId = post?['user_id'] ?? post?['user']?['id'];
-    if (userId != null) {
-      final r = await appController.api.harajUserRatings(userId);
-      if (mounted && r.ok) {
-        // could show
-      }
-    }
+    // NOTE: no harajUserRatings fetch here on purpose — its result was never
+    // displayed (dead request costing ~1 RTT on every detail open). The owner
+    // rating already arrives inside the post payload (owner_rating/my_rating).
   }
 
   Future<void> _openWhatsApp() async {
@@ -1032,6 +1074,7 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
       ),
     );
     if (ok != true) return;
+    if (!mounted) return;
     if (!await _needInternet(context)) return;
     final res = await appController.api.harajUpdateComment(
       id,
@@ -1065,6 +1108,7 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
       ),
     );
     if (ok != true) return;
+    if (!mounted) return;
     if (!await _needInternet(context)) return;
     final res = await appController.api.harajDeleteComment(id);
     if (!mounted) return;
@@ -1134,6 +1178,7 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
       ),
     );
     if (ok != true) return;
+    if (!mounted) return;
     if (!await _needInternet(context)) return;
     final res = await appController.api.harajRate({
       'rated_user_id': uid,
@@ -1159,6 +1204,7 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     final uid = post?['user_id'] ?? post?['user']?['id'];
     if (uid == null) return;
     if (!await _needInternet(context)) return;
+    if (!mounted) return;
     if (!blocked) {
       final ok = await confirmAction(
         context,
@@ -1215,28 +1261,30 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
         builder: (ctx, setS) => AlertDialog(
           title: Text(app.t('haraj_report_title')),
           content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ..._reportReasons.map(
-                  (r) => RadioListTile<String>(
-                    value: r,
-                    groupValue: reason,
-                    onChanged: (v) {
-                      if (v != null) setS(() => reason = v);
-                    },
-                    title: Text(_reasonLabel(r)),
+            child: RadioGroup<String>(
+              groupValue: reason,
+              onChanged: (v) {
+                if (v != null) setS(() => reason = v);
+              },
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ..._reportReasons.map(
+                    (r) => RadioListTile<String>(
+                      value: r,
+                      title: Text(_reasonLabel(r)),
+                    ),
                   ),
-                ),
-                TextField(
-                  controller: detailsCtrl,
-                  maxLines: 3,
-                  maxLength: 1000,
-                  decoration: InputDecoration(
-                    labelText: app.t('haraj_report_details'),
+                  TextField(
+                    controller: detailsCtrl,
+                    maxLines: 3,
+                    maxLength: 1000,
+                    decoration: InputDecoration(
+                      labelText: app.t('haraj_report_details'),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           actions: [
@@ -1316,11 +1364,14 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     final isMine =
         '${post?['user_id']}' == '${app.user?['id']}' && app.isLoggedIn;
     if (loading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return Scaffold(
+        appBar: AppBar(title: Text(app.t('haraj'))),
+        body: const Center(child: CircularProgressIndicator()),
+      );
     }
     if (failed || post == null) {
       return Scaffold(
-        appBar: AppBar(),
+        appBar: AppBar(title: Text(app.t('haraj'))),
         body: EmptyState(
           icon: Icons.error_outline,
           message: app.t('not_synced_yet'),
@@ -1360,21 +1411,25 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     final showContact = !isMine && !sold;
     return Scaffold(
       appBar: AppBar(
-        title: Text(J.str(p['title'])),
+         title: Text(
+           J.str(p['title']).isEmpty ? app.t('haraj') : J.str(p['title']),
+           maxLines: 1,
+           overflow: TextOverflow.ellipsis,
+         ),
         actions: [
           if (isMine) ...[
             IconButton(
-              icon: const Icon(Icons.edit),
+              icon: const Icon(Icons.edit_outlined),
               tooltip: app.t('edit'),
               onPressed: () => context.push('/haraj/edit/${p['id']}'),
             ),
             IconButton(
-              icon: const Icon(Icons.delete),
+              icon: const Icon(Icons.delete_outline),
               tooltip: app.t('delete'),
               onPressed: () async {
                 if (!await _needInternet(context)) return;
                 final r = await appController.api.harajDelete(p['id']);
-                if (mounted) {
+                if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
                       content: Text(
@@ -1416,7 +1471,6 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          OfflineBanner(stale: _servedFromCache),
           if (gallery.isNotEmpty)
             _Gallery(images: gallery, sold: sold, app: app)
           else
@@ -1491,17 +1545,10 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
           // Seller
           ListTile(
             contentPadding: EdgeInsets.zero,
-            leading: CircleAvatar(
-              backgroundImage: J.str(seller['profile']).isNotEmpty
-                  ? NetworkImage(J.str(seller['profile']))
-                  : null,
-              child: J.str(seller['profile']).isEmpty
-                  ? Text(
-                      J.str(seller['name']).isEmpty
-                          ? '?'
-                          : J.str(seller['name']).substring(0, 1),
-                    )
-                  : null,
+            leading: _SellerAvatar(
+              url: J.str(seller['profile']),
+              name: J.str(seller['name']),
+              radius: 20,
             ),
             title: Text(J.str(seller['name'])),
             subtitle: _ownerRatingRow(ownerRating, myRating),
@@ -1675,17 +1722,10 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
       children: [
         ListTile(
           contentPadding: EdgeInsets.zero,
-          leading: CircleAvatar(
+          leading: _SellerAvatar(
+            url: J.str(user['profile']),
+            name: userName,
             radius: 16,
-            backgroundImage: J.str(user['profile']).isNotEmpty
-                ? NetworkImage(J.str(user['profile']))
-                : null,
-            child: J.str(user['profile']).isEmpty
-                ? Text(
-                    userName.isEmpty ? '?' : userName.substring(0, 1),
-                    style: const TextStyle(fontSize: 12),
-                  )
-                : null,
           ),
           title: Row(
             children: [
@@ -2172,6 +2212,7 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
         try {
           await app.offline.removeDraft(app.accountScope, _draftFormId);
         } catch (_) {}
+        if (!mounted) return;
         final created = J.map(result.dataMap['data']);
         final id = J.str(created['id']).isNotEmpty
             ? J.str(created['id'])
@@ -2220,9 +2261,9 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
           DropdownButtonFormField<String>(
             initialValue:
                 categoryId != null &&
-                        categories.any((c) => '${c['id']}' == '$categoryId')
-                    ? categoryId
-                    : null,
+                    categories.any((c) => '${c['id']}' == '$categoryId')
+                ? categoryId
+                : null,
             items: categories
                 .map(
                   (cat) => DropdownMenuItem(
@@ -2321,7 +2362,7 @@ class _HarajCreateScreenState extends State<HarajCreateScreen> {
                 for (final p in picked) {
                   if (await p.length() <= _maxImageBytes) ok.add(p);
                 }
-                if (ok.length != picked.length && mounted) {
+                if (ok.length != picked.length && context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text(app.t('image_too_large'))),
                   );
@@ -2608,6 +2649,7 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
         try {
           await app.offline.removeDraft(app.accountScope, _draftFormId);
         } catch (_) {}
+        if (!mounted) return;
         context.pop();
       } else {
         ScaffoldMessenger.of(
@@ -2638,6 +2680,7 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
       ),
     );
     if (ok != true) return;
+    if (!mounted) return;
     if (!await _needInternet(context)) return;
     final res = await appController.api.harajDeleteImage(widget.id, imageId);
     if (!mounted) return;
@@ -2661,7 +2704,10 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
   Widget build(BuildContext context) {
     final app = appController;
     if (loading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return Scaffold(
+        appBar: AppBar(title: Text(app.t('edit_post'))),
+        body: const Center(child: CircularProgressIndicator()),
+      );
     }
     if (_loadFailed) {
       return Scaffold(
@@ -2792,6 +2838,7 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
               );
               if (one == null || !mounted) return;
               if (await one.length() > _maxImageBytes) {
+                if (!context.mounted) return;
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text(app.t('image_too_large'))),
                 );
@@ -2844,7 +2891,7 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
                 for (final p in picked) {
                   if (await p.length() <= _maxImageBytes) ok.add(p);
                 }
-                if (ok.length != picked.length && mounted) {
+                if (ok.length != picked.length && context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text(app.t('image_too_large'))),
                   );
@@ -2875,5 +2922,36 @@ class _HarajEditScreenState extends State<HarajEditScreen> {
         ],
       ),
     );
+  }
+}
+
+/// Avatar that never fires a doomed platform-decoder attempt: vector or
+/// exotic uploads (SVG/HEIC/AVIF/…) and non-http URLs fall back to the
+/// initial letter instead of Android's ImageDecoder ('unimplemented'
+/// log spam). Valid URLs decode downscaled (thumb) to avoid main-thread
+/// jank on old devices.
+class _SellerAvatar extends StatelessWidget {
+  const _SellerAvatar({
+    required this.url,
+    required this.name,
+    this.radius = 20,
+  });
+
+  final String url;
+  final String name;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!AppImage.isDisplayable(url)) {
+      return CircleAvatar(
+        radius: radius,
+        child: Text(
+          name.isEmpty ? '?' : name.substring(0, 1),
+          style: TextStyle(fontSize: radius * 0.75),
+        ),
+      );
+    }
+    return SellerAvatar(url, radius: radius);
   }
 }

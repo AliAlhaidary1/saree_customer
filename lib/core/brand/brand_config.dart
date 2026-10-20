@@ -94,8 +94,29 @@ class BrandConfig {
   Color get error => _color('error', 0xFFDC2626);
   Color get success => _color('success', 0xFF16A34A);
 
-  String? get logoUrl =>
-      assets['logo_png_url'] ?? assets['logo_svg_url'] ?? assets['logo_png'];
+  /// Raster logo suitable for [Image]/[CachedNetworkImage] widgets.
+  /// Never returns vector URLs (SVG/SVGZ): Flutter has no built-in SVG
+  /// decoder and Android's ImageDecoder rejects them with 'unimplemented'
+  /// (log spam + broken header on old devices like Galaxy S8 / API 28).
+  /// Read `assets['logo_svg_url']` explicitly only from an SvgPicture branch.
+  String? get logoUrl {
+    for (final key in const ['logo_png_url', 'logo_png']) {
+      final v = assets[key];
+      if (v == null || v.isEmpty) continue;
+      if (_isVector(v)) continue;
+      return v;
+    }
+    return null;
+  }
+
+  static bool _isVector(String v) {
+    try {
+      final path = Uri.parse(v).path.toLowerCase();
+      return path.endsWith('.svg') || path.endsWith('.svgz');
+    } catch (_) {
+      return false;
+    }
+  }
 
   Color _color(String key, int fallback) {
     try {

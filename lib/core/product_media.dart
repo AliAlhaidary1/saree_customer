@@ -57,7 +57,23 @@ String productImageUrl(
   Map<String, dynamic>? variant,
   String placeholder = '',
 }) {
-  final urls = productImageUrls(product, variant: variant);
-  if (urls.isNotEmpty) return urls.first;
-  return placeholder;
+  if (product == null) return placeholder;
+  // Fast path for cards: return the first usable URL in preference order
+  // without materialising/deduping the whole gallery on every rebuild.
+  return firstImageUrl(variant) ??
+      firstImageUrl(product['image_url']) ??
+      firstImageUrl(product['image']) ??
+      firstImageUrl(product['main_image']) ??
+      firstImageUrl(product['thumbnail']) ??
+      firstImageUrl(product['images']) ??
+      _firstVariantImage(product) ??
+      placeholder;
+}
+
+String? _firstVariantImage(Map<String, dynamic> product) {
+  for (final item in J.maps(product['variants'])) {
+    final url = firstImageUrl(item['image_url'] ?? item['image']);
+    if (url != null) return url;
+  }
+  return null;
 }

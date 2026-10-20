@@ -882,6 +882,8 @@ List<Map<String, dynamic>> filterCatalogRows(
   String minRating = '',
   bool inStock = false,
   bool onlyOffers = false,
+  bool canDeliver = false,
+  bool isReturnable = false,
 }) {
   final min = double.tryParse(priceMin);
   final max = double.tryParse(priceMax);
@@ -912,6 +914,14 @@ List<Map<String, dynamic>> filterCatalogRows(
           J.str(row['in_stock']) == '0') {
         return false;
       }
+    }
+    // Payload-only booleans: `can_deliver` defaults to true (missing =
+    // deliverable), `is_returnable` missing = unknown (never hides).
+    if (canDeliver && !J.flag(row['can_deliver'], true)) return false;
+    if (isReturnable &&
+        row.containsKey('is_returnable') &&
+        !J.flag(row['is_returnable'])) {
+      return false;
     }
     return true;
   }).toList();

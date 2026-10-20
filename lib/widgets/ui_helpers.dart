@@ -101,7 +101,9 @@ class LoginRequired extends StatelessWidget {
     );
     if (!withScaffold) return body;
     return Scaffold(
-      appBar: AppBar(title: Text(app.t('login'))),
+      appBar: AppBar(
+        title: Text(app.t('login'), maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
       body: body,
     );
   }

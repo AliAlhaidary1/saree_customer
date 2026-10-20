@@ -43,8 +43,8 @@ class OperationPolicy {
       case CustomerOp.searchLocal:
       case CustomerOp.toggleFavorite:
       case CustomerOp.manageAddressesLocal:
-        return OfflineEligibility.offlineCapable;
       case CustomerOp.editCart:
+        return OfflineEligibility.offlineCapable;
       case CustomerOp.checkout:
       case CustomerOp.createOrder:
       case CustomerOp.initiatePayment:

@@ -1,16 +1,18 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/app_theme.dart';
+import '../../core/business_hours.dart';
 import '../../core/config.dart';
+import '../../core/diag.dart';
 import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/product_card.dart';
 import '../../widgets/product_filter_drawer.dart';
 import '../../widgets/product_variant_sheet.dart';
@@ -32,7 +34,6 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Map<String, dynamic>> flash = [];
   List<Map<String, dynamic>> haraj = [];
   bool loading = true;
-  bool _heroServedFromCache = false;
   String? loadError;
   String? _cityKey;
   bool _popupShown = false;
@@ -41,7 +42,6 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Map<String, dynamic>> _catalog = [];
   bool _catalogLoading = false;
   bool _catalogLoadingMore = false;
-  bool _catalogServedFromCache = false;
   bool _hasMore = true;
   int _offset = 0;
   int _seq = 0;
@@ -52,10 +52,17 @@ class _HomeScreenState extends State<HomeScreen> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   final _scrollCtrl = ScrollController();
   static const _pageSize = AppConfig.productPageSize;
+  int _frameNo = 0;
 
   @override
   void initState() {
     super.initState();
+    if (Diag.enabled) {
+      Diag.log('home:initState');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        Diag.log('home:firstFrame');
+      });
+    }
     _view = appController.isStoresOnly ? 'stores' : 'products';
     appController.addListener(_onApp);
     _scrollCtrl.addListener(_onScroll);
@@ -83,11 +90,21 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  int _pumpedSeq = -1;
+  bool _resetFlying = false;
+
   void _pumpMoreIfShort() {
-    if (!_hasMore || _catalogLoading || _catalogLoadingMore) return;
+    if (!_hasMore ||
+        _catalogLoading ||
+        _catalogLoadingMore ||
+        _resetFlying) {
+      return;
+    }
+    if (_pumpedSeq == _seq) return;
     if (!_scrollCtrl.hasClients) return;
     if (_scrollCtrl.position.maxScrollExtent <=
         _scrollCtrl.position.pixels + 80) {
+      _pumpedSeq = _seq;
       _loadCatalog();
     }
   }
@@ -112,7 +129,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (sliders.isEmpty && app.shop?['sliders'] is List) {
       setState(() {
         sliders = J.maps(app.shop?['sliders']);
-        _heroServedFromCache = true;
       });
     }
     if (sliders.isEmpty || flash.isEmpty || haraj.isEmpty) {
@@ -122,7 +138,6 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() {
           if (sliders.isEmpty) {
             sliders = J.maps(m['sliders']);
-            if (sliders.isNotEmpty) _heroServedFromCache = true;
           }
           if (flash.isEmpty) flash = J.maps(m['flash']);
           if (haraj.isEmpty) haraj = J.maps(m['haraj']);
@@ -137,6 +152,7 @@ class _HomeScreenState extends State<HomeScreen> {
       Future<T> withTimeout<T>(Future<T> f, T fallback) =>
           f.timeout(const Duration(seconds: 12), onTimeout: () => fallback);
       final needCats = app.rootCategories.isEmpty;
+      final swHero = Stopwatch()..start();
       final List<dynamic> results = await Future.wait<dynamic>([
         withTimeout(app.api.sliders(), ApiResult({'status': 0})),
         withTimeout(app.api.flashSales(), ApiResult({'status': 0})),
@@ -151,6 +167,7 @@ class _HomeScreenState extends State<HomeScreen> {
         if (needCats)
           withTimeout(app.loadRootCategories().then((_) => true), false),
       ]);
+      Diag.log('home:heroNetwork', '${swHero.elapsedMilliseconds}ms');
       final sliderRes = results[0] as ApiResult;
       final flashRes = results[1] as ApiResult;
       final harajRes = results[2] as ApiResult;
@@ -165,7 +182,6 @@ class _HomeScreenState extends State<HomeScreen> {
         flash = flashRes.ok ? flashRes.dataMaps : flash;
         haraj = harajRes.ok ? harajRes.dataMaps : haraj;
         loading = false;
-        _heroServedFromCache = !slidersFresh && sliders.isNotEmpty;
       });
       // Always cache home_hero when we have data, regardless of freshness.
       // This ensures sliders/flash persist across offline app restarts.
@@ -192,48 +208,66 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadCatalog({bool reset = false}) async {
     if (!reset && (_catalogLoadingMore || !_hasMore)) return;
     final mySeq = ++_seq;
+    final swAll = Diag.enabled ? (Stopwatch()..start()) : null;
     final app = appController;
     final point = app.browseCoords;
     if (reset) {
+      // NOTE: _offset tracks the SERVER window (raw rows received), not
+      // _catalog.length. Live backend data shifts between pages, so the
+      // server can repeat rows across windows; appendUnique drops those
+      // dupes for display, which used to stall _offset and re-request the
+      // same window forever (endless spinner on scroll).
       _offset = 0;
       _hasMore = true;
+      _resetFlying = true;
       final catId = _filter.categoryId?.isNotEmpty == true
           ? int.tryParse('${_filter.categoryId}')
           : null;
       var local = <Map<String, dynamic>>[];
       var localTotal = 0;
       if (_view == 'stores') {
-        local = await appController.catalogStoresLocal(limit: _pageSize);
+        local = await appController.catalogStoresLocal(
+          limit: _pageSize,
+          type: _filter.categoryId ?? '',
+          minRating: _filter.minRating,
+          sort: (_sort == 'nearest' || _sort == 'rating') ? _sort : 'rating',
+        );
         localTotal = local.length >= _pageSize ? _pageSize + 1 : local.length;
       } else {
-        local = await appController.catalogProductsLocal(
-          categoryId: catId,
-          search: '',
-          sort: _sort,
-          priceMin: _filter.priceMin,
-          priceMax: _filter.priceMax,
-          minRating: _filter.minRating,
-          inStock: _filter.inStock,
-          onlyOffers: _filter.onlyOffers,
-          limit: _pageSize,
-        );
-        localTotal = await appController.catalogFilteredCountLocal(
-          categoryId: catId,
-          search: '',
-          priceMin: _filter.priceMin,
-          priceMax: _filter.priceMax,
-          minRating: _filter.minRating,
-          inStock: _filter.inStock,
-          onlyOffers: _filter.onlyOffers,
-        );
+        final results = await Future.wait([
+          appController.catalogProductsLocal(
+            categoryId: catId,
+            search: '',
+            sort: _sort,
+            priceMin: _filter.priceMin,
+            priceMax: _filter.priceMax,
+            minRating: _filter.minRating,
+            inStock: _filter.inStock,
+            onlyOffers: _filter.onlyOffers,
+            isReturnable: _filter.isReturnable,
+            limit: _pageSize,
+          ),
+          appController.catalogFilteredCountLocal(
+            categoryId: catId,
+            search: '',
+            priceMin: _filter.priceMin,
+            priceMax: _filter.priceMax,
+            minRating: _filter.minRating,
+            inStock: _filter.inStock,
+            onlyOffers: _filter.onlyOffers,
+            isReturnable: _filter.isReturnable,
+          ),
+        ]);
+        local = results[0] as List<Map<String, dynamic>>;
+        localTotal = results[1] as int;
       }
       if (!mounted || mySeq != _seq) return;
       if (local.isNotEmpty) {
         setState(() {
           _catalog = local;
-          _offset = local.length;
+          // Local preview only: the network fetch below still starts at
+          // server offset 0 and replaces this list on success.
           _hasMore = local.length < localTotal;
-          _catalogServedFromCache = true;
           _catalogLoading = false;
         });
       } else {
@@ -257,9 +291,7 @@ class _HomeScreenState extends State<HomeScreen> {
         if (cached.isNotEmpty) {
           setState(() {
             _catalog = cached;
-            _offset = cached.length;
             _hasMore = cached.length >= _pageSize;
-            _catalogServedFromCache = true;
             _catalogLoading = false;
           });
         } else {
@@ -268,6 +300,13 @@ class _HomeScreenState extends State<HomeScreen> {
             _catalog = [];
           });
         }
+      }
+      if (swAll != null) {
+        Diag.log(
+          'home:catalogLocal',
+          '${swAll.elapsedMilliseconds}ms rows=${_catalog.length} '
+          'view=$_view loading=$_catalogLoading',
+        );
       }
     } else {
       setState(() => _catalogLoadingMore = true);
@@ -278,18 +317,23 @@ class _HomeScreenState extends State<HomeScreen> {
       if (sort == 'nearest' && point.latitude == 0 && point.longitude == 0) {
         sort = 'rating';
       }
-      final res = await app.api.sellers(
-        latitude: point.latitude,
-        longitude: point.longitude,
-        limit: 20,
-        offset: _offset,
-        sort: sort.isNotEmpty ? sort : 'rating',
-        type: _filter.categoryId?.isNotEmpty == true
-            ? _filter.categoryId
-            : null,
-        minRating: _filter.minRating.isNotEmpty
-            ? int.tryParse(_filter.minRating)
-            : null,
+      // Bounded wait: a stalled page must fall back to local rows quickly
+      // instead of spinning the bottom loader for the full 15s+ dio
+      // timeout (the old S8 radio on a weak network hits this on scroll).
+      final res = await _pageWithTimeout(
+        app.api.sellers(
+          latitude: point.latitude,
+          longitude: point.longitude,
+          limit: 20,
+          offset: _offset,
+          sort: sort.isNotEmpty ? sort : 'rating',
+          type: _filter.categoryId?.isNotEmpty == true
+              ? _filter.categoryId
+              : null,
+          minRating: _filter.minRating.isNotEmpty
+              ? int.tryParse(_filter.minRating)
+              : null,
+        ),
       );
       if (!mounted || mySeq != _seq) return;
       var rows = res.dataMaps;
@@ -299,31 +343,47 @@ class _HomeScreenState extends State<HomeScreen> {
         rows = J.maps(dataNode['data']);
         total = J.i(dataNode['total'] ?? total);
       }
+      if (swAll != null) {
+        Diag.log(
+          'home:storesNet',
+          '${swAll.elapsedMilliseconds}ms status=${res.status} '
+          'rows=${rows.length} total=$total offset=$_offset',
+        );
+      }
       if (!res.ok) {
         final page = await appController.catalogStoresLocal(
           limit: _pageSize,
           offset: reset ? 0 : _catalog.length,
+          type: _filter.categoryId ?? '',
+          minRating: _filter.minRating,
+          sort: sort,
         );
         if (!mounted || mySeq != _seq) return;
         setState(() {
           if (page.isNotEmpty) {
             _catalog = reset ? page : J.appendUnique(_catalog, page);
-            _offset = _catalog.length;
+            // Local SQL fallback: do NOT touch _offset (server window).
+            // The next network attempt retries the same server window.
             _hasMore = page.length >= _pageSize;
-            _catalogServedFromCache = true;
           } else if (_catalog.isEmpty) {
-            _catalogServedFromCache = false;
+            // Empty + API failed: stop auto-pump retries (otherwise
+            // _pumpMoreIfShort loops forever on short/empty content).
+            // User can pull-to-refresh; _hasMore revives on next reset.
+            _hasMore = false;
           } else {
             _hasMore = false;
           }
           _catalogLoading = false;
           _catalogLoadingMore = false;
+          _resetFlying = false;
         });
         _pumpMoreIfShort();
         return;
       }
       if (reset && rows.isNotEmpty) {
-        await appController.cacheProductPage(
+        // Persist locally in the background: never make the first paint of
+        // fresh server rows wait on a DB round-trip.
+        unawaited(appController.cacheProductPage(
           {
             'limit': _pageSize,
             'offset': 0,
@@ -342,39 +402,51 @@ class _HomeScreenState extends State<HomeScreen> {
           },
           rows,
           view: _view,
-        );
+        ));
       }
       setState(() {
         _catalog = reset ? rows : J.appendUnique(_catalog, rows);
-        _offset = _catalog.length;
+        // Advance by RAW rows received: appendUnique may drop live-data
+        // dupes, and tying the window to unique length re-requested the
+        // same window endlessly.
+        _offset += rows.length;
         _hasMore = total > 0 ? _catalog.length < total : rows.length >= 20;
         _catalogLoading = false;
         _catalogLoadingMore = false;
-        _catalogServedFromCache = false;
+        _resetFlying = false;
       });
       return;
     }
 
-    final res = await app.api.products(
-      latitude: point.latitude,
-      longitude: point.longitude,
-      filters: {
-        'limit': _pageSize,
-        'offset': _offset,
-        if (_sort.isNotEmpty) 'sort': _sort,
-        if (_filter.categoryId?.isNotEmpty == true)
-          'category_ids': _filter.categoryId,
-        if (_filter.inStock) 'in_stock': 1,
-        if (_filter.onlyOffers) 'has_offer': 1,
-        if (_filter.priceMin.isNotEmpty) 'price_min': _filter.priceMin,
-        if (_filter.priceMax.isNotEmpty) 'price_max': _filter.priceMax,
-        if (_filter.minRating.isNotEmpty)
-          'min_seller_rating': _filter.minRating,
-        if (_filter.isReturnable) 'is_returnable': 1,
-      },
+    final res = await _pageWithTimeout(
+      app.api.products(
+        latitude: point.latitude,
+        longitude: point.longitude,
+        filters: {
+          'limit': _pageSize,
+          'offset': _offset,
+          if (_sort.isNotEmpty) 'sort': _sort,
+          if (_filter.categoryId?.isNotEmpty == true)
+            'category_ids': _filter.categoryId,
+          if (_filter.inStock) 'in_stock': 1,
+          if (_filter.onlyOffers) 'has_offer': 1,
+          if (_filter.priceMin.isNotEmpty) 'price_min': _filter.priceMin,
+          if (_filter.priceMax.isNotEmpty) 'price_max': _filter.priceMax,
+          if (_filter.minRating.isNotEmpty)
+            'min_seller_rating': _filter.minRating,
+          if (_filter.isReturnable) 'is_returnable': 1,
+        },
+      ),
     );
     if (!mounted || mySeq != _seq) return;
     final rows = res.dataMaps;
+    if (swAll != null) {
+      Diag.log(
+        'home:catalogNet',
+        '${swAll.elapsedMilliseconds}ms status=${res.status} '
+        'rows=${rows.length} offset=$_offset reset=$reset',
+      );
+    }
     if (!res.ok) {
       final catId = _filter.categoryId?.isNotEmpty == true
           ? int.tryParse('${_filter.categoryId}')
@@ -389,6 +461,7 @@ class _HomeScreenState extends State<HomeScreen> {
         minRating: _filter.minRating,
         inStock: _filter.inStock,
         onlyOffers: _filter.onlyOffers,
+        isReturnable: _filter.isReturnable,
         limit: _pageSize,
         offset: start,
       );
@@ -400,25 +473,24 @@ class _HomeScreenState extends State<HomeScreen> {
         minRating: _filter.minRating,
         inStock: _filter.inStock,
         onlyOffers: _filter.onlyOffers,
+        isReturnable: _filter.isReturnable,
       );
       if (!mounted || mySeq != _seq) return;
       setState(() {
         if (page.isNotEmpty) {
           _catalog = reset ? page : J.appendUnique(_catalog, page);
-          _catalogServedFromCache = true;
-        } else if (_catalog.isEmpty) {
-          _catalogServedFromCache = false;
         }
-        _offset = _catalog.length;
+        // Local SQL fallback: do NOT touch _offset (server window).
         _hasMore = _catalog.length < total;
         _catalogLoading = false;
         _catalogLoadingMore = false;
+        _resetFlying = false;
       });
       _pumpMoreIfShort();
       return;
     }
     if (reset && rows.isNotEmpty) {
-      await appController.cacheProductPage(
+      unawaited(appController.cacheProductPage(
         {
           'limit': _pageSize,
           'offset': 0,
@@ -437,16 +509,30 @@ class _HomeScreenState extends State<HomeScreen> {
         },
         rows,
         view: _view,
-      );
+      ));
     }
     setState(() {
       _catalog = reset ? rows : J.appendUnique(_catalog, rows);
-      _offset = _catalog.length;
+      // Advance by RAW rows received (see note at reset above).
+      _offset += rows.length;
       _hasMore = rows.length >= _pageSize;
       _catalogLoading = false;
       _catalogLoadingMore = false;
-      _catalogServedFromCache = false;
+      _resetFlying = false;
     });
+  }
+
+  /// Caps a single pagination attempt: on stall, the existing local/offline
+  /// fallback below runs instead of holding the bottom spinner for the full
+  /// dio timeout. The late dio response (if any) is safely discarded —
+  /// these are idempotent catalog reads.
+  Future<ApiResult> _pageWithTimeout(Future<ApiResult> request) {
+    return request
+        .timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => ApiResult({'status': 0}),
+        )
+        .catchError((_) => ApiResult({'status': 0}));
   }
 
   void _setView(String v) {
@@ -462,7 +548,9 @@ class _HomeScreenState extends State<HomeScreen> {
   void _applyFilter(ProductFilterValue v) {
     setState(() {
       _filter = v;
-      if (v.sort.isNotEmpty) _sort = v.sort;
+      // Always mirror the drawer sort, including clearing it back to the
+      // default ("best for you"), so "clear all" truly resets the list.
+      _sort = v.sort;
     });
     _loadCatalog(reset: true);
   }
@@ -593,6 +681,22 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final app = appController;
+    if (Diag.enabled) {
+      final swFrame = Stopwatch()..start();
+      final cardsBuilt = ProductCard.debugBuilds;
+      ProductCard.debugBuilds = 0;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _frameNo++;
+        final elapsed = swFrame.elapsedMilliseconds;
+        if (_frameNo <= 8 || elapsed >= 16 || cardsBuilt > 0) {
+          Diag.log(
+            'home:frame',
+            'n=$_frameNo ${elapsed}ms cards=$cardsBuilt '
+            'catalog=${_catalog.length} loading=$_catalogLoading',
+          );
+        }
+      });
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _pumpMoreIfShort());
     final shopCategories = J.maps(app.shop?['categories']);
     final categories = !app.isCategorySectionEnabled
@@ -617,16 +721,19 @@ class _HomeScreenState extends State<HomeScreen> {
       key: _scaffoldKey,
       body: RefreshIndicator(
         onRefresh: () async {
-          await app.loadShop();
-          await app.loadRootCategories();
-          await _load();
+          await Future.wait([
+            app.loadShop(),
+            app.loadRootCategories(),
+            _load(),
+          ]);
           await _loadCatalog(reset: true);
           // Opportunistic catalog sync refresh (debounced, best-effort).
           await app.syncCatalogSoon();
         },
         child: CustomScrollView(
-          controller: _scrollCtrl,
-          cacheExtent: 800, slivers: [
+          // Modest cache extent: 800px pre-built several extra rows of
+          // image-heavy cards on every scroll frame (more jank, not less).
+          scrollCacheExtent: ScrollCacheExtent.pixels(350), controller: _scrollCtrl, slivers: [
             if (app.city == null)
               SliverToBoxAdapter(
                 child: ListTile(
@@ -661,8 +768,90 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             if (loading && !hasContent)
               const SliverToBoxAdapter(child: HomeLoadingSkeleton()),
-            if (_heroServedFromCache)
-              const SliverToBoxAdapter(child: OfflineBanner(stale: true)),
+            SliverToBoxAdapter(
+              child: ListenableBuilder(
+                listenable: app,
+                builder: (_, _) {
+                  final platform = app.businessHours?.platform;
+                  final open = formatBusinessTime(platform?.openingTime);
+                  final close = formatBusinessTime(platform?.closingTime);
+                  final label = (open.isEmpty || close.isEmpty)
+                      ? 'دوام المنصة: على مدار الساعة'
+                      : 'دوام المنصة: من $open إلى $close';
+                  final isOpen = app.businessHours?.platform?.isOpen ?? true;
+                  final statusColor = AppTheme.accentOrange;
+                  return Padding(
+                    padding: EdgeInsets.zero,
+                    child: Container(
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        borderRadius: const BorderRadius.only(
+                          topLeft: Radius.circular(48),
+                          topRight: Radius.zero,
+                          bottomLeft: Radius.circular(16),
+                          bottomRight: Radius.circular(16),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppTheme.primaryNavy.withValues(alpha: 0.08),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 92,
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            color: statusColor,
+                            child: Center(
+                              child: Text(
+                                isOpen ? 'مفتوح' : 'مغلق',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 10,
+                              ),
+                              color: AppTheme.backgroundWhite,
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.schedule_rounded,
+                                    size: 16,
+                                    color: AppTheme.accentOrange,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    label,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 12.5,
+                                      color: AppTheme.primaryNavy,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
             if (hero.isNotEmpty)
               SliverToBoxAdapter(
                 child: _HeroSlider(slides: hero, onOpen: _openOffer),
@@ -688,8 +877,6 @@ class _HomeScreenState extends State<HomeScreen> {
             // === Unified catalog: tabs + view toggle + grid/list ===
             if (showCatalog || storesOnly) ...[
               SliverToBoxAdapter(child: _catalogHeader(context)),
-              if (_catalogServedFromCache)
-                const SliverToBoxAdapter(child: OfflineBanner(stale: true)),
               if (_catalogLoading)
                 const SliverToBoxAdapter(
                   child: Padding(
@@ -914,7 +1101,7 @@ class _HomeScreenState extends State<HomeScreen> {
             SizedBox(
               height: 96,
               child: ListView.separated(
-                cacheExtent: 600, padding: const EdgeInsets.symmetric(horizontal: 16),
+                scrollCacheExtent: ScrollCacheExtent.pixels(250), padding: const EdgeInsets.symmetric(horizontal: 16),
                 scrollDirection: Axis.horizontal,
                 addRepaintBoundaries: true,
                 itemCount: categories.length,
@@ -1053,7 +1240,7 @@ class _HomeScreenState extends State<HomeScreen> {
       child: SizedBox(
         height: 262,
         child: ListView.separated(
-          cacheExtent: 600, padding: const EdgeInsets.symmetric(horizontal: 16),
+          scrollCacheExtent: ScrollCacheExtent.pixels(250), padding: const EdgeInsets.symmetric(horizontal: 16),
           scrollDirection: Axis.horizontal,
           addRepaintBoundaries: true,
           itemCount: items.length,

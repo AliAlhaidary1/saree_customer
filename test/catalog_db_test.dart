@@ -660,7 +660,13 @@ void main() {
                 refreshedAt: DateTime.utc(2026, 1, 1),
               ),
             ),
-        throwsA(isA<SqliteException>()),
+        throwsA(
+          predicate(
+            (Object? e) =>
+                CatalogDatabase.unwrapRemoteError(e!) is SqliteException,
+            'a SqliteException (possibly wrapped by the DB isolate)',
+          ),
+        ),
       );
       // Cascade: deleting the product removes its variants.
       await db.delete(db.products).go();
@@ -975,6 +981,135 @@ void main() {
         unorderedEquals([2, 4]),
       );
       await db.close();
+    });
+
+    test('queryProducts filters payload boolean flags (offline parity)',
+        () async {
+      final db = await CatalogDatabase.openMemory();
+      final dao = CatalogDao(db);
+      final now = DateTime.utc(2026, 1, 1);
+      ProductUpsert flag(int id, {bool? canDeliver, Object? returnable}) =>
+          ProductUpsert(
+            serverId: id,
+            name: 'F $id abaya',
+            storeId: 7,
+            categoryId: 3,
+            searchBlob: 'f $id abaya',
+            payload: jsonEncode({
+              'id': id,
+              'can_deliver': ?canDeliver,
+              'is_returnable': ?returnable,
+            }),
+          );
+      await dao.upsertProductBatch(
+        scope: _scopeA,
+        rows: [
+          flag(1, canDeliver: false, returnable: 0),
+          flag(2, canDeliver: true, returnable: 1),
+          flag(3), // both unknown -> never hidden by the flag filters
+        ],
+        now: now,
+      );
+      expect(
+        (await dao.queryProducts(_scopeA, canDeliverOnly: true))
+            .map((p) => p.serverId),
+        unorderedEquals([2, 3]),
+      );
+      expect(
+        (await dao.queryProducts(_scopeA, returnableOnly: true))
+            .map((p) => p.serverId),
+        unorderedEquals([2, 3]),
+      );
+      expect(await dao.countProducts(_scopeA, canDeliverOnly: true), 2);
+      expect(await dao.countProducts(_scopeA, returnableOnly: true), 2);
+      await db.close();
+    });
+
+    test('store type filter maps to stores with a product in that category',
+        () async {
+      final db = await CatalogDatabase.openMemory();
+      final dao = CatalogDao(db);
+      final now = DateTime.utc(2026, 1, 1);
+      await dao.upsertStores(
+        scope: _scopeA,
+        rows: [
+          for (final sid in [7, 8, 9])
+            StoresCompanion.insert(
+              scope: _scopeA,
+              serverId: sid,
+              name: 'S$sid',
+              payload: '{"id": $sid, "name": "S$sid"}',
+              refreshedAt: now,
+              lastSeenAt: now,
+            ),
+        ],
+      );
+      await dao.upsertProductBatch(
+        scope: _scopeA,
+        rows: [
+          rich(1), // storeId 7, categoryId 5 (odd id)
+          rich(2), // storeId 7, categoryId 3 (even id)
+        ],
+        now: now,
+      );
+      expect(await dao.storeIdsWithCategory(_scopeA, 3), {7});
+      expect(await dao.storeIdsWithCategory(_scopeA, 5), {7});
+      expect(await dao.storeIdsWithCategory(_scopeA, 99), isEmpty);
+      expect(
+        (await dao.allStores(_scopeA)).map((s) => s.serverId),
+        [7, 8, 9],
+      );
+      await db.close();
+    });
+
+    test('queryProducts section filter applies only when the payload has it',
+        () async {
+      final db = await CatalogDatabase.openMemory();
+      final dao = CatalogDao(db);
+      final now = DateTime.utc(2026, 1, 1);
+      ProductUpsert sec(int id, {Object? sellerSection}) => ProductUpsert(
+            serverId: id,
+            name: 'S $id',
+            storeId: 7,
+            categoryId: 3,
+            payload: jsonEncode({
+              'id': id,
+              'seller_section_id': ?sellerSection,
+            }),
+          );
+      await dao.upsertProductBatch(
+        scope: _scopeA,
+        rows: [
+          sec(1, sellerSection: 11),
+          sec(2, sellerSection: 12),
+          sec(3), // carries no section key
+        ],
+        now: now,
+      );
+      expect(
+        (await dao.queryProducts(_scopeA, sellerSectionId: '11'))
+            .map((p) => p.serverId),
+        [1],
+      );
+      expect(await dao.countProducts(_scopeA, sellerSectionId: '99'), 0);
+
+      // When no cached payload has the key, the filter is a graceful no-op.
+      final db2 = await CatalogDatabase.openMemory();
+      final dao2 = CatalogDao(db2);
+      await dao2.upsertProductBatch(
+        scope: _scopeB,
+        rows: [
+          ProductUpsert(serverId: 5, name: 'x', storeId: 7, payload: '{"id":5}'),
+        ],
+        now: now,
+      );
+      expect(
+        (await dao2.queryProducts(_scopeB, sellerSectionId: '11'))
+            .map((p) => p.serverId),
+        [5],
+      );
+      await db.close();
+      await db2.close();
     });
   });
 }

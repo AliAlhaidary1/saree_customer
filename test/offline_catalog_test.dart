@@ -51,6 +51,25 @@ class _SessionApi extends CustomerApi {
   Future<ApiResult> userDetails() async => me ?? ApiResult({'status': 0});
 }
 
+/// Genuine transport failure for the logged-in cart GET, so the offline
+/// snapshot-restore path (network category) is exercised. A bare 400 response
+/// is useless here: `validateStatus: status < 500` treats it as reachable and
+/// the app reads it as a business `status:0` — the same shape as an empty cart.
+class _OfflineCartApi extends CustomerApi {
+  _OfflineCartApi() : super(baseUrl: 'http://test.invalid');
+
+  @override
+  Future<ApiResult> cart({
+    required double latitude,
+    required double longitude,
+    int checkout = 0,
+  }) async => ApiResult({
+    'status': 0,
+    'message': 'offline',
+    'error': {'code': 'ECONNREFUSED'},
+  });
+}
+
 class _CatalogApi extends CustomerApi {
   _CatalogApi() : super(baseUrl: 'http://test.invalid');
 
@@ -293,10 +312,7 @@ void main() {
 
   group('authenticated cart snapshot', () {
     test('offline refresh restores last confirmed lines as stale', () async {
-      final c = await _controller(
-        {},
-        CustomerApi(baseUrl: 'http://test.invalid'),
-      );
+      final c = await _controller({}, _OfflineCartApi());
       c.city = {'id': 1, 'latitude': '15.3', 'longitude': '44.2'};
       c.setUser({'id': 5});
       c.token = 't';

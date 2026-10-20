@@ -293,18 +293,7 @@ class _LoginScreenState extends State<LoginScreen> {
               : 'أدخل رمز التحقق وكلمة المرور الجديدة');
     return Scaffold(
       backgroundColor: AppTheme.surfaceGrey,
-      appBar: AppBar(
-        backgroundColor: AppTheme.primaryNavy,
-        foregroundColor: Colors.white,
-        centerTitle: false,
-        title: Text(
-          app.t('login'),
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ),
+      appBar: AppBar(title: Text(app.t('login'))),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: EdgeInsets.only(
@@ -1180,19 +1169,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     final needOtp = otpMethods.isNotEmpty;
     return Scaffold(
       backgroundColor: AppTheme.surfaceGrey,
-      appBar: AppBar(
-        backgroundColor: AppTheme.primaryNavy,
-        foregroundColor: Colors.white,
-        elevation: 0,
-        title: Text(
-          app.t('register'),
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        centerTitle: false,
-      ),
+      appBar: AppBar(title: Text(app.t('register'))),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: EdgeInsets.only(
@@ -2058,18 +2035,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
     );
     return Scaffold(
       backgroundColor: AppTheme.surfaceGrey,
-      appBar: AppBar(
-        backgroundColor: AppTheme.primaryNavy,
-        foregroundColor: Colors.white,
-        centerTitle: false,
-        title: Text(
-          app.t('change_password'),
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ),
+      appBar: AppBar(title: Text(app.t('change_password'))),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: EdgeInsets.only(

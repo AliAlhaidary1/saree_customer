@@ -15,6 +15,7 @@ import 'notification_read.dart';
 import 'business_hours.dart';
 import 'checkout_models.dart';
 import 'config.dart';
+import 'diag.dart';
 import 'i18n.dart';
 import 'json_util.dart';
 import 'api/api_errors.dart';
@@ -26,11 +27,11 @@ import 'offline/cache_policy.dart';
 import 'offline/operation_policy.dart';
 import 'offline/checkout_session.dart';
 import 'offline/local_cart.dart' as local_cart;
-import 'offline/sync_orchestrator.dart';
 import 'offline/local_store.dart';
 import 'offline/offline_cache.dart';
 import 'offline/pending_ops.dart';
 import 'offline/sync_engine.dart';
+
 class AppController extends ChangeNotifier {
   AppController();
 
@@ -52,7 +53,6 @@ class AppController extends ChangeNotifier {
   CatalogDatabase? _catalogDb;
   DateTime? _lastCatalogSyncAttempt;
   local_cart.LocalCartRepository? _localCart;
-  SyncOrchestrator? _syncOrchestrator;
 
   /// Bounded opt-in thumbnail prefetch (default OFF — mobile-data safety).
   final ImagePrefetch imagePrefetch = ImagePrefetch();
@@ -92,6 +92,13 @@ class AppController extends ChangeNotifier {
       outboxForCurrentScope: () => PendingOutbox(store, accountScope),
     );
     _checkoutSession = null;
+    // Test hygiene: never inherit cart serialization state across tests —
+    // waiters/gates from a torn-down (FakeAsync) zone must not block the
+    // next test's ops.
+    _cartActive = 0;
+    _cartWaiters.clear();
+    _cartGen = 0;
+    _refreshInFlight = null;
   }
 
   void _bumpNav() => navTick.value++;
@@ -188,6 +195,16 @@ class AppController extends ChangeNotifier {
     try {
       await store.writeJson('guest_cart', guestCart);
     } catch (_) {}
+    // Keep the Drift mirror in sync (best-effort, never blocks the UI).
+    try {
+      final repo = _localCart;
+      if (repo != null) {
+        await repo.clear();
+        for (final item in guestCart) {
+          await repo.addItem(local_cart.CartItem.fromMap(item));
+        }
+      }
+    } catch (_) {}
   }
 
   void _attachVariantLabels(List<Map<String, dynamic>> lines) {
@@ -207,6 +224,50 @@ class AppController extends ChangeNotifier {
   CheckoutConfig checkoutConfig = CheckoutConfig.defaults();
   MultiSellerCheckout? multiSellerCheckout;
   BusinessHoursResult? businessHours;
+
+  /// Add-to-cart UX memo for [cartAddBlockedReason] only: last check time +
+  /// the seller set it covered. Repeated stepper taps for the same cart reuse
+  /// the hours instead of refetching every tap. Scoped to the add path on
+  /// purpose — checkout/refresh paths always fetch fresh, and the server
+  /// remains authoritative at order placement, so a stale add-gate (max 90s)
+  /// can never place an order while closed.
+  DateTime? _lastAddHoursAt;
+  String _lastAddHoursKey = '';
+
+  /// Radical cart fix: serialize ALL cart mutations + refreshes through one
+  /// FIFO gate so rapid +/- taps can never run in parallel and resurrect
+  /// stale quantities. [_cartGen] lets a stale refresh response be ignored
+  /// when a newer mutation already moved the truth forward.
+  ///
+  /// Implemented as a waiter queue of completers created fresh per op (never
+  /// awaiting an inherited cross-test future), so a torn-down test zone can
+  /// never leave later cart ops stuck behind a future from a dead zone.
+  int _cartActive = 0;
+  final List<Completer<void>> _cartWaiters = [];
+
+  Future<T> _enqueueCart<T>(Future<T> Function() fn) async {
+    // Condition-variable style lock: a waiter re-checks after waking so a new
+    // op arriving in the handoff microtask can never run concurrently with it.
+    while (_cartActive > 0) {
+      final waiter = Completer<void>();
+      _cartWaiters.add(waiter);
+      try {
+        await waiter.future;
+      } catch (_) {}
+    }
+    _cartActive++;
+    try {
+      return await fn();
+    } finally {
+      _cartActive--;
+      if (_cartWaiters.isNotEmpty) {
+        _cartWaiters.removeAt(0).complete();
+      }
+    }
+  }
+
+  int _cartGen = 0;
+  Future<void>? _refreshInFlight;
   List<TimeSlot> timeSlots = [];
   List<Map<String, dynamic>> checkoutGroups = [];
   List<Map<String, dynamic>> sellerGroups = [];
@@ -304,6 +365,13 @@ class AppController extends ChangeNotifier {
       coords ?? (latitude: 0.0, longitude: 0.0);
 
   Future<void> bootstrap() async {
+    final sw = Stopwatch()..start();
+    void mark(String tag) {
+      if (!Diag.enabled) return;
+      Diag.log('boot:$tag', '${sw.elapsedMilliseconds}ms');
+      sw.reset();
+    }
+
     _prefs = await SharedPreferences.getInstance();
     vault = TokenVault(prefs: _prefs);
     store = LocalStore(_prefs);
@@ -313,12 +381,14 @@ class AppController extends ChangeNotifier {
     );
     apiUrl = AppConfig.defaultApiUrl;
     await _prefs.setString('api_url', apiUrl);
+    mark('prefs');
     try {
       token = await vault.read();
     } on TokenVaultException catch (e) {
       if (kDebugMode) debugPrint('[auth] token vault read failed: $e');
       token = null;
     }
+    mark('tokenVault');
     viewerKey = _prefs.getString('viewer_key');
     if (viewerKey == null || viewerKey!.length < 8) {
       viewerKey = _newViewerKey();
@@ -332,9 +402,11 @@ class AppController extends ChangeNotifier {
           '${AppConfig.devicePlatform}_${viewerKey}_${DateTime.now().millisecondsSinceEpoch}';
       await _prefs.setString('sreamart_fcm_token', fcmToken);
     }
+    mark('viewer/fcm');
     final lang = _prefs.getString('language') ?? 'ar';
     await i18n.load(lang);
     i18n.addListener(notifyListeners);
+    mark('i18nLoad');
 
     // Stored strings may be corrupted (interrupted write, older build):
     // never let them break startup into a frozen splash screen.
@@ -368,37 +440,56 @@ class AppController extends ChangeNotifier {
       city = null;
       await _prefs.remove('city');
     }
+    mark('prefsDecode');
 
     api = CustomerApi(baseUrl: apiUrl, token: token, viewerKey: viewerKey);
     _catalogDb = await openCatalogDbFile();
+    mark('dbOpen');
     if (_catalogDb != null) {
       _localCart = local_cart.LocalCartRepository(_catalogDb!);
-      _syncOrchestrator = SyncOrchestrator(db: _catalogDb!, apiClient: api);
-      _syncOrchestrator!.start();
       await _localCart!.load();
+      // RADICAL FIX (cart vanished after restart): the Drift table used to
+      // SWALLOW guestCart (prefs cleared, UI list emptied) while the UI only
+      // ever reads guestCart — so the cart looked empty until the next add.
+      // Drift is now a mirror, guestCart stays the UI truth:
+      // prefs -> Drift when prefs has rows, Drift -> guestCart otherwise.
       if (guestCart.isNotEmpty) {
         for (final item in guestCart) {
-          await _localCart!.addItem(local_cart.CartItem.fromMap(item));
+          try {
+            await _localCart!.addItem(local_cart.CartItem.fromMap(item));
+          } catch (_) {}
         }
-        await _prefs.remove('guest_cart');
-        guestCart = [];
+      } else if (_localCart!.items.isNotEmpty) {
+        guestCart = _localCart!.items.map((c) => c.toMap()).toList();
+        _attachVariantLabels(guestCart);
+        try {
+          await store.writeJson('guest_cart', guestCart);
+        } catch (_) {}
       }
     }
+    mark('localCart');
     // Offline-first cold start: paint every usable persisted document BEFORE
     // any network request, so a start without connectivity still shows the
     // last visited shop, categories, and the current account's favorites.
-    // TTLs only decide whether a background refresh is triggered — they never
+    // TTLs only decide whether a background refresh is triggered ? they never
     // hide persisted rows (see loadShop/loadRootCategories).
     _paintStaleShopFromCache();
     _paintStaleCategoriesFromCache();
     _paintStaleCitiesFromCache();
     _paintStaleSettingsFlagsFromCache();
     await restoreCachedFavorites();
+    mark('favoritesRestore');
     try {
-      brand = await BrandService(apiUrl).load(prefs: _prefs);
-      await validateSession();
+      // Brand + session validation are independent: run together.
+      final brandFuture = BrandService(apiUrl).load(prefs: _prefs);
+      await Future.wait([
+        brandFuture.then((b) => brand = b),
+        validateSession(),
+      ]);
+      mark('brand+session');
       // Parallel bootstrap: settings + cities are independent.
       await Future.wait([reloadSettings(), loadCities()]);
+      mark('settings+cities');
       await resolveCity();
       // If still no city and we have cities available, select the first one
       // so the app has a valid location even when starting offline without
@@ -406,21 +497,29 @@ class AppController extends ChangeNotifier {
       if (city == null && cities.isNotEmpty) {
         await selectCity(normalizeCity(cities.first));
       }
+      mark('resolveCity');
       // Shop + categories + hours are independent of each other.
       await Future.wait([
         loadShop(),
         loadRootCategories(),
         loadBusinessHours(),
       ]);
+      mark('shop+cats+hours');
       if (isLoggedIn) {
-        await loadAddresses();
-        await refreshCart();
+        await Future.wait([loadAddresses(), refreshCart()]);
       }
+      mark('addr+cart');
       await reconcileCheckoutSession();
+      mark('checkout');
       bootstrapped = true;
       // Opportunistic best-effort catalog sync (never blocks startup, never
-      // throws, no-op while the cutover flag is off).
-      syncCatalogSoon();
+      // throws, no-op while the cutover flag is off). Deferred a few seconds:
+      // a cold start already paints cached rows and fires its own network
+      // page loads — a full catalog walk competing for the radio/CPU in the
+      // first seconds is what made startup feel sluggish.
+      unawaited(
+        Future<void>.delayed(const Duration(seconds: 10), syncCatalogSoon),
+      );
     } catch (error) {
       bootstrapError = '$error';
       bootstrapped = true;
@@ -430,6 +529,7 @@ class AppController extends ChangeNotifier {
     // Opportunistic replay of durable favorite ops (never checkout).
     kickSyncDelayed(const Duration(seconds: 3));
     notifyListeners();
+    mark('done');
   }
 
   /// Validates the stored session against the backend. Proven auth failures
@@ -508,11 +608,11 @@ class AppController extends ChangeNotifier {
     if (result.ok) {
       var data = result.dataMap;
       if (data['web_settings'] is List) {
-      data['web_settings'] = <String, dynamic>{};
-    }
+        data['web_settings'] = <String, dynamic>{};
+      }
       if (data['firebase'] is List) {
-      data['firebase'] = <String, dynamic>{};
-    }
+        data['firebase'] = <String, dynamic>{};
+      }
       settings = data;
       try {
         final sellerUrl = J.str(data['seller_android_app_url']);
@@ -667,8 +767,7 @@ class AppController extends ChangeNotifier {
     await _prefs.setString('city', jsonEncode(next));
     _bumpNav();
     notifyListeners();
-    await loadShop();
-    await loadRootCategories();
+    await Future.wait([loadShop(), loadRootCategories()]);
     if (isLoggedIn) await refreshCart();
     // New city scope: start a best-effort sync so offline browsing follows
     // the city switch (old scopes are retained, reads use the new scope).
@@ -1029,6 +1128,10 @@ class AppController extends ChangeNotifier {
         'qty': qty,
         // ignore: use_null_aware_elements
         if (sellerId != null) 'seller_id': sellerId,
+        // Display + totals read `price`; keep both keys so optimistic lines
+        // never flash as 0 before the server confirms them.
+        // ignore: use_null_aware_elements
+        if (productPrice != null) 'price': productPrice,
         // ignore: use_null_aware_elements
         if (productPrice != null) 'productPrice': productPrice,
       });
@@ -1045,6 +1148,19 @@ class AppController extends ChangeNotifier {
     return existing.length >= maxSellersPerCheckout;
   }
 
+  /// Drops a locally listed cart line that the server claims does not exist
+  /// (see [removeCartLine] convergent removal). Strictly id-keyed and a
+  /// no-op for null/empty ids, so it can never wipe an unrelated line.
+  void _dropPhantomCartLine(dynamic variantId) {
+    if (variantId == null) return;
+    final key = '$variantId';
+    if (key.isEmpty || key == 'null') return;
+    final lines = isLoggedIn ? cartProducts : guestCart;
+    final before = lines.length;
+    lines.removeWhere((e) => '${e['product_variant_id'] ?? e['id']}' == key);
+    if (lines.length != before) notifyListeners();
+  }
+
   String storeNameOf(Map<String, dynamic>? product) {
     if (product == null) return '';
     return J.str(
@@ -1055,18 +1171,48 @@ class AppController extends ChangeNotifier {
     );
   }
 
-  /// Returns a user-facing reason when add-to-cart must be blocked.
-  Future<String?> cartAddBlockedReason({
-    dynamic sellerId,
-    dynamic variantId,
-    String storeName = '',
-  }) async {
+  /// Seller-set key for the add-path hours memo ([cartAddBlockedReason]).
+  String _addHoursKey(dynamic sellerId) {
+    final ids = <dynamic>[
+      ..._sellerIdsFromCart(),
+      // ignore: use_null_aware_elements
+      if (sellerId != null) sellerId,
+    ];
+    return (ids.map((e) => '$e').toSet().toList()..sort()).join(',');
+  }
+
+  /// Warms the add-path hours memo (the same fetch [cartAddBlockedReason]
+  /// would do). Lets [addToCart] run the hours fetch in parallel with the
+  /// reachability probe. Failures are never memoized (businessHours stays
+  /// null) so the next tap retries immediately.
+  Future<void> _warmAddHours(dynamic sellerId) async {
+    final hoursKey = _addHoursKey(sellerId);
+    final lastCheck = _lastAddHoursAt;
+    final hoursFresh =
+        businessHours != null &&
+        lastCheck != null &&
+        _lastAddHoursKey == hoursKey &&
+        DateTime.now().difference(lastCheck) < const Duration(seconds: 90);
+    if (hoursFresh) return;
     final ids = <dynamic>[
       ..._sellerIdsFromCart(),
       // ignore: use_null_aware_elements
       if (sellerId != null) sellerId,
     ];
     await loadBusinessHours(sellerIds: ids);
+    if (businessHours != null) {
+      _lastAddHoursAt = DateTime.now();
+      _lastAddHoursKey = hoursKey;
+    }
+  }
+
+  /// Returns a user-facing reason when add-to-cart must be blocked.
+  Future<String?> cartAddBlockedReason({
+    dynamic sellerId,
+    dynamic variantId,
+    String storeName = '',
+  }) async {
+    await _warmAddHours(sellerId);
     final closed = addToCartClosedMessage(
       hours: businessHours,
       sellerId: sellerId,
@@ -1323,66 +1469,66 @@ class AppController extends ChangeNotifier {
   /// Location scope for catalog reads/writes (`city:<id>` or `global`).
   String get catalogScope => catalogScopeForCity(city);
 
-/// Resolves the honest data state of the current catalog scope for empty
-/// states and retry controls. Never infers status from a row count alone:
-/// a zero count can mean disabled, failed, unsynchronized, or genuinely
-/// empty, and each needs different UI.
-Future<CatalogScopeState> catalogScopeState() async {
-  final scope = catalogScope;
-  if (catalogSync.progress.value.phase == CatalogSyncPhase.syncing &&
-      catalogSync.progress.value.scope == scope) {
-    return const CatalogScopeState(
-      status: CatalogScopeStatus.syncing,
-    );
-  }
-  try {
-    final db = await ensureCatalogDb();
-    if (db == null) return const CatalogScopeState(status: CatalogScopeStatus.neverSynced);
-    final dao = CatalogDao(db);
-    final row = await dao.getSyncState(scope);
-    if (row == null) {
-      return const CatalogScopeState(status: CatalogScopeStatus.neverSynced);
+  /// Resolves the honest data state of the current catalog scope for empty
+  /// states and retry controls. Never infers status from a row count alone:
+  /// a zero count can mean disabled, failed, unsynchronized, or genuinely
+  /// empty, and each needs different UI.
+  Future<CatalogScopeState> catalogScopeState() async {
+    final scope = catalogScope;
+    if (catalogSync.progress.value.phase == CatalogSyncPhase.syncing &&
+        catalogSync.progress.value.scope == scope) {
+      return const CatalogScopeState(status: CatalogScopeStatus.syncing);
     }
-    final count = await dao.productCount(scope);
-    final lastSyncAt = row.updatedAt;
-    final stale =
-        DateTime.now().difference(lastSyncAt) >
-        CachePolicy.ttlOf(CacheEntity.productList);
-    if (row.phase != 'full_complete') {
+    try {
+      final db = await ensureCatalogDb();
+      if (db == null) {
+        return const CatalogScopeState(status: CatalogScopeStatus.neverSynced);
+      }
+      final dao = CatalogDao(db);
+      final row = await dao.getSyncState(scope);
+      if (row == null) {
+        return const CatalogScopeState(status: CatalogScopeStatus.neverSynced);
+      }
+      final count = await dao.productCount(scope);
+      final lastSyncAt = row.updatedAt;
+      final stale =
+          DateTime.now().difference(lastSyncAt) >
+          CachePolicy.ttlOf(CacheEntity.productList);
+      if (row.phase != 'full_complete') {
+        return CatalogScopeState(
+          status: CatalogScopeStatus.failed,
+          lastSyncAt: lastSyncAt,
+          listedCount: count,
+          stale: true,
+        );
+      }
+      // Count sections and haraj in current scope
+      final sectionCount = await dao.sectionHarajCount(scope, 'section');
+      final harajCount = await dao.sectionHarajCount(scope, 'haraj');
+      final anySection = sectionCount > 0;
+      final anyHaraj = harajCount > 0;
+      if (count == 0 && !anySection && !anyHaraj) {
+        return CatalogScopeState(
+          status: CatalogScopeStatus.empty,
+          lastSyncAt: lastSyncAt,
+          listedCount: count,
+          stale: stale,
+          sectionCount: sectionCount,
+          harajCount: harajCount,
+        );
+      }
       return CatalogScopeState(
-        status: CatalogScopeStatus.failed,
-        lastSyncAt: lastSyncAt,
-        listedCount: count,
-        stale: true,
-      );
-    }
-    // Count sections and haraj in current scope
-    final sectionCount = await dao.sectionHarajCount(scope, 'section');
-    final harajCount = await dao.sectionHarajCount(scope, 'haraj');
-    final anySection = sectionCount > 0;
-    final anyHaraj = harajCount > 0;
-    if (count == 0 && !anySection && !anyHaraj) {
-      return CatalogScopeState(
-        status: CatalogScopeStatus.empty,
+        status: CatalogScopeStatus.ready,
         lastSyncAt: lastSyncAt,
         listedCount: count,
         stale: stale,
         sectionCount: sectionCount,
         harajCount: harajCount,
       );
+    } catch (_) {
+      return const CatalogScopeState(status: CatalogScopeStatus.neverSynced);
     }
-    return CatalogScopeState(
-      status: CatalogScopeStatus.ready,
-      lastSyncAt: lastSyncAt,
-      listedCount: count,
-      stale: stale,
-      sectionCount: sectionCount,
-      harajCount: harajCount,
-    );
-  } catch (_) {
-    return const CatalogScopeState(status: CatalogScopeStatus.neverSynced);
   }
-}
 
   /// Opens the catalog database when the cutover flag allows it. Returns null
   /// when disabled or unavailable — callers always fall back to JSON/network.
@@ -1407,16 +1553,43 @@ Future<CatalogScopeState> catalogScopeState() async {
   /// Best-effort sync of the current city scope in the background. Safe to
   /// call from bootstrap/city-change/pull-to-refresh: debounced, single
   /// flight, never throws, never blocks the UI.
+  ///
+  /// The debounce is PERSISTED: a full walk rewrites every catalog row plus
+  /// FTS, so it must not restart on every cold start (it previously did,
+  /// because the timestamp lived only in memory).
   Future<void> syncCatalogSoon() async {
     if (!CatalogDbConfig.enabledForUse) return;
-    final last = _lastCatalogSyncAttempt;
-    if (last != null &&
-        DateTime.now().difference(last) < const Duration(minutes: 5)) {
+    final now = DateTime.now();
+    final last = _lastCatalogSyncAttempt ?? _readLastCatalogSyncAttempt();
+    if (last != null && now.difference(last) < _catalogSyncMinInterval) {
       return;
     }
-    _lastCatalogSyncAttempt = DateTime.now();
+    _lastCatalogSyncAttempt = now;
+    unawaited(_persistLastCatalogSyncAttempt(now));
     try {
       await syncCatalogNow();
+    } catch (_) {}
+  }
+
+  static const Duration _catalogSyncMinInterval = Duration(minutes: 30);
+  static const String _kLastCatalogSyncAttempt = 'catalog_sync_attempt_at';
+
+  DateTime? _readLastCatalogSyncAttempt() {
+    try {
+      final raw = _prefs.getString(_kLastCatalogSyncAttempt);
+      if (raw == null || raw.isEmpty) return null;
+      return DateTime.tryParse(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _persistLastCatalogSyncAttempt(DateTime at) async {
+    try {
+      await _prefs.setString(
+        _kLastCatalogSyncAttempt,
+        at.toUtc().toIso8601String(),
+      );
     } catch (_) {}
   }
 
@@ -1506,6 +1679,7 @@ Future<CatalogScopeState> catalogScopeState() async {
       }
     }
 
+    final swSync = Diag.enabled ? (Stopwatch()..start()) : null;
     final result = await catalogSync.syncScope(
       db: db,
       scope: scope,
@@ -1513,16 +1687,32 @@ Future<CatalogScopeState> catalogScopeState() async {
       fetchStores: fetchStores,
       fetchCategories: fetchCategories,
     );
+    if (swSync != null) {
+      Diag.log(
+        'sync:catalog',
+        '${swSync.elapsedMilliseconds}ms complete=${result.complete} '
+        'products=${result.products} stores=${result.stores} '
+        'categories=${result.categories} error=${result.error}',
+      );
+    }
     notifyListeners();
-    // Opt-in thumbnails: only after a completed sync, never blocking.
-    if (result.complete) prefetchCatalogImages();
+    // Bounded thumbnails: only after a completed sync, and only after the
+    // UI has had time to settle — never while the user is scrolling/browsing.
+    if (result.complete) {
+      unawaited(
+        Future<void>.delayed(
+          const Duration(seconds: 20),
+          prefetchCatalogImages,
+        ),
+      );
+    }
     return result;
   }
 
-  /// Downloads newest catalog thumbnails when the user opted in. Fire-and-
-  /// forget, bounded, best-effort — catalog data never waits for images.
+  /// Downloads newest catalog thumbnails automatically after every
+  /// completed sync. Fire-and-forget, bounded, best-effort — catalog data
+  /// never waits for images.
   Future<void> prefetchCatalogImages() async {
-    if (!offlineImagesEnabled) return;
     try {
       final db = await ensureCatalogDb();
       if (db == null) return;
@@ -1546,11 +1736,15 @@ Future<CatalogScopeState> catalogScopeState() async {
     int? storeId,
     String search = '',
     String sort = '',
+    String sectionId = '',
+    String sellerSectionId = '',
     String priceMin = '',
     String priceMax = '',
     String minRating = '',
     bool inStock = false,
     bool onlyOffers = false,
+    bool canDeliver = false,
+    bool isReturnable = false,
     int limit = 50,
     int offset = 0,
   }) async {
@@ -1565,11 +1759,15 @@ Future<CatalogScopeState> catalogScopeState() async {
         storeId: storeId,
         search: search,
         sort: sort,
+        sectionId: sectionId,
+        sellerSectionId: sellerSectionId,
         priceMin: double.tryParse(priceMin),
         priceMax: double.tryParse(priceMax),
         minRating: double.tryParse(minRating),
         inStockOnly: inStock,
         offersOnly: onlyOffers,
+        canDeliverOnly: canDeliver,
+        returnableOnly: isReturnable,
         limit: limit,
         offset: offset,
       );
@@ -1586,11 +1784,15 @@ Future<CatalogScopeState> catalogScopeState() async {
     int? categoryId,
     int? storeId,
     String search = '',
+    String sectionId = '',
+    String sellerSectionId = '',
     String priceMin = '',
     String priceMax = '',
     String minRating = '',
     bool inStock = false,
     bool onlyOffers = false,
+    bool canDeliver = false,
+    bool isReturnable = false,
   }) async {
     try {
       final db = await ensureCatalogDb();
@@ -1600,11 +1802,15 @@ Future<CatalogScopeState> catalogScopeState() async {
         categoryId: categoryId,
         storeId: storeId,
         search: search,
+        sectionId: sectionId,
+        sellerSectionId: sellerSectionId,
         priceMin: double.tryParse(priceMin),
         priceMax: double.tryParse(priceMax),
         minRating: double.tryParse(minRating),
         inStockOnly: inStock,
         offersOnly: onlyOffers,
+        canDeliverOnly: canDeliver,
+        returnableOnly: isReturnable,
       );
     } catch (_) {
       return 0;
@@ -1646,18 +1852,29 @@ Future<CatalogScopeState> catalogScopeState() async {
     }
   }
 
-  /// Offline store rows + lookups for the synchronized scope.
+  /// Offline store rows + lookups for the synchronized scope. Applies the same
+  /// type/rating/sort filters as the online sellers request, then pages in
+  /// memory (the stores table is small and always fully walked). The `type`
+  /// filter keeps stores that have at least one listed product in that
+  /// category, mirroring the server's seller-type semantics.
   Future<List<Map<String, dynamic>>> catalogStoresLocal({
     int limit = 50,
     int offset = 0,
+    String type = '',
+    String minRating = '',
+    String sort = '',
   }) async {
     try {
       final db = await ensureCatalogDb();
       if (db == null) return [];
-      final found = await CatalogDao(
-        db,
-      ).listStores(catalogScope, limit: limit + offset);
-      final rows = found.map((s) {
+      final dao = CatalogDao(db);
+      Set<int>? allowed;
+      final typeId = int.tryParse(type);
+      if (typeId != null && typeId > 0) {
+        allowed = await dao.storeIdsWithCategory(catalogScope, typeId);
+      }
+      final found = await dao.allStores(catalogScope);
+      var rows = found.map((s) {
         try {
           final m = J.map(jsonDecode(s.payload));
           if (m.isNotEmpty) return m;
@@ -1672,13 +1889,42 @@ Future<CatalogScopeState> catalogScopeState() async {
           'status': s.status,
         };
       }).toList();
-      if (offset >= rows.length) return [];
-      final end = (offset + limit).clamp(0, rows.length);
-      return rows.sublist(offset, end);
+      if (allowed != null) {
+        rows = rows
+            .where((m) => allowed!.contains(J.i(m['id'] ?? m['seller_id'])))
+            .toList();
+      }
+      final minR = double.tryParse(minRating);
+      if (minR != null && minR > 0) {
+        rows = rows.where((m) => _storeRating(m) >= minR).toList();
+      }
+      switch (sort) {
+        case 'nearest':
+        case 'rating':
+          rows.sort((a, b) => _storeRating(b).compareTo(_storeRating(a)));
+          break;
+        case 'name':
+          rows.sort(
+            (a, b) => J.str(a['store_name'] ?? a['name'])
+                .toLowerCase()
+                .compareTo(J.str(b['store_name'] ?? b['name']).toLowerCase()),
+          );
+          break;
+      }
+      if (offset > 0) {
+        rows = offset >= rows.length ? [] : rows.sublist(offset);
+      }
+      if (rows.length > limit) {
+        rows = rows.sublist(0, limit);
+      }
+      return rows;
     } catch (_) {
       return [];
     }
   }
+
+  double _storeRating(Map<String, dynamic> m) =>
+      double.tryParse('${m['average_rating'] ?? m['rating'] ?? ''}') ?? 0;
 
   Future<Map<String, dynamic>?> catalogStoreLocal({
     int? id,
@@ -1819,25 +2065,6 @@ Future<CatalogScopeState> catalogScopeState() async {
         current.take(maxRecentSearches).toList(),
       );
     } catch (_) {}
-  }
-
-  // ---- Offline image prefetch preference ----
-  /// Whether the user opted into downloading catalog thumbnails for offline
-  /// browsing. OFF by default: prefetch may use significant mobile data, so
-  /// it requires an explicit choice (Wi-Fi recommended in the UI copy).
-  bool get offlineImagesEnabled {
-    try {
-      return _prefs.getBool('offline_images') ?? false;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  Future<void> setOfflineImagesEnabled(bool value) async {
-    try {
-      await _prefs.setBool('offline_images', value);
-    } catch (_) {}
-    notifyListeners();
   }
 
   Future<void> cacheOrders(
@@ -2076,7 +2303,10 @@ Future<CatalogScopeState> catalogScopeState() async {
             .map((item) => '${item['product_variant_id']}')
             .join(',');
         final qtys = pending.map((item) => '${item['qty']}').join(',');
-        final merged = await api.bulkAddToCart(variantIds: ids, quantities: qtys);
+        final merged = await api.bulkAddToCart(
+          variantIds: ids,
+          quantities: qtys,
+        );
         if (merged.ok) {
           guestCart = [];
           guestCartTotal = 0;
@@ -2145,7 +2375,41 @@ Future<CatalogScopeState> catalogScopeState() async {
     _bumpNav();
   }
 
-  Future<ApiResult> refreshCart({int checkout = 0}) async {
+  bool _isNetworkResult(ApiResult r) =>
+      r.classifiedError?.category == ApiErrorCategory.network;
+
+  Future<ApiResult> refreshCart({int checkout = 0}) {
+    return _enqueueCart(() => _refreshCartInner(checkout: checkout));
+  }
+
+  /// Coalesces concurrent refresh callers onto the single in-flight request
+  /// instead of firing N parallel `cart` GETs (was the main "slow cart"
+  /// complaint on stepper spam + pull-to-refresh overlap).
+  Future<ApiResult> _refreshCartInner({int checkout = 0}) async {
+    final mine = ++_cartGen;
+    final ongoing = _refreshInFlight;
+    if (ongoing != null) {
+      try {
+        await ongoing;
+      } catch (_) {}
+      // A newer generation already refreshed: reuse current state.
+      if (mine < _cartGen) {
+        return ApiResult({'status': 1, 'data': [], 'coalesced': 1});
+      }
+    }
+    final fut = _doRefreshCart(checkout: checkout, gen: mine);
+    _refreshInFlight = fut.then((_) {});
+    try {
+      return await fut;
+    } finally {
+      _refreshInFlight = null;
+    }
+  }
+
+  Future<ApiResult> _doRefreshCart({
+    required int checkout,
+    required int gen,
+  }) async {
     final point = _cartCoords(checkout: checkout == 1);
     if (point == null) {
       // No coordinates (no city yet): local cart is the truth — still
@@ -2171,11 +2435,10 @@ Future<CatalogScopeState> catalogScopeState() async {
         // checkout — never treated as live stock/prices).
         if (checkout == 0) {
           try {
-            await offline.writeDoc(
-              OfflineCache.snapshotKey('cart::$scope'),
-              {'products': cartProducts, 'subTotal': cartSubTotal},
-              scope: scope,
-            );
+            await offline.writeDoc(OfflineCache.snapshotKey('cart::$scope'), {
+              'products': cartProducts,
+              'subTotal': cartSubTotal,
+            }, scope: scope);
           } catch (_) {}
         }
         // parity: enrich sellerGroups etc when is_checkout=1
@@ -2207,10 +2470,31 @@ Future<CatalogScopeState> catalogScopeState() async {
           if (timeSlots.isEmpty) await loadTimeSlots();
           await loadCheckoutConfig();
         }
+      } else if (result.classifiedError == null) {
+        // The server is REACHABLE and answered a business `status:0` with no
+        // transport error map. For the non-checkout cart GET the only such
+        // answer is "no items in cart" (`no_items_found_in_users_cart`): the
+        // cart is genuinely EMPTY. Clearing here is essential — the old code
+        // fell into the offline-snapshot restore below and re-materialised
+        // the line the user had just deleted, so the last item had to be
+        // deleted twice. A checkout read (is_checkout=1) can fail for
+        // delivery reasons instead, so never wipe local lines for those.
+        if (checkout == 0) {
+          cart = null;
+          cartProducts = [];
+          cartSubTotal = 0;
+          try {
+            await offline.removeDoc(
+              OfflineCache.snapshotKey('cart::$accountScope'),
+            );
+          } catch (_) {}
+        }
       } else if (cartProducts.isEmpty) {
-        // Offline with no live lines: restore the last server-confirmed
-        // snapshot for this account (scope-guarded). The UI badges it stale;
-        // checkout revalidates before any commit.
+        // Request failed (transport/server error) with no live lines: restore
+        // the last server-confirmed snapshot for this account (scope-guarded).
+        // The UI badges it stale; checkout revalidates before any commit. The
+        // genuinely-empty business answer is handled in the branch above, so a
+        // line the user just deleted can never be resurrected from here.
         try {
           final snap = offline.readDoc(
             OfflineCache.snapshotKey('cart::$accountScope'),
@@ -2281,17 +2565,15 @@ Future<CatalogScopeState> catalogScopeState() async {
     return coords;
   }
 
-  /// Authoritative reachability probe for cart mutations (cart edits are
-  /// online-only): a recent success short-circuits, otherwise one cheap
-  /// request decides. Non-network failures still count as reachable.
+  /// Authoritative reachability probe for online-only mutations. Always
+  /// probes (no success-window shortcut: a recent success must never green-
+  /// light an edit made after the link dropped). Non-network failures still
+  /// count as reachable. Single cheap request, no retries.
   Future<bool> hasInternetAccess() async {
-    final lastOk = api.lastSuccessAt;
-    if (lastOk != null &&
-        DateTime.now().difference(lastOk) < const Duration(seconds: 45)) {
-      return true;
-    }
     try {
-      final res = await api.cities().timeout(const Duration(seconds: 8));
+      final res = await api
+          .cities(limit: 1, offset: 0)
+          .timeout(const Duration(seconds: 8));
       if (res.ok) return true;
       return res.classifiedError?.category != ApiErrorCategory.network;
     } catch (_) {
@@ -2300,6 +2582,18 @@ Future<CatalogScopeState> catalogScopeState() async {
   }
 
   /// Returns `same_seller` when mixing sellers is not allowed.
+  ///
+  /// RADICAL FIX (slow + conflicts):
+  /// * NO `hasInternetAccess()` probe before the mutation. That probe cost an
+  ///   extra 1 RTT (up to 8s on a bad link) on EVERY +/- tap. The mutation
+  ///   result itself is the reachability signal: a `network`-category failure
+  ///   maps to [kRequiresInternet] with zero extra requests.
+  /// * NO blocking business-hours fetch. The cached memo gates obvious
+  ///   closed-store taps instantly; a background warm refreshes it. The
+  ///   server stays authoritative at checkout, so this can never place an
+  ///   order while closed.
+  /// * Serialized through [_enqueueCart]: rapid stepper taps queue FIFO, so
+  ///   quantities can never interleave or resurrect stale values.
   Future<String?> addToCart({
     required dynamic productId,
     required dynamic variantId,
@@ -2309,37 +2603,73 @@ Future<CatalogScopeState> catalogScopeState() async {
     bool replaceSeller = false,
     String storeName = '',
     String variantLabel = '',
+  }) {
+    return _enqueueCart(
+      () => _addToCartInner(
+        productId: productId,
+        variantId: variantId,
+        qty: qty,
+        productPrice: productPrice,
+        sellerId: sellerId,
+        replaceSeller: replaceSeller,
+        storeName: storeName,
+        variantLabel: variantLabel,
+      ),
+    );
+  }
+
+  Future<String?> _addToCartInner({
+    required dynamic productId,
+    required dynamic variantId,
+    required int qty,
+    double? productPrice,
+    dynamic sellerId,
+    bool replaceSeller = false,
+    String storeName = '',
+    String variantLabel = '',
   }) async {
-    if (!await hasInternetAccess()) return kRequiresInternet;
+    // Fast local guards first (zero network).
+    if (!replaceSeller && maxCartItemsCount > 0 && qty > maxCartItemsCount) {
+      return t(
+        'max_cart_limit_error',
+      ).replaceAll('{max}', '$maxCartItemsCount');
+    }
     if (!replaceSeller) {
-      if (maxCartItemsCount > 0 && qty > maxCartItemsCount) {
-        return t(
-          'max_cart_limit_error',
-        ).replaceAll('{max}', '$maxCartItemsCount');
-      }
       final currentQty = _qtyInCart(variantId);
       final isNewOrIncrease = qty > currentQty;
       if (isNewOrIncrease) {
-        final blocked = await cartAddBlockedReason(
-          sellerId: sellerId,
-          variantId: variantId,
-          storeName: storeName,
-        );
-        if (blocked != null) return blocked;
+        // Adding to the cart is ALWAYS allowed, even when the store/platform
+        // is closed — closure only blocks placing the order at checkout.
+        // Keep hours warm so the checkout gate has fresh data.
+        unawaited(_warmAddHours(sellerId));
+        if (oneSellerCart && sellerId != null) {
+          final existing = cartSellerIds();
+          if (existing.isNotEmpty && !existing.contains('$sellerId')) {
+            return 'same_seller';
+          }
+        }
+        if (wouldExceedStoreLimit(sellerId: sellerId, variantId: variantId)) {
+          return t(
+            'max_stores_exceeded',
+          ).replaceAll('{max}', '$maxSellersPerCheckout');
+        }
       }
     } else {
-      await loadBusinessHours(sellerIds: sellerId != null ? [sellerId] : []);
-      final closed = addToCartClosedMessage(
-        hours: businessHours,
-        sellerId: sellerId,
-        storeName: storeName,
+      unawaited(
+        loadBusinessHours(sellerIds: sellerId != null ? [sellerId] : []),
       );
-      if (closed != null && closed.isNotEmpty) return closed;
     }
     if (isLoggedIn) {
+      List<Map<String, dynamic>>? snapshot;
       if (replaceSeller) {
-        await api.clearCart();
+        snapshot = List<Map<String, dynamic>>.from(cartProducts);
         cartProducts = [];
+        notifyListeners();
+        try {
+          await api.clearCart();
+        } catch (_) {}
+      } else {
+        snapshot = List<Map<String, dynamic>>.from(cartProducts);
       }
       if (variantLabel.trim().isNotEmpty) {
         await rememberVariantLabel(variantId, variantLabel);
@@ -2351,30 +2681,70 @@ Future<CatalogScopeState> catalogScopeState() async {
         productId: productId,
         sellerId: sellerId,
         productPrice: productPrice,
-        clearFirst: replaceSeller,
+        clearFirst: false,
       );
-      final result = await api.addToCart(
-        productId: productId,
-        variantId: variantId,
-        qty: qty,
-      );
+      ApiResult result;
+      try {
+        result = await api.addToCart(
+          productId: productId,
+          variantId: variantId,
+          qty: qty,
+        );
+       } catch (_) {
+         // Transport threw outside ApiResult: keep the optimistic change when
+         // the backend looks unreachable (offline add is accepted locally);
+         // otherwise revert and report a generic error.
+         if (api.likelyOffline) {
+           try {
+             await offline.writeDoc(
+               OfflineCache.snapshotKey('cart::$accountScope'),
+               {'products': cartProducts, 'subTotal': cartSubTotal},
+               scope: accountScope,
+             );
+           } catch (_) {}
+           await _invalidateCheckoutSession();
+           return null;
+         }
+         cartProducts = snapshot;
+         notifyListeners();
+         return api.likelyOffline
+             ? kRequiresInternet
+             : t('something_went_wrong');
+       }
+       if (_isNetworkResult(result)) {
+         // Offline: keep the optimistic local change (add-to-cart is accepted
+         // offline); only the final checkout is rejected. Persist a snapshot so
+         // an offline restart still shows the lines.
+         try {
+           await offline.writeDoc(
+             OfflineCache.snapshotKey('cart::$accountScope'),
+             {'products': cartProducts, 'subTotal': cartSubTotal},
+             scope: accountScope,
+           );
+         } catch (_) {}
+         await _invalidateCheckoutSession();
+         return null;
+       }
       if (result.oneSellerError == 1) {
-        await refreshCart();
+        await _refreshCartInner(checkout: 0);
         await _invalidateCheckoutSession();
         return 'same_seller';
       }
       if (!result.ok) {
         // Reconcile: drop the optimistic change, show the real error.
-        await refreshCart();
+        await _refreshCartInner(checkout: 0);
         await _invalidateCheckoutSession();
         return result.message.isEmpty
             ? t('something_went_wrong')
             : result.message;
       }
-      await refreshCart();
+      await _refreshCartInner(checkout: 0);
       await _invalidateCheckoutSession();
       return null;
     }
+    // Guest lines are persisted locally and accepted even when offline; server
+    // pricing is reconciled on the next successful refresh. Only the final
+    // checkout is rejected offline.
     if (replaceSeller) {
       guestCart = [];
     } else if (guestCart.isNotEmpty && sellerId != null && oneSellerCart) {
@@ -2396,19 +2766,27 @@ Future<CatalogScopeState> catalogScopeState() async {
       if (variantLabel.trim().isNotEmpty) {
         guestCart[existingIndex]['variant_label'] = variantLabel.trim();
       }
+      if (productPrice != null) {
+        guestCart[existingIndex]['price'] = productPrice;
+        guestCart[existingIndex]['productPrice'] = productPrice;
+      }
     } else {
       guestCart.add({
         'product_id': productId,
         'product_variant_id': variantId,
         'qty': qty,
         'seller_id': ?sellerId,
+        // Display reads `price`; keep both keys so the line never flashes 0
+        // before the server reprices it.
+        'price': ?productPrice,
         'productPrice': ?productPrice,
         if (variantLabel.trim().isNotEmpty)
           'variant_label': variantLabel.trim(),
       });
     }
     await persistGuestCart();
-    await refreshCart();
+    notifyListeners();
+    await _refreshCartInner(checkout: 0);
     await _invalidateCheckoutSession();
     return null;
   }
@@ -2416,47 +2794,125 @@ Future<CatalogScopeState> catalogScopeState() async {
   /// Removes one cart line. Returns an error message when the server
   /// refuses (logged-in), so callers can surface it instead of failing
   /// silently with a stepper that never moves.
+  ///
+  /// Convergent removal: when the server answers that the line does not
+  /// exist (stale variant id, line already dropped server-side, …), the
+  /// local line is dropped instead of reported as an error — otherwise the
+  /// item stays visible yet can never be deleted.
   Future<String?> removeCartLine({
     required dynamic productId,
     required dynamic variantId,
+  }) {
+    return _enqueueCart(
+      () => _removeCartLineInner(productId: productId, variantId: variantId),
+    );
+  }
+
+  Future<String?> _removeCartLineInner({
+    required dynamic productId,
+    required dynamic variantId,
   }) async {
-    if (!await hasInternetAccess()) return kRequiresInternet;
     if (isLoggedIn) {
+      final snapshot = List<Map<String, dynamic>>.from(cartProducts);
       // Optimistic: line disappears instantly, server confirms after.
       _optimisticSetQty(variantId, 0);
-      final result = await api.removeFromCart(
-        productId: productId,
-        variantId: variantId,
-      );
+      ApiResult result;
+      try {
+        result = await api.removeFromCart(
+          productId: productId,
+          variantId: variantId,
+        );
+      } catch (_) {
+        if (api.likelyOffline) {
+          try {
+            await offline.writeDoc(
+              OfflineCache.snapshotKey('cart::$accountScope'),
+              {'products': cartProducts, 'subTotal': cartSubTotal},
+              scope: accountScope,
+            );
+          } catch (_) {}
+          await _invalidateCheckoutSession();
+          return null;
+        }
+        cartProducts = snapshot;
+        notifyListeners();
+        return t('something_went_wrong');
+      }
+      if (_isNetworkResult(result)) {
+        try {
+          await offline.writeDoc(
+            OfflineCache.snapshotKey('cart::$accountScope'),
+            {'products': cartProducts, 'subTotal': cartSubTotal},
+            scope: accountScope,
+          );
+        } catch (_) {}
+        await _invalidateCheckoutSession();
+        return null;
+      }
       if (!result.ok) {
-        await refreshCart();
+        if (_isAlreadyRemoved(result.message)) {
+          await _refreshCartInner(checkout: 0);
+          // The server claims this id does not exist: make sure a
+          // resurrected phantom (same id echoed back by refresh) never
+          // stays visible and undeletable.
+          _dropPhantomCartLine(variantId);
+          await _invalidateCheckoutSession();
+          return null;
+        }
+        await _refreshCartInner(checkout: 0);
         await _invalidateCheckoutSession();
         return result.message.isEmpty
             ? t('something_went_wrong')
             : result.message;
       }
-      await refreshCart();
+      await _refreshCartInner(checkout: 0);
       await _invalidateCheckoutSession();
       return null;
     }
+    // Guest removal is also accepted offline: update the local cart and
+    // reconcile with the server on the next successful refresh.
     guestCart.removeWhere(
       (item) => '${item['product_variant_id']}' == '$variantId',
     );
     await persistGuestCart();
-    await refreshCart();
+    notifyListeners();
+    await _refreshCartInner(checkout: 0);
     await _invalidateCheckoutSession();
     return null;
   }
 
-  Future<void> clearAllCart() async {
-    if (!await hasInternetAccess()) return;
-    if (isLoggedIn) {
-      await api.clearCart();
-    }
-    guestCart = [];
-    await _prefs.remove('guest_cart');
-    await refreshCart();
-    await _invalidateCheckoutSession();
+  Future<void> clearAllCart() {
+    return _enqueueCart(() async {
+      // Guest clear stays probe-guarded (offline keeps the cart); logged-in
+      // attempts the server clear and restores the snapshot on failure.
+      if (isGuest && !await hasInternetAccess()) return;
+      final snapshot = List<Map<String, dynamic>>.from(
+        isLoggedIn ? cartProducts : guestCart,
+      );
+      if (isLoggedIn) {
+        cartProducts = [];
+        notifyListeners();
+        try {
+          final res = await api.clearCart();
+          if (_isNetworkResult(res)) {
+            cartProducts = snapshot;
+            notifyListeners();
+            return;
+          }
+        } catch (_) {
+          cartProducts = snapshot;
+          notifyListeners();
+          return;
+        }
+      } else {
+        guestCart = [];
+        notifyListeners();
+      }
+      guestCart = [];
+      await _prefs.remove('guest_cart');
+      await _refreshCartInner(checkout: 0);
+      await _invalidateCheckoutSession();
+    });
   }
 
   Future<String?> applyPromo(String code, double total) async {
@@ -2485,8 +2941,13 @@ Future<CatalogScopeState> catalogScopeState() async {
     notifyListeners();
   }
 
-  bool isFavorite(dynamic productId) =>
-      favoriteIds.map((id) => '$id').contains('$productId');
+  bool isFavorite(dynamic productId) {
+    final key = '$productId';
+    for (final id in favoriteIds) {
+      if ('$id' == key) return true;
+    }
+    return false;
+  }
 
   /// Optimistic favorite toggle with a durable outbox. The local state moves
   /// instantly; failures are queued (coalesced by product id) and replayed by
@@ -2537,11 +2998,13 @@ Future<CatalogScopeState> catalogScopeState() async {
       // every other queued op keeps its retry guarantees.
       try {
         final outbox = PendingOutbox(store, accountScope);
-        final stale = outbox.load().where((o) =>
-            (adding
-                    ? o.type == PendingOpType.favoriteRemove
-                    : o.type == PendingOpType.favoriteAdd) &&
-                '${o.payload['product_id']}' == '$productId');
+        final stale = outbox.load().where(
+          (o) =>
+              (adding
+                  ? o.type == PendingOpType.favoriteRemove
+                  : o.type == PendingOpType.favoriteAdd) &&
+              '${o.payload['product_id']}' == '$productId',
+        );
         for (final o in stale) {
           await outbox.remove(o.id);
         }
@@ -2600,11 +3063,40 @@ Future<CatalogScopeState> catalogScopeState() async {
 
   /// The backend reports `no_product_found` when the row is already gone:
   /// the local removal has converged, so the op is done (not retried).
+  /// Matches English and Arabic phrasings (the backend answers business
+  /// failures in Arabic, e.g. "المنتج غير موجود في السلة", and 404s arrive
+  /// as "العنصر المطلوب غير موجود.").
   bool _isAlreadyRemoved(String message) {
     final m = message.toLowerCase();
-    return (m.contains('no_product') && m.contains('found')) ||
+    if (m.isEmpty) return false;
+    if ((m.contains('no_product') && m.contains('found')) ||
         (m.contains('not') && m.contains('found')) ||
-        (m.contains('already') && m.contains('removed'));
+        (m.contains('already') && m.contains('removed')) ||
+        m.contains('not exist') ||
+        m.contains('does not exist') ||
+        m.contains('no longer')) {
+      return true;
+    }
+    if (m.contains('invalid') &&
+        (m.contains('product') ||
+            m.contains('variant') ||
+            m.contains('item') ||
+            m.contains('cart'))) {
+      return true;
+    }
+    if (m.contains('no item') && m.contains('found')) return true;
+    if (m.contains('empty') && m.contains('cart')) return true;
+    // Backend "cart is already empty" phrasing, e.g. "لم يتم العثور على
+    // عناصر في عربة المستخدم": nothing to remove means converged.
+    return m.contains('غير موجود') ||
+        m.contains('غير موجودة') ||
+        m.contains('لم يتم العثور') ||
+        m.contains('لا يوجد') ||
+        m.contains('لا توجد') ||
+        m.contains('محذوف') ||
+        m.contains('تم حذف') ||
+        m.contains('ليس في السلة') ||
+        m.contains('ليست في السلة');
   }
 
   bool _isPermanent(ClassifiedApiError? error) {

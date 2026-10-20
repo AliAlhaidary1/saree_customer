@@ -9,11 +9,15 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'app.dart';
 import 'core/app_controller.dart';
 import 'core/app_theme.dart';
+import 'core/diag.dart';
 import 'core/push_notifications.dart';
 import 'widgets/splash_screen.dart';
 
 Future<void> main() async {
+  final swMain = Stopwatch()..start();
+  Diag.log('main:enter');
   WidgetsFlutterBinding.ensureInitialized();
+  Diag.log('main:binding', '${swMain.elapsedMilliseconds}ms');
   // Device-safe image cache: bounded RAM usage, avoids OOM on long browsing.
   try {
     PaintingBinding.instance.imageCache.maximumSize = 200;
@@ -34,7 +38,9 @@ Future<void> main() async {
   try {
     await PushNotifications.ensureInitialized();
   } catch (_) {}
+  Diag.log('main:firebase', '${swMain.elapsedMilliseconds}ms');
   runApp(const ProviderScope(child: BootstrapApp()));
+  Diag.log('main:runApp', '${swMain.elapsedMilliseconds}ms');
 }
 
 class BootstrapApp extends StatefulWidget {
@@ -67,9 +73,12 @@ class _BootstrapAppState extends State<BootstrapApp> {
       // مدة أنيميشن السبلاش المبسط (1400ms) — سريع بدون انتظار زائد
       const Duration(milliseconds: 1500),
     );
+    final swBoot = Stopwatch()..start();
     await appController.bootstrap();
+    Diag.log('start:bootstrap', '${swBoot.elapsedMilliseconds}ms');
     // Real FCM token (backend settings.firebase -> Firebase -> fcm_token sync).
     // Gracefully disabled when no Firebase config exists anywhere.
+    final swPush = Stopwatch()..start();
     try {
       final fb = appController.settings['firebase'];
       await PushNotifications.init(
@@ -78,19 +87,23 @@ class _BootstrapAppState extends State<BootstrapApp> {
             : (fb is Map ? Map<String, dynamic>.from(fb) : null),
       );
     } catch (_) {}
+    Diag.log('start:pushInit', '${swPush.elapsedMilliseconds}ms');
     apiUrl.text = appController.apiUrl;
     if (!mounted) return;
     final failed =
         appController.bootstrapError != null && appController.cities.isEmpty;
     _bootstrapDone = true;
     if (!failed) {
+      final swRouter = Stopwatch()..start();
       router = buildRouter();
       PushNotifications.attachRouter(router!);
+      Diag.log('start:router', '${swRouter.elapsedMilliseconds}ms');
     }
     setState(() {});
     // انتظر اكتمال الأنيميشن + انتهاء التحميل، ثم خروج واحد سلس (لا واجهتين)
     await splashMin;
     if (mounted) setState(() => _showSplash = false);
+    Diag.log('start:splashHidden');
   }
 
   @override

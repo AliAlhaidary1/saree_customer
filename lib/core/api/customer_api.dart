@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../config.dart';
+import '../diag.dart';
 import '../json_util.dart';
 import 'api_cache.dart';
 import 'api_errors.dart';
@@ -69,11 +70,19 @@ class CustomerApi {
     'offers': Duration(minutes: 5),
     'brands': Duration(minutes: 10),
     'countries': Duration(minutes: 15),
+    // NOTE: no TTL for 'cities' on purpose: hasInternetAccess() probes
+    // cities(limit:1) as a reachability check, and a cached probe result
+    // would report "online" while offline.
     'sellers': Duration(minutes: 2),
     'categories': Duration(minutes: 10),
     'shop': Duration(minutes: 2),
     'sections': Duration(minutes: 5),
     'flash_sales': Duration(minutes: 2),
+    'campaigns': Duration(minutes: 5),
+    'products/offers': Duration(minutes: 2),
+    // Reference data only: haraj categories change rarely, while haraj posts
+    // themselves stay uncached (user-generated, must always be fresh).
+    'haraj/categories': Duration(minutes: 10),
   };
 
   Duration? _ttlFor(String path) {
@@ -130,11 +139,26 @@ class CustomerApi {
     final release = ApiErrorPolicy.current.release;
     var attempt = 0;
     while (true) {
+      final sw = Diag.enabled ? (Stopwatch()..start()) : null;
       try {
-        final parsed = _parse(await request());
+        final response = await request();
+        final parsed = _parse(response);
+        if (sw != null) {
+          Diag.log(
+            'api',
+            '${response.requestOptions.path} ${response.requestOptions.method} '
+            '${sw.elapsedMilliseconds}ms status=${parsed.status}',
+          );
+        }
         recordSuccess();
         return parsed;
       } on DioException catch (error) {
+        if (sw != null) {
+          Diag.log(
+            'api:error',
+            '${error.requestOptions.path} ${sw.elapsedMilliseconds}ms ${error.type}',
+          );
+        }
         final classified = classifyDio(error, release: release);
         logApiFailure(classified, path: error.requestOptions.path);
         if (shouldRetryApi(
@@ -163,10 +187,14 @@ class CustomerApi {
     final key = _cacheKey(path, query);
     if (ttl != null) {
       final cached = cache.get(key, ttl);
-      if (cached != null) return cached;
+      if (cached != null) {
+        Diag.log('api:cache', '$path fresh-hit');
+        return cached;
+      }
       // Stale-while-revalidate: paint stale instantly, refresh in background.
       final stale = cache.getStale(key);
       if (stale != null) {
+        Diag.log('api:cache', '$path stale-hit');
         () async {
           try {
             final fresh = await _guard(
@@ -415,7 +443,7 @@ class CustomerApi {
   Future<ApiResult> timeSlots() => _get('settings/time_slots');
 
   Future<ApiResult> businessHours({List<dynamic> sellerIds = const []}) {
-    final ids = sellerIds.where((e) => e.isNotEmpty).join(',');
+    final ids = sellerIds.where((e) => '$e'.isNotEmpty).join(',');
     return _get('settings/business_hours', {
       if (ids.isNotEmpty) 'seller_ids': ids,
     });

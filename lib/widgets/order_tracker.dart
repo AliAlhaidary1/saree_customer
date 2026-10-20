@@ -125,6 +125,7 @@ class OrderTracker extends StatelessWidget {
               final lineWidth = constraints.maxWidth;
               return Stack(
                 clipBehavior: Clip.none,
+                alignment: Alignment.center,
                 children: [
                   // Background track
                   Container(
@@ -159,7 +160,6 @@ class OrderTracker extends StatelessWidget {
                       final current = i == active;
                       return Column(
                         children: [
-                          const SizedBox(height: -10),
                           AnimatedContainer(
                             duration: const Duration(milliseconds: 400),
                             width: current ? 28 : 22,

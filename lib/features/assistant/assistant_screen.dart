@@ -5,7 +5,6 @@ import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
 import '../../core/offline/operation_policy.dart';
 import '../../widgets/app_image.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
 
@@ -19,7 +18,6 @@ class FaqScreen extends StatefulWidget {
 class _FaqScreenState extends State<FaqScreen> {
   List<Map<String, dynamic>> items = [];
   bool loading = true;
-  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -34,7 +32,6 @@ class _FaqScreenState extends State<FaqScreen> {
       setState(() {
         items = J.maps(snap);
         loading = false;
-        _servedFromCache = true;
       });
     }
     try {
@@ -46,13 +43,11 @@ class _FaqScreenState extends State<FaqScreen> {
       setState(() {
         if (res.ok) items = res.dataMaps;
         loading = false;
-        _servedFromCache = !res.ok && items.isNotEmpty;
       });
     } catch (_) {
       if (mounted) {
         setState(() {
           loading = false;
-          _servedFromCache = items.isNotEmpty;
         });
       }
     }
@@ -70,7 +65,6 @@ class _FaqScreenState extends State<FaqScreen> {
           : ListView(
               padding: const EdgeInsets.all(12),
               children: [
-                OfflineBanner(stale: _servedFromCache),
                 ...items
                     .map(
                       (f) => Card(
@@ -322,7 +316,11 @@ class _AssistantScreenState extends State<AssistantScreen> {
     final app = appController;
     return Scaffold(
       appBar: AppBar(
-        title: Text(app.t('assistant_title')),
+        title: Text(
+          app.t('assistant_title'),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
           if (messages.isNotEmpty)
             IconButton(

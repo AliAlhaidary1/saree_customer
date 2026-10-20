@@ -11,7 +11,6 @@ import '../../core/json_util.dart';
 import '../../core/offline/offline_cache.dart';
 import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
 
@@ -69,9 +68,47 @@ String _cartLineUnit(Map<String, dynamic> item) {
   return [measure, type].where((e) => e.isNotEmpty).join(' ');
 }
 
+/// Compact stepper button with a busy state: while the line's op is in
+/// flight the button shows a spinner and ignores taps instead of stacking
+/// parallel mutations.
+class _StepperBtn extends StatelessWidget {
+  const _StepperBtn({
+    required this.icon,
+    required this.onPressed,
+    this.busy = false,
+    this.tooltip,
+  });
+  final IconData icon;
+  final VoidCallback onPressed;
+  final bool busy;
+  final String? tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 38,
+      height: 38,
+      child: busy
+          ? const Center(
+              child: SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          : IconButton(
+              icon: Icon(icon, size: 20),
+              tooltip: tooltip,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              onPressed: onPressed,
+            ),
+    );
+  }
+}
+
 class CartScreen extends StatefulWidget {
   const CartScreen({super.key});
-
   @override
   State<CartScreen> createState() => _CartScreenState();
 }
@@ -80,13 +117,49 @@ class _CartScreenState extends State<CartScreen> {
   bool loading = true;
   String? error;
 
-  /// True when the visible lines/totals come from a failed refresh: cached
-  /// prices are indicative estimates until the server revalidates them.
-  bool _staleTotals = false;
+  /// Per-line in-flight guard: rapid +/-/delete taps on the SAME line queue
+  /// behind the running op instead of firing parallel mutations (the old
+  /// code fired one full add+refresh per tap with no guard — the main source
+  /// of conflicting quantities). The controller additionally serializes
+  /// globally, this only keeps the buttons honest while it works.
+  final Set<String> _busyLines = {};
+
+  String _lineKey(Map<String, dynamic> item) =>
+      '${item['product_variant_id'] ?? item['id']}';
+
+  /// Runs a cart mutation for one line with re-entry guard + single UI
+  /// refresh. Returns early when the line already has an op in flight.
+  Future<void> _mutateLine(
+    Map<String, dynamic> item,
+    Future<String?> Function() op,
+  ) async {
+    final key = _lineKey(item);
+    if (_busyLines.contains(key)) return;
+    setState(() => _busyLines.add(key));
+    String? err;
+    try {
+      err = await op();
+    } finally {
+      // Clear the busy spinner BEFORE surfacing any dialog: an animating
+      // CircularProgressIndicator left on screen keeps pumpAndSettle (and
+      // the real UI) waiting even while the dialog is open.
+      if (mounted) {
+        setState(() => _busyLines.remove(key));
+      } else {
+        _busyLines.remove(key);
+      }
+    }
+    if (!mounted) return;
+    if (err != null) await showCartError(context, err);
+  }
 
   @override
   void initState() {
     super.initState();
+    // Rebuild on cart truth changes from anywhere (steppers on other
+    // screens, background reconciles). _mutateLine also setStates for the
+    // busy flag; this only covers external updates.
+    appController.addListener(_onCartTick);
     // Cached lines render instantly; the network refresh runs silently
     // in the background so an empty cart never waits on the network.
     if (lines.isNotEmpty) {
@@ -95,6 +168,18 @@ class _CartScreenState extends State<CartScreen> {
     } else {
       _load();
     }
+  }
+
+  void _onCartTick() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    try {
+      appController.removeListener(_onCartTick);
+    } catch (_) {}
+    super.dispose();
   }
 
   Future<void> _load({bool silent = false}) async {
@@ -129,12 +214,10 @@ class _CartScreenState extends State<CartScreen> {
         // misleading "empty cart".
         setState(() {
           error = appController.t('cart_load_failed');
-          _staleTotals = false;
         });
       } else {
         setState(() {
           error = null;
-          _staleTotals = !result.ok && lines.isNotEmpty;
         });
       }
     } catch (_) {
@@ -143,9 +226,6 @@ class _CartScreenState extends State<CartScreen> {
       // with a retryable error instead of a frozen spinner.
       if (lines.isEmpty) {
         setState(() => error = appController.t('cart_load_failed'));
-      } else {
-        // Lines are locally remembered: totals are estimates, not quotes.
-        setState(() => _staleTotals = true);
       }
     } finally {
       if (mounted) setState(() => loading = false);
@@ -198,31 +278,8 @@ class _CartScreenState extends State<CartScreen> {
     final promoDiscount = J.d(
       app.promoCode?['discount'] ?? cartMap?['promo_discount'],
     );
-    return Column(
+      return Column(
       children: [
-        if (_staleTotals) OfflineBanner(stale: true),
-        if (app.distinctCartSellerCount > 0)
-          Container(
-            color: Colors.orange.withValues(alpha: 0.08),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Row(
-              children: [
-                const Icon(Icons.storefront, size: 14, color: Colors.orange),
-                const SizedBox(width: 6),
-                Text(
-                  '${app.distinctCartSellerCount} ${app.t('sellers')}',
-                  style: const TextStyle(fontSize: 12),
-                ),
-                const Spacer(),
-                Text(
-                  app
-                      .t('max_sellers_limit')
-                      .replaceAll('{max}', '${app.maxSellersPerCheckout}'),
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                ),
-              ],
-            ),
-          ),
         Expanded(
           child: RefreshIndicator(
             onRefresh: () => _load(silent: true),
@@ -329,27 +386,28 @@ class _CartScreenState extends State<CartScreen> {
                       context.push('/product/$pid');
                     }
                   },
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.remove),
-                        onPressed: qty <= 1
-                            ? () => app
-                                  .removeCartLine(
+                  trailing: SizedBox(
+                    width: 148,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        _StepperBtn(
+                          icon: Icons.remove,
+                          busy: _busyLines.contains(_lineKey(item)),
+                          onPressed: qty <= 1
+                              ? () => _mutateLine(
+                                  item,
+                                  () => app.removeCartLine(
                                     productId: item['product_id'] ?? item['id'],
                                     variantId:
                                         item['product_variant_id'] ??
                                         item['id'],
-                                  )
-                                  .then((err) async {
-                                    if (err != null && context.mounted) {
-                                      await showCartError(context, err);
-                                    }
-                                    if (mounted) setState(() {});
-                                  })
-                            : () => app
-                                  .addToCart(
+                                  ),
+                                )
+                              : () => _mutateLine(
+                                  item,
+                                  () => app.addToCart(
                                     productId: item['product_id'] ?? item['id'],
                                     variantId:
                                         item['product_variant_id'] ??
@@ -358,61 +416,55 @@ class _CartScreenState extends State<CartScreen> {
                                     sellerId:
                                         item['seller_id'] ?? J.sellerId(item),
                                     variantLabel: _cartLineUnit(item),
-                                  )
-                                  .then((_) {
-                                    if (mounted) setState(() {});
-                                  }),
-                      ),
-                      Text('$qty'),
-                      IconButton(
-                        icon: const Icon(Icons.add),
-                        onPressed: qty >= maxQty
-                            ? () {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      app
-                                          .t('limited_product_stock_error')
-                                          .replaceAll('{max}', '$maxQty'),
-                                    ),
                                   ),
-                                );
-                              }
-                            : () async {
-                                final err = await app.addToCart(
-                                  productId: item['product_id'] ?? item['id'],
-                                  variantId:
-                                      item['product_variant_id'] ?? item['id'],
-                                  qty: qty + 1,
-                                  sellerId:
-                                      item['seller_id'] ?? J.sellerId(item),
-                                  storeName: app.storeNameOf(item),
-                                  variantLabel: _cartLineUnit(item),
-                                );
-                                if (!context.mounted) return;
-                                if (err != null) {
-                                  await showCartError(context, err);
+                                ),
+                        ),
+                        SizedBox(width: 26, child: Center(child: Text('$qty'))),
+                        _StepperBtn(
+                          icon: Icons.add,
+                          busy: _busyLines.contains(_lineKey(item)),
+                          onPressed: qty >= maxQty
+                              ? () {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        app
+                                            .t('limited_product_stock_error')
+                                            .replaceAll('{max}', '$maxQty'),
+                                      ),
+                                    ),
+                                  );
                                 }
-                                setState(() {});
-                              },
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline, size: 20),
-                        tooltip: app.t('delete_item'),
-                        onPressed: () => app
-                            .removeCartLine(
+                              : () => _mutateLine(
+                                  item,
+                                  () => app.addToCart(
+                                    productId: item['product_id'] ?? item['id'],
+                                    variantId:
+                                        item['product_variant_id'] ??
+                                        item['id'],
+                                    qty: qty + 1,
+                                    sellerId:
+                                        item['seller_id'] ?? J.sellerId(item),
+                                    storeName: app.storeNameOf(item),
+                                    variantLabel: _cartLineUnit(item),
+                                  ),
+                                ),
+                        ),
+                        _StepperBtn(
+                          icon: Icons.delete_outline,
+                          busy: _busyLines.contains(_lineKey(item)),
+                          tooltip: app.t('delete_item'),
+                          onPressed: () => _mutateLine(
+                            item,
+                            () => app.removeCartLine(
                               productId: item['product_id'] ?? item['id'],
                               variantId:
                                   item['product_variant_id'] ?? item['id'],
-                            )
-                            .then((err) async {
-                              if (err != null && context.mounted) {
-                                await showCartError(context, err);
-                              }
-                              if (mounted) setState(() {});
-                            }),
-                      ),
-                    ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 );
               },
@@ -640,6 +692,33 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     super.dispose();
   }
 
+  /// True when a failed checkout load is a connectivity failure rather than
+  /// a business/validation error: recent network-failure evidence from the
+  /// API layer, or an offline phrasing in the backend message (Arabic or
+  /// English). Business errors keep their plain retry screen.
+  bool _looksOffline(ApiResult result) {
+    if (result.ok) return false;
+    if (appController.api.likelyOffline) return true;
+    return RegExp(
+      r'timeout|timed out|network|unreachable|unavailable|تعذر الاتصال|انتهت مهلة|الإنترنت|تحقق من الإنترنت',
+      caseSensitive: false,
+    ).hasMatch(result.message);
+  }
+
+  /// Connectivity failures surface as the retry dialog (which re-probes and
+  /// reloads on success), never as a bare "you are offline" text. A dismissed
+  /// dialog falls through to the plain retry screen below.
+  Future<bool> _offerOfflineRetry() async {
+    if (!mounted) return false;
+    final backOnline = await showRequiresInternetDialog(context);
+    if (!mounted) return false;
+    if (backOnline) {
+      await _load();
+      return true;
+    }
+    return false;
+  }
+
   Future<void> _load() async {
     // Same guard as the cart: never leave the spinner stuck on failure.
     if (mounted) {
@@ -659,10 +738,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         );
       }
       if (!mounted) return;
+      Map<String, dynamic>? next;
+      if (result.ok && result.dataMap.isNotEmpty) {
+        next = result.dataMap;
+      } else {
+        next = appController.cart;
+        if (next == null || next.isEmpty) {
+          next = _offlineCheckoutSnapshot();
+        }
+      }
+      if (!result.ok &&
+          (next == null || next.isEmpty) &&
+          _looksOffline(result)) {
+        if (await _offerOfflineRetry()) return;
+      }
+      if (!mounted) return;
       setState(() {
-        checkout = result.dataMap.isNotEmpty
-            ? result.dataMap
-            : appController.cart;
+        checkout = next;
         _staleCheckout = !result.ok;
         if (!result.ok && (checkout == null || checkout!.isEmpty)) {
           loadError = result.message.isNotEmpty
@@ -671,9 +763,21 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         }
       });
     } catch (_) {
+      // Only the 30s timeouts above can throw: a stalled network, so the
+      // offline retry dialog applies (with content already painted we keep
+      // the stale totals instead).
+      if (!mounted) return;
+      var fallback = checkout;
+      if (fallback == null || fallback.isEmpty) {
+        fallback = appController.cart ?? _offlineCheckoutSnapshot();
+      }
+      if ((fallback == null || fallback.isEmpty)) {
+        if (await _offerOfflineRetry()) return;
+      }
       if (!mounted) return;
       setState(() {
-        _staleCheckout = checkout != null && checkout!.isNotEmpty;
+        checkout = fallback;
+        _staleCheckout = fallback != null && fallback.isNotEmpty;
         if (!_staleCheckout) {
           loadError = appController.t('checkout_load_failed');
         }
@@ -681,6 +785,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     } finally {
       if (mounted) setState(() => loadingCheckout = false);
     }
+  }
+
+  /// Offline checkout fallback: reuses the last server-confirmed cart lines
+  /// that [AppController] restored from the on-disk snapshot, so the form
+  /// still renders (stale-badged, and placing an order still requires
+  /// connectivity) instead of an empty error screen.
+  Map<String, dynamic>? _offlineCheckoutSnapshot() {
+    final products = appController.cartProducts;
+    if (products.isEmpty) return null;
+    return {'cart': products, 'sub_total': appController.cartSubTotal};
   }
 
   bool _methodOn(String key) =>
@@ -782,7 +896,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      app.t('minimum_order_amount_is').replaceAll('{amount}', money(app.minOrderAmount, app.currency, app.decimals)),
+                      app
+                          .t('minimum_order_amount_is')
+                          .replaceAll(
+                            '{amount}',
+                            money(
+                              app.minOrderAmount,
+                              app.currency,
+                              app.decimals,
+                            ),
+                          ),
                       style: const TextStyle(
                         color: Colors.orange,
                         fontSize: 12,
@@ -865,69 +988,82 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       ),
                     )
                   else
-                    ...app.addresses.map((a) {
-                      final sel = '${a['id']}' == '${address?['id']}';
-                      final line = [
-                        J.str(a['address'] ?? a['formatted_address']),
-                        J.str(a['area']),
-                        J.str(a['city']),
-                        J.str(a['mobile']),
-                      ].where((p) => p.isNotEmpty).join('، ');
-                      return RadioListTile<String>(
-                        dense: true,
-                        value: '${a['id']}',
-                        groupValue: address == null ? null : '${address['id']}',
-                        onChanged: (_) async {
-                          app.selectAddress(a);
-                          await _load();
-                        },
-                        title: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                J.str(a['type'] ?? a['name']),
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 14,
+                    RadioGroup<String>(
+                      groupValue: address == null ? null : '${address['id']}',
+                      onChanged: (v) async {
+                        final picked = app.addresses.firstWhere(
+                          (x) => '${x['id']}' == v,
+                          orElse: () => const <String, dynamic>{},
+                        );
+                        if (picked.isEmpty) return;
+                        app.selectAddress(picked);
+                        await _load();
+                      },
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: app.addresses.map((a) {
+                          final sel = '${a['id']}' == '${address?['id']}';
+                          final line = [
+                            J.str(a['address'] ?? a['formatted_address']),
+                            J.str(a['area']),
+                            J.str(a['city']),
+                            J.str(a['mobile']),
+                          ].where((p) => p.isNotEmpty).join('، ');
+                          return RadioListTile<String>(
+                            dense: true,
+                            value: '${a['id']}',
+                            title: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    J.str(a['type'] ?? a['name']),
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 14,
+                                    ),
+                                  ),
                                 ),
-                              ),
+                                if (J.str(a['is_default']) == '1' ||
+                                    J.i(a['is_default']) == 1)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 2,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: app.accentColor.withValues(
+                                        alpha: 0.12,
+                                      ),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Text(
+                                      app.t('default_address_badge'),
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: app.accentColor,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                              ],
                             ),
-                            if (J.str(a['is_default']) == '1' ||
-                                J.i(a['is_default']) == 1)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 2,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: app.accentColor.withValues(
-                                    alpha: 0.12,
+                            subtitle: line.isEmpty
+                                ? null
+                                : Text(
+                                    line,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Text(
-                                  app.t('default_address_badge'),
-                                  style: TextStyle(
-                                    fontSize: 11,
+                            secondary: sel
+                                ? Icon(
+                                    Icons.check_circle,
                                     color: app.accentColor,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                        subtitle: line.isEmpty
-                            ? null
-                            : Text(
-                                line,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                        secondary: sel
-                            ? Icon(Icons.check_circle, color: app.accentColor)
-                            : null,
-                      );
-                    }),
+                                  )
+                                : null,
+                          );
+                        }).toList(),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1252,42 +1388,209 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 ),
               ),
             ),
-          TextField(
-            controller: promo,
-            decoration: InputDecoration(
-              labelText: app.t('promo_code'),
-              suffixIcon: app.promoCode == null
-                  ? TextButton(
-                      onPressed: () async {
-                        final error = await app.applyPromo(
-                          promo.text.trim(),
-                          subTotal,
-                        );
-                        if (!context.mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(error ?? app.t('promo_applied')),
+          const SizedBox(height: 12),
+          // ── Coupon ──
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: app.accentColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Icon(
+                          Icons.local_offer_outlined,
+                          color: app.accentColor,
+                          size: 18,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          app.t('promo_code'),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 15,
                           ),
-                        );
-                        setState(() {});
-                      },
-                      child: Text(app.t('apply')),
+                        ),
+                      ),
+                      if (app.promoCode != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.green.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.check_circle,
+                                color: Colors.green,
+                                size: 14,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                app.t('promo_applied'),
+                                style: const TextStyle(
+                                  color: Colors.green,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (app.promoCode == null)
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: promo,
+                            textInputAction: TextInputAction.done,
+                            textCapitalization: TextCapitalization.characters,
+                            decoration: InputDecoration(
+                              hintText: app.t('promo_code'),
+                              prefixIcon: const Icon(
+                                Icons.confirmation_number_outlined,
+                                size: 20,
+                              ),
+                              isDense: true,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        FilledButton.icon(
+                          onPressed: () async {
+                            final error = await app.applyPromo(
+                              promo.text.trim(),
+                              subTotal,
+                            );
+                            if (!context.mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(error ?? app.t('promo_applied')),
+                              ),
+                            );
+                            setState(() {});
+                          },
+                          icon: const Icon(Icons.verified_outlined, size: 18),
+                          label: Text(app.t('apply')),
+                        ),
+                      ],
                     )
-                  : TextButton(
-                      onPressed: () {
-                        app.clearPromo();
-                        promo.clear();
-                        setState(() {});
-                      },
-                      child: Text(app.t('remove_promo')),
+                  else
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.check_circle,
+                          color: Colors.green,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                J.str(
+                                  app.promoCode?['promo_code'] ??
+                                      app.promoCode?['code'] ??
+                                      promo.text,
+                                ),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 14,
+                                ),
+                              ),
+                              if (discount > 0)
+                                Text(
+                                  '- ${money(discount, app.currency, app.decimals)}',
+                                  style: const TextStyle(
+                                    color: Colors.green,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        TextButton.icon(
+                          onPressed: () {
+                            app.clearPromo();
+                            promo.clear();
+                            setState(() {});
+                          },
+                          icon: const Icon(Icons.close, size: 16),
+                          label: Text(app.t('remove_promo')),
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.red,
+                          ),
+                        ),
+                      ],
                     ),
+                ],
+              ),
             ),
           ),
-          TextField(
-            controller: note,
-            decoration: InputDecoration(
-              labelText: app.t('order_note'),
-              hintText: app.t('order_note_hint'),
+          const SizedBox(height: 12),
+          // ── Order note ──
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: app.accentColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Icon(
+                          Icons.edit_note_outlined,
+                          color: app.accentColor,
+                          size: 18,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        app.t('order_note'),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 15,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: note,
+                    minLines: 3,
+                    maxLines: 4,
+                    maxLength: 300,
+                    textInputAction: TextInputAction.newline,
+                    decoration: InputDecoration(
+                      hintText: app.t('order_note_hint'),
+                      alignLabelWithHint: true,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           if (deliveryTime != null)
@@ -1344,6 +1647,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ),
             ),
           FilledButton(
+            key: const ValueKey('checkout-place-order'),
             onPressed:
                 placing ||
                     _staleCheckout ||
@@ -1424,30 +1728,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
       return;
     }
-    if (!await app.hasInternetAccess()) {
-      if (context.mounted) await showRequiresInternetDialog(context);
+    final online = await app.hasInternetAccess();
+    if (!mounted) return;
+    if (!online) {
+      await showRequiresInternetDialog(context);
       return;
     }
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(app.t('confirm_order')),
-        content: Text(
-          '${money(finalTotal, app.currency, app.decimals)}\n${deliveryTime ?? ''}\n$method',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text(app.t('cancel')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(app.t('confirm')),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
+    if (!mounted) return;
     setState(() => placing = true);
     // Stable session key: identical across retries of this logical order so
     // the backend can deduplicate. Fresh-timestamp-per-tap would not.

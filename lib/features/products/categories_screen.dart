@@ -4,7 +4,6 @@ import 'package:go_router/go_router.dart';
 import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
 import '../../widgets/app_image.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/ui_helpers.dart';
 
 void openStoreType(BuildContext context, dynamic category) {
@@ -31,7 +30,6 @@ class CategoriesScreen extends StatefulWidget {
 class _CategoriesScreenState extends State<CategoriesScreen> {
   List<Map<String, dynamic>> items = [];
   bool loading = true;
-  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -86,7 +84,6 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       setState(() {
         items = List<Map<String, dynamic>>.from(appController.rootCategories);
         loading = false;
-        _servedFromCache = true;
       });
     } else {
       // Synchronized catalog categories (per-scope, survives restarts).
@@ -96,29 +93,33 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         setState(() {
           items = local;
           loading = false;
-          _servedFromCache = true;
         });
       }
     }
     final slug = widget.slug == 'all' ? null : widget.slug;
-    final result = await appController.api.categories(
-      categoryId: slug == null ? 0 : null,
-      slug: slug,
-      limit: 50,
-      offset: 0,
-    );
+    // Bounded: keeps the painted cached rows on stall (idempotent read).
+    final result = await appController.api
+        .categories(
+          categoryId: slug == null ? 0 : null,
+          slug: slug,
+          limit: 50,
+          offset: 0,
+        )
+        .timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => ApiResult({'status': 0}),
+        )
+        .catchError((_) => ApiResult({'status': 0}));
     if (!mounted) return;
     if (result.ok) {
       setState(() {
         items = result.dataMaps;
         loading = false;
-        _servedFromCache = false;
       });
     } else {
       // Refresh failed: keep the cached rows (if any) with a stale badge.
       setState(() {
         loading = false;
-        _servedFromCache = items.isNotEmpty;
       });
     }
   }
@@ -130,7 +131,6 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       appBar: AppBar(title: Text(app.t('store_types'))),
       body: Column(
         children: [
-          if (_servedFromCache) OfflineBanner(stale: true),
           Expanded(
             child: loading
                 ? const Center(child: CircularProgressIndicator())

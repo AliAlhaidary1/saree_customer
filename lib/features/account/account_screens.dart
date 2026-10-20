@@ -22,7 +22,6 @@ import '../../widgets/product_variant_sheet.dart';
 import '../../core/app_theme.dart';
 import '../../core/offline/offline_cache.dart';
 import '../../widgets/dynamic_address_fields.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/order_tracker.dart';
 import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
@@ -93,23 +92,10 @@ class AccountScreen extends StatelessWidget {
         Card(
           child: ListTile(
             contentPadding: const EdgeInsets.all(12),
-            leading: CircleAvatar(
+            leading: _ProfileAvatar(
+              name: name,
+              profileImg: profileImg,
               radius: 26,
-              backgroundColor: app.accentColor.withValues(alpha: 0.15),
-              backgroundImage: profileImg.isNotEmpty
-                  ? NetworkImage(profileImg)
-                  : null,
-              onBackgroundImageError: profileImg.isNotEmpty ? (_, __) {} : null,
-              child: profileImg.isEmpty
-                  ? Text(
-                      name.isEmpty ? 'م' : name.substring(0, 1),
-                      style: TextStyle(
-                        color: app.accentColor,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 22,
-                      ),
-                    )
-                  : null,
             ),
             title: Text(
               name.isEmpty ? app.t('profile') : name,
@@ -235,19 +221,7 @@ class AccountScreen extends StatelessWidget {
           title: Text(app.i18n.code == 'ar' ? 'English' : 'العربية'),
           onTap: () => app.setLanguage(app.i18n.code == 'ar' ? 'en' : 'ar'),
         ),
-        ListenableBuilder(
-          listenable: app,
-          builder: (_, __) => SwitchListTile(
-            secondary: const Icon(Icons.image_outlined),
-            title: Text(app.t('offline_images_title')),
-            subtitle: Text(app.t('offline_images_subtitle')),
-            value: app.offlineImagesEnabled,
-            onChanged: (v) async {
-              await app.setOfflineImagesEnabled(v);
-              if (v) await app.prefetchCatalogImages();
-            },
-          ),
-        ),
+
         if (kDebugMode)
           ListTile(
             leading: const Icon(Icons.dns_outlined),
@@ -528,7 +502,6 @@ class _OrdersScreenState extends State<OrdersScreen>
   List<Map<String, dynamic>> active = [];
   List<Map<String, dynamic>> previous = [];
   bool loading = true;
-  bool _servedFromCache = false;
   int page = 1;
   int totalActive = 0;
   int _seq = 0;
@@ -568,7 +541,6 @@ class _OrdersScreenState extends State<OrdersScreen>
           active = cached.active;
           previous = cached.previous;
           loading = false;
-          _servedFromCache = true;
         });
       }
     }
@@ -599,7 +571,6 @@ class _OrdersScreenState extends State<OrdersScreen>
     if (!legacyActive.ok && !legacyPrev.ok && !groups.ok) {
       setState(() {
         loading = false;
-        _servedFromCache = active.isNotEmpty || previous.isNotEmpty;
       });
       return;
     }
@@ -614,12 +585,8 @@ class _OrdersScreenState extends State<OrdersScreen>
     final basePrev = prevOk
         ? mergeOrders(legacyPrevParsed.rows, groupsParsed.rows, false)
         : previous.where((e) => e['is_akhdimni'] != true).toList();
-    var akhActive = active
-        .where((e) => e['is_akhdimni'] == true)
-        .toList();
-    var akhPrev = previous
-        .where((e) => e['is_akhdimni'] == true)
-        .toList();
+    var akhActive = active.where((e) => e['is_akhdimni'] == true).toList();
+    var akhPrev = previous.where((e) => e['is_akhdimni'] == true).toList();
     if (akh.ok) {
       akhActive = [];
       akhPrev = [];
@@ -645,14 +612,9 @@ class _OrdersScreenState extends State<OrdersScreen>
       previous = more ? J.appendUnique(previous, freshPrev) : freshPrev;
       if (activeOk) {
         totalActive =
-            legacyActiveParsed.total +
-            groupsParsed.total +
-            akhActive.length;
+            legacyActiveParsed.total + groupsParsed.total + akhActive.length;
       }
       loading = false;
-      _servedFromCache =
-          (!activeOk || !prevOk) &&
-          (active.isNotEmpty || previous.isNotEmpty);
     });
   }
 
@@ -724,7 +686,6 @@ class _OrdersScreenState extends State<OrdersScreen>
           ? const Center(child: CircularProgressIndicator())
           : Column(
               children: [
-                if (_servedFromCache) OfflineBanner(stale: true),
                 Expanded(
                   child: TabBarView(
                     controller: tab,
@@ -744,7 +705,7 @@ class _OrdersScreenState extends State<OrdersScreen>
       child: ListView.separated(
         padding: const EdgeInsets.all(16),
         itemCount: items.length + (canMore ? 1 : 0),
-        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        separatorBuilder: (_, _) => const SizedBox(height: 8),
         itemBuilder: (_, i) {
           if (i >= items.length) {
             return OutlinedButton(
@@ -1197,7 +1158,10 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       );
     }
     if (loading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return Scaffold(
+        appBar: AppBar(title: Text('${app.t('order')} ${widget.id}')),
+        body: const Center(child: CircularProgressIndicator()),
+      );
     }
     if (order == null || order!.isEmpty) {
       return Scaffold(
@@ -1240,7 +1204,11 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         : '${order?['id'] ?? widget.id}';
     return Scaffold(
       appBar: AppBar(
-        title: Text('${app.t('order')} ${widget.id}'),
+        title: Text(
+          '${app.t('order')} ${widget.id}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.copy_outlined),
@@ -1259,10 +1227,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          if (_servedFromCache) ...[
-            OfflineBanner(stale: true, staleLabel: app.t('saved_status_note')),
-            const SizedBox(height: 12),
-          ],
+          if (_servedFromCache) ...[const SizedBox(height: 12)],
           OrderTracker(
             status: activeStatus,
             statusLabel: J.str(
@@ -1589,7 +1554,7 @@ class _AddressesScreenState extends State<AddressesScreen> {
       ),
       body: ListenableBuilder(
         listenable: app,
-        builder: (_, __) {
+        builder: (_, _) {
           if (app.addresses.isEmpty) {
             return EmptyState(
               icon: Icons.location_on_outlined,
@@ -1598,91 +1563,100 @@ class _AddressesScreenState extends State<AddressesScreen> {
               onAction: _edit,
             );
           }
-          return ListView(
-            children: app.addresses
-                .map(
-                  (address) => RadioListTile(
-                    value: '${address['id']}',
-                    groupValue: '${app.selectedAddress?['id']}',
-                    title: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            J.str(address['type'] ?? address['name']),
-                          ),
-                        ),
-                        if (J.str(address['is_default']) == '1')
-                          Container(
-                            margin: const EdgeInsetsDirectional.only(start: 6),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: app.accentColor.withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(10),
-                            ),
+          return RadioGroup<String>(
+            groupValue: '${app.selectedAddress?['id']}',
+            onChanged: (v) {
+              final address = app.addresses.firstWhere(
+                (x) => '${x['id']}' == v,
+                orElse: () => const <String, dynamic>{},
+              );
+              if (address.isEmpty) return;
+              app.selectAddress(address);
+              final next = cityFromAddress(address, app.cities);
+              if (next != null) app.selectCity(next);
+            },
+            child: ListView(
+              children: app.addresses
+                  .map(
+                    (address) => RadioListTile(
+                      value: '${address['id']}',
+                      title: Row(
+                        children: [
+                          Expanded(
                             child: Text(
-                              app.t('default_address_badge'),
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: app.accentColor,
-                                fontWeight: FontWeight.w700,
+                              J.str(address['type'] ?? address['name']),
+                            ),
+                          ),
+                          if (J.str(address['is_default']) == '1')
+                            Container(
+                              margin: const EdgeInsetsDirectional.only(
+                                start: 6,
+                              ),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: app.accentColor.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                app.t('default_address_badge'),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: app.accentColor,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
+                        ],
+                      ),
+                      subtitle: Text(
+                        [
+                          J.str(address['name']),
+                          J.str(address['address']),
+                          J.str(address['custom_fields_display']),
+                          J.str(address['mobile']),
+                        ].where((part) => part.isNotEmpty).join(' | '),
+                      ),
+                      secondary: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.edit_outlined),
+                            onPressed: () => _edit(existing: address),
                           ),
-                      ],
-                    ),
-                    subtitle: Text(
-                      [
-                        J.str(address['name']),
-                        J.str(address['address']),
-                        J.str(address['custom_fields_display']),
-                        J.str(address['mobile']),
-                      ].where((part) => part.isNotEmpty).join(' | '),
-                    ),
-                    onChanged: (_) {
-                      app.selectAddress(address);
-                      final next = cityFromAddress(address, app.cities);
-                      if (next != null) app.selectCity(next);
-                    },
-                    secondary: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.edit_outlined),
-                          onPressed: () => _edit(existing: address),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.delete_outline),
-                          onPressed: () async {
-                            final ok = await confirmAction(
-                              context,
-                              title: app.t('delete_address_confirm'),
-                            );
-                            if (!ok) return;
-                            final res = await app.api.deleteAddress(
-                              address['id'],
-                            );
-                            if (context.mounted && !res.ok) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    res.message.isNotEmpty
-                                        ? res.message
-                                        : app.t('something_went_wrong'),
-                                  ),
-                                ),
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () async {
+                              final ok = await confirmAction(
+                                context,
+                                title: app.t('delete_address_confirm'),
                               );
-                            }
-                            await app.loadAddresses();
-                          },
-                        ),
-                      ],
+                              if (!ok) return;
+                              final res = await app.api.deleteAddress(
+                                address['id'],
+                              );
+                              if (context.mounted && !res.ok) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      res.message.isNotEmpty
+                                          ? res.message
+                                          : app.t('something_went_wrong'),
+                                    ),
+                                  ),
+                                );
+                              }
+                              await app.loadAddresses();
+                            },
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                )
-                .toList(),
+                  )
+                  .toList(),
+            ),
           );
         },
       ),
@@ -1750,6 +1724,7 @@ class _AddressesScreenState extends State<AddressesScreen> {
         }
       }
     }
+    if (!mounted) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -1772,7 +1747,7 @@ class _AddressesScreenState extends State<AddressesScreen> {
                     decoration: InputDecoration(labelText: app.t('mobile')),
                   ),
                   DropdownButtonFormField<String>(
-                    value: addressType,
+                    initialValue: addressType,
                     decoration: InputDecoration(
                       labelText: app.t('address_type'),
                     ),
@@ -1883,6 +1858,7 @@ class _AddressesScreenState extends State<AddressesScreen> {
           });
         } catch (_) {}
       }
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -1899,6 +1875,7 @@ class _AddressesScreenState extends State<AddressesScreen> {
         await app.offline.removeDraft(app.accountScope, 'address_form');
       } catch (_) {}
     }
+    if (!mounted) return;
     // Auto-select the new address so checkout sees it immediately.
     if (!hadAny && app.addresses.isNotEmpty) {
       app.selectAddress(
@@ -1924,7 +1901,6 @@ class WishlistScreen extends StatefulWidget {
 class _WishlistScreenState extends State<WishlistScreen> {
   List<Map<String, dynamic>> items = [];
   bool loading = true;
-  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -1947,7 +1923,6 @@ class _WishlistScreenState extends State<WishlistScreen> {
       setState(() {
         items = cached;
         loading = false;
-        _servedFromCache = true;
       });
     }
     final point = appController.coords ?? (latitude: 0.0, longitude: 0.0);
@@ -1966,13 +1941,11 @@ class _WishlistScreenState extends State<WishlistScreen> {
       setState(() {
         items = result.dataMaps;
         loading = false;
-        _servedFromCache = false;
       });
     } else {
       // Keep cached rows (if any); only an empty cache shows a retry affordance.
       setState(() {
         loading = false;
-        _servedFromCache = items.isNotEmpty;
       });
     }
   }
@@ -1986,11 +1959,10 @@ class _WishlistScreenState extends State<WishlistScreen> {
         actions: [
           ListenableBuilder(
             listenable: appController,
-            builder: (_, __) => IconButton(
+            builder: (_, _) => IconButton(
               onPressed: () => context.push('/cart'),
               icon: Badge(
                 isLabelVisible: appController.cartCount > 0,
-                backgroundColor: AppTheme.accentOrange,
                 label: Text(
                   '${appController.cartCount}',
                   style: const TextStyle(fontSize: 10, color: Colors.white),
@@ -2015,7 +1987,6 @@ class _WishlistScreenState extends State<WishlistScreen> {
             )
           : Column(
               children: [
-                if (_servedFromCache) OfflineBanner(stale: true),
                 Expanded(
                   child: ListView(
                     children: items
@@ -2105,7 +2076,6 @@ class _SimpleListScreenState extends State<SimpleListScreen> {
   bool loading = true;
   bool loadingMore = false;
   bool hasMore = false;
-  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -2126,7 +2096,6 @@ class _SimpleListScreenState extends State<SimpleListScreen> {
         setState(() {
           items = J.maps(snap);
           loading = false;
-          _servedFromCache = true;
         });
       }
     }
@@ -2145,13 +2114,11 @@ class _SimpleListScreenState extends State<SimpleListScreen> {
       setState(() {
         if (value.isNotEmpty) items = value;
         loading = false;
-        _servedFromCache = value.isEmpty && items.isNotEmpty;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         loading = false;
-        _servedFromCache = items.isNotEmpty;
       });
     }
   }
@@ -2176,7 +2143,9 @@ class _SimpleListScreenState extends State<SimpleListScreen> {
   Widget build(BuildContext context) {
     final app = appController;
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(
+        title: Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
       body: !app.isLoggedIn
           ? const LoginRequired()
           : loading
@@ -2184,38 +2153,31 @@ class _SimpleListScreenState extends State<SimpleListScreen> {
           : ListView(
               children: [
                 if (widget.header != null) widget.header!,
-                OfflineBanner(stale: _servedFromCache),
                 if (items.isEmpty)
                   EmptyState(
                     message: widget.emptyMessage ?? app.t('no_notifications'),
                   )
                 else ...[
-                  ...items
-                      .map(
-                        (item) => ListTile(
-                          title: Text(
-                            J.str(
-                              item['title'] ??
-                                  item['message'] ??
-                                  item['txn_id'] ??
-                                  item['id'],
-                            ),
-                          ),
-                          subtitle: Text(
-                            J.str(
-                              item['date'] ??
-                                  item['created_at'] ??
-                                  item['type'],
-                            ),
-                          ),
-                          trailing: Text(
-                            J.str(
-                              item['amount'] ?? item['latest_message'] ?? '',
-                            ),
-                          ),
+                  ...items.map(
+                    (item) => ListTile(
+                      title: Text(
+                        J.str(
+                          item['title'] ??
+                              item['message'] ??
+                              item['txn_id'] ??
+                              item['id'],
                         ),
-                      )
-                      .toList(),
+                      ),
+                      subtitle: Text(
+                        J.str(
+                          item['date'] ?? item['created_at'] ?? item['type'],
+                        ),
+                      ),
+                      trailing: Text(
+                        J.str(item['amount'] ?? item['latest_message'] ?? ''),
+                      ),
+                    ),
+                  ),
                   if (widget.pageLoader != null && hasMore)
                     Padding(
                       padding: const EdgeInsets.all(12),
@@ -2401,11 +2363,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 CircleAvatar(
                   radius: 44,
                   backgroundColor: app.accentColor.withValues(alpha: 0.15),
+                  // Guarded: vector/exotic remote avatars must not reach
+                  // the platform decoder ('unimplemented' spam on API 28).
                   backgroundImage: pickedImage != null
                       ? FileImage(File(pickedImage!.path))
-                      : (currentProfile.isNotEmpty
+                      : (AppImage.isDisplayable(currentProfile)
                             ? NetworkImage(currentProfile)
                             : null),
+                  onBackgroundImageError:
+                      pickedImage != null ||
+                          !AppImage.isDisplayable(currentProfile)
+                      ? null
+                      : (_, _) {},
                   child: pickedImage == null && currentProfile.isEmpty
                       ? Text(
                           name.text.isEmpty ? 'م' : name.text.substring(0, 1),
@@ -2546,6 +2515,53 @@ class WalletSettingsHeader extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// Header avatar with the same decoder guard as [_SellerAvatar]: only
+/// displayable http(s) raster URLs reach the image pipeline (downscaled
+/// thumb); everything else shows the initial letter. Fixes the
+/// `ImageDecoder ... 'unimplemented'` spam + full-res main-thread decode
+/// jank the raw `NetworkImage` caused on old devices.
+class _ProfileAvatar extends StatelessWidget {
+  const _ProfileAvatar({
+    required this.name,
+    required this.profileImg,
+    this.radius = 26,
+  });
+
+  final String name;
+  final String profileImg;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = appController;
+    if (!AppImage.isDisplayable(profileImg)) {
+      return CircleAvatar(
+        radius: radius,
+        backgroundColor: app.accentColor.withValues(alpha: 0.15),
+        child: Text(
+          name.isEmpty ? 'م' : name.substring(0, 1),
+          style: TextStyle(
+            color: app.accentColor,
+            fontWeight: FontWeight.w800,
+            fontSize: radius * 0.85,
+          ),
+        ),
+      );
+    }
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: app.accentColor.withValues(alpha: 0.15),
+      child: ClipOval(
+        child: SizedBox(
+          width: radius * 2,
+          height: radius * 2,
+          child: AppImage(profileImg, thumb: true),
+        ),
       ),
     );
   }

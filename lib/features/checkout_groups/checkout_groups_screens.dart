@@ -3,8 +3,8 @@ import 'package:go_router/go_router.dart';
 import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/requires_internet_dialog.dart';
+import '../../widgets/offline_banner.dart';
 import '../../widgets/ui_helpers.dart';
 
 class CheckoutGroupsScreen extends StatefulWidget {
@@ -17,7 +17,6 @@ class _CheckoutGroupsScreenState extends State<CheckoutGroupsScreen> {
   List<Map<String, dynamic>> items = [];
   bool loading = true;
   int page = 1;
-  bool _servedFromCache = false;
 
   @override
   void initState() {
@@ -32,7 +31,6 @@ class _CheckoutGroupsScreenState extends State<CheckoutGroupsScreen> {
       setState(() {
         items = J.maps(snap);
         loading = false;
-        _servedFromCache = true;
       });
     } else {
       if (mounted) setState(() => loading = true);
@@ -45,10 +43,10 @@ class _CheckoutGroupsScreenState extends State<CheckoutGroupsScreen> {
         appController.checkoutGroups,
       );
     }
+    if (!mounted) return;
     setState(() {
       if (res.ok) items = appController.checkoutGroups;
       loading = false;
-      _servedFromCache = !res.ok && items.isNotEmpty;
     });
     if (!res.ok && items.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -62,14 +60,13 @@ class _CheckoutGroupsScreenState extends State<CheckoutGroupsScreen> {
   Widget build(BuildContext context) {
     final app = appController;
     return Scaffold(
-      appBar: AppBar(title: const Text('مجموعات الطلبات')),
+      appBar: AppBar(title: Text(app.t('checkout_groups'))),
       body: loading
           ? const Center(child: CircularProgressIndicator())
           : items.isEmpty
           ? EmptyState(message: app.t('not_synced_yet'))
           : Column(
               children: [
-                OfflineBanner(stale: _servedFromCache),
                 Expanded(
                   child: ListView.separated(
                     padding: const EdgeInsets.all(12),
@@ -82,7 +79,7 @@ class _CheckoutGroupsScreenState extends State<CheckoutGroupsScreen> {
                       );
                       return Card(
                         child: ListTile(
-                          title: Text('مجموعة #${g['id']}'),
+                          title: Text('${app.t('checkout_group')} #${g['id']}'),
                           subtitle: Text(
                             '$status • ${money(g['final_total'] ?? g['total'], app.currency, app.decimals)}',
                           ),
@@ -242,13 +239,17 @@ class _CheckoutGroupDetailsScreenState
   Widget build(BuildContext context) {
     if (loading) {
       return Scaffold(
-        appBar: AppBar(),
+        appBar: AppBar(
+          title: Text('${appController.t('checkout_group')} #${widget.id}'),
+        ),
         body: const Center(child: CircularProgressIndicator()),
       );
     }
     if (group == null) {
       return Scaffold(
-        appBar: AppBar(),
+        appBar: AppBar(
+          title: Text('${appController.t('checkout_group')} #${widget.id}'),
+        ),
         body: EmptyState(
           message: appController.t('not_synced_yet'),
           actionLabel: appController.t('retry'),
@@ -269,25 +270,28 @@ class _CheckoutGroupDetailsScreenState
     final trackingOn = app.orderTrackingEnabled;
     return Scaffold(
       appBar: AppBar(
-        title: Text('مجموعة #${widget.id}'),
+        title: Text('${app.t('checkout_group')} #${widget.id}'),
         actions: [
           if (canCancel)
-            IconButton(icon: const Icon(Icons.cancel), onPressed: _cancel),
+            IconButton(
+              icon: const Icon(Icons.cancel_outlined),
+              tooltip: app.t('cancel_order'),
+              onPressed: _cancel,
+            ),
         ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          OfflineBanner(stale: _servedFromCache),
           if (_servedFromCache) const SavedStatusChip(),
           ListTile(
-            title: const Text('الحالة'),
+            title: Text(app.t('status')),
             subtitle: Text(
               J.str(group?['status'] ?? group?['customer_status']),
             ),
           ),
           ListTile(
-            title: const Text('الإجمالي'),
+            title: Text(app.t('total')),
             subtitle: Text(
               money(
                 group?['final_total'] ?? group?['total'],
@@ -298,7 +302,7 @@ class _CheckoutGroupDetailsScreenState
           ),
           if (trackingOn)
             ListTile(
-              title: const Text('التتبع'),
+              title: Text(app.t('track_order')),
               subtitle: Text(
                 J.str(
                   group?['tracking_status'] ?? group?['delivery_status'] ?? '—',
@@ -309,7 +313,7 @@ class _CheckoutGroupDetailsScreenState
             Card(
               child: ListTile(
                 leading: const Icon(Icons.info_outline),
-                title: const Text('الإلغاء غير متاح'),
+                title: Text(app.t('cancel_not_available')),
                 subtitle: Text(cancelReason),
               ),
             ),
@@ -318,8 +322,12 @@ class _CheckoutGroupDetailsScreenState
             (o) => [
               Card(
                 child: ListTile(
-                  title: Text('طلب ${o['id']} - ${J.str(o['store_name'])}'),
-                  subtitle: Text('${J.maps(o['items']).length} منتجات'),
+                  title: Text(
+                    '${app.t('order')} ${o['id']} - ${J.str(o['store_name'])}',
+                  ),
+                  subtitle: Text(
+                    '${J.maps(o['items']).length} ${app.t('products')}',
+                  ),
                   trailing: Text(
                     money(
                       o['total'] ?? o['final_total'],
@@ -350,7 +358,7 @@ class _CheckoutGroupDetailsScreenState
           if (canCancel)
             OutlinedButton.icon(
               onPressed: _cancel,
-              icon: const Icon(Icons.cancel),
+              icon: const Icon(Icons.cancel_outlined),
               label: Text(appController.t('cancel_order')),
             ),
         ],

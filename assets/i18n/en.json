@@ -981,6 +981,8 @@
   "accept_terms_required": "You must accept the terms and privacy policy",
   "i_agree_to": "I agree to the",
   "logout_confirm": "Do you want to log out?",
+  "exit_confirm": "Do you want to exit the app?",
+  "exit_app": "Exit",
   "delete_address_confirm": "Delete this address?",
   "add_address_first": "Add a delivery address first",
   "fill_required_fields": "Please complete the required fields",
@@ -1260,5 +1262,8 @@
   "catalog_sync_failed": "Catalog sync failed — saved data kept.",
   "catalog_incomplete": "Catalog may be incomplete.",
   "offline_images_title": "Offline product images",
-  "offline_images_subtitle": "Download thumbnails for offline browsing (Wi-Fi recommended)."
+  "offline_images_subtitle": "Download thumbnails for offline browsing (Wi-Fi recommended).",
+  "checkout_groups": "Order Groups",
+  "checkout_group": "Group",
+  "cancel_not_available": "Cancellation unavailable"
 }

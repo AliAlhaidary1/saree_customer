@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/json_util.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/requires_internet_dialog.dart';
 
 class ComplaintsScreen extends StatefulWidget {
@@ -27,7 +26,6 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
 
   List<Map<String, dynamic>> _mine = [];
   bool _loadingMine = false;
-  bool _servedFromCache = false;
   bool _draftRestored = false;
   Timer? _draftDeb;
 
@@ -114,7 +112,6 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
     if (snap is List && snap.isNotEmpty && mounted) {
       setState(() {
         _mine = J.maps(snap);
-        _servedFromCache = true;
       });
     }
     setState(() => _loadingMine = true);
@@ -131,11 +128,9 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
       }
       setState(() {
         if (res.ok) _mine = items;
-        _servedFromCache = !res.ok && _mine.isNotEmpty;
       });
     } catch (_) {
       if (mounted) {
-        setState(() => _servedFromCache = _mine.isNotEmpty);
       }
     } finally {
       if (mounted) setState(() => _loadingMine = false);
@@ -344,7 +339,6 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> {
               ),
             ),
             const SizedBox(height: 24),
-            OfflineBanner(stale: _servedFromCache),
             Text(
               app.t('my_submissions'),
               style: Theme.of(context).textTheme.titleMedium,

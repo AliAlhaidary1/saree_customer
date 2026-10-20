@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -7,13 +10,13 @@ import '../../core/app_controller.dart';
 import '../../core/app_theme.dart';
 import '../../core/catalog_store.dart';
 import '../../core/config.dart';
+import '../../core/diag.dart';
 import '../../core/json_util.dart';
 import '../../core/product_media.dart';
 import '../../core/promo_price.dart';
 import '../../core/search_scope.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/closed_store_badge.dart';
-import '../../widgets/offline_banner.dart';
 import '../../widgets/product_card.dart';
 import '../../widgets/product_filter_drawer.dart';
 import '../../widgets/product_variant_sheet.dart';
@@ -321,23 +324,40 @@ class _ProductsScreenState extends State<ProductsScreen>
     'longitude': appController.browseCoords.longitude,
   };
 
-  bool _servedFromCache = false;
-
   /// Honest data state of the current scope (never inferred from a row count:
   /// zero rows can mean unsynchronized, failed, or genuinely empty).
   CatalogScopeStatus _catalogStatus = CatalogScopeStatus.neverSynced;
 
   /// Empty-state copy for the current [_catalogStatus]. `ready` (or any
   /// unknown future state) with zero items means the query matched nothing.
-  String _emptyMessage() => catalogEmptyMessage(_catalogStatus, appController.t);
+  String _emptyMessage() =>
+      catalogEmptyMessage(_catalogStatus, appController.t);
 
   Future<void> _load({bool reset = false}) async {
     if (!reset && (loadingMore || !hasMore)) return;
     final mySeq = ++_seq;
+    final swLoad = Diag.enabled ? (Stopwatch()..start()) : null;
     final point = appController.browseCoords;
     if (reset) {
       offset = 0;
       hasMore = true;
+    }
+    // Kick the network page off now, in parallel with the local-first reads
+    // below. Local DB work must never postpone the request that actually
+    // refreshes the grid; the response is awaited further down.
+    final network = Future.sync(
+      () => appController.api.products(
+        latitude: point.latitude,
+        longitude: point.longitude,
+        filters: _filters,
+      ),
+    )
+        .timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => ApiResult({'status': 0}),
+        )
+        .catchError((_) => ApiResult({'status': 0}));
+    if (reset) {
       _catalogStatus = (await appController.catalogScopeState()).status;
       if (!mounted || mySeq != _seq) return;
       // Local-first: paint cached page instantly (offline-capable), then
@@ -348,7 +368,6 @@ class _ProductsScreenState extends State<ProductsScreen>
           items = cached;
           offset = items.length;
           loading = false;
-          _servedFromCache = true;
         });
       } else {
         // Synchronized catalog covers queries never visited (full local
@@ -356,6 +375,8 @@ class _ProductsScreenState extends State<ProductsScreen>
         final local = await appController.catalogProductsLocal(
           categoryId: int.tryParse(categoryId ?? ''),
           storeId: int.tryParse(widget.sellerId ?? ''),
+          sectionId: widget.sectionId ?? '',
+          sellerSectionId: widget.sellerSectionId ?? '',
           search: _search.text.trim(),
           sort: sort,
           priceMin: priceMin,
@@ -363,6 +384,8 @@ class _ProductsScreenState extends State<ProductsScreen>
           minRating: minRating,
           inStock: inStock,
           onlyOffers: widget.hasOffer || onlyOffers,
+          canDeliver: canDeliver,
+          isReturnable: isReturnable,
           limit: AppConfig.productPageSize,
         );
         if (!mounted || mySeq != _seq) return;
@@ -372,7 +395,6 @@ class _ProductsScreenState extends State<ProductsScreen>
             offset = items.length;
             loading = false;
             hasMore = local.length >= AppConfig.productPageSize;
-            _servedFromCache = true;
           });
         } else {
           setState(() => loading = true);
@@ -382,16 +404,21 @@ class _ProductsScreenState extends State<ProductsScreen>
       setState(() => loadingMore = true);
     }
     try {
-      final result = await appController.api.products(
-        latitude: point.latitude,
-        longitude: point.longitude,
-        filters: _filters,
-      );
+      // Started above, already in flight while the local-first rows painted.
+      final result = await network;
       if (!mounted || mySeq != _seq) return; // stale response: ignore.
+      if (swLoad != null) {
+        Diag.log(
+          'products:load',
+          '${swLoad.elapsedMilliseconds}ms status=${result.status} '
+          'rows=${result.dataMaps.length} reset=$reset offset=$offset',
+        );
+      }
       if (result.ok) {
         final next = result.dataMaps;
         if (reset && next.isNotEmpty) {
-          await appController.cacheProductPage(_filters, next);
+          // Background write: the grid paints without waiting on SQLite.
+          unawaited(appController.cacheProductPage(_filters, next));
         }
         setState(() {
           // Dedupe by stable server id: offset pages over live backend data
@@ -401,7 +428,6 @@ class _ProductsScreenState extends State<ProductsScreen>
           hasMore = next.length >= AppConfig.productPageSize;
           loading = false;
           loadingMore = false;
-          _servedFromCache = false;
         });
       } else {
         // Refresh failed: fall back to the synchronized catalog (offline
@@ -410,6 +436,8 @@ class _ProductsScreenState extends State<ProductsScreen>
             ? await appController.catalogProductsLocal(
                 categoryId: int.tryParse(categoryId ?? ''),
                 storeId: int.tryParse(widget.sellerId ?? ''),
+                sectionId: widget.sectionId ?? '',
+                sellerSectionId: widget.sellerSectionId ?? '',
                 search: _search.text.trim(),
                 sort: sort,
                 priceMin: priceMin,
@@ -417,11 +445,15 @@ class _ProductsScreenState extends State<ProductsScreen>
                 minRating: minRating,
                 inStock: inStock,
                 onlyOffers: widget.hasOffer || onlyOffers,
+                canDeliver: canDeliver,
+                isReturnable: isReturnable,
                 limit: AppConfig.productPageSize,
               )
             : await appController.catalogProductsLocal(
                 categoryId: int.tryParse(categoryId ?? ''),
                 storeId: int.tryParse(widget.sellerId ?? ''),
+                sectionId: widget.sectionId ?? '',
+                sellerSectionId: widget.sellerSectionId ?? '',
                 search: _search.text.trim(),
                 sort: sort,
                 priceMin: priceMin,
@@ -429,6 +461,8 @@ class _ProductsScreenState extends State<ProductsScreen>
                 minRating: minRating,
                 inStock: inStock,
                 onlyOffers: widget.hasOffer || onlyOffers,
+                canDeliver: canDeliver,
+                isReturnable: isReturnable,
                 limit: AppConfig.productPageSize,
                 offset: items.length,
               );
@@ -438,13 +472,11 @@ class _ProductsScreenState extends State<ProductsScreen>
             items = reset ? local : J.appendUnique(items, local);
             offset = items.length;
             hasMore = local.length >= AppConfig.productPageSize;
-            _servedFromCache = true;
             loading = false;
           } else {
             // Nothing to show and nothing coming: stop spinning so the
             // empty state (with status copy + retry) paints instead.
             loading = false;
-            if (reset && items.isEmpty) _servedFromCache = false;
           }
           loadingMore = false;
         });
@@ -455,6 +487,8 @@ class _ProductsScreenState extends State<ProductsScreen>
       final local = await appController.catalogProductsLocal(
         categoryId: int.tryParse(categoryId ?? ''),
         storeId: int.tryParse(widget.sellerId ?? ''),
+        sectionId: widget.sectionId ?? '',
+        sellerSectionId: widget.sellerSectionId ?? '',
         search: _search.text.trim(),
         sort: sort,
         priceMin: priceMin,
@@ -462,6 +496,8 @@ class _ProductsScreenState extends State<ProductsScreen>
         minRating: minRating,
         inStock: inStock,
         onlyOffers: widget.hasOffer || onlyOffers,
+        canDeliver: canDeliver,
+        isReturnable: isReturnable,
         limit: AppConfig.productPageSize,
         offset: reset ? 0 : items.length,
       );
@@ -471,7 +507,6 @@ class _ProductsScreenState extends State<ProductsScreen>
           items = reset ? local : J.appendUnique(items, local);
           offset = items.length;
           hasMore = local.length >= AppConfig.productPageSize;
-          _servedFromCache = true;
           loading = false;
         } else {
           loading = false;
@@ -544,7 +579,6 @@ class _ProductsScreenState extends State<ProductsScreen>
               ),
             ),
           if (!widget.hideHeader) const Divider(height: 1),
-          OfflineBanner(stale: _servedFromCache),
           const _CatalogSyncStrip(),
           Expanded(
             child: loading
@@ -642,7 +676,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   int ratingCount = 0;
   int _imgIndex = 0;
   final _pageC = PageController();
-  bool _servedFromCache = false;
 
   @override
   void dispose() {
@@ -671,7 +704,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           product = cached;
           variant = variants.isNotEmpty ? variants.first : cached;
           loading = false;
-          _servedFromCache = true;
         });
       } else {
         final local = await appController.catalogProductLocal(
@@ -684,18 +716,25 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
             product = local;
             variant = variants.isNotEmpty ? variants.first : local;
             loading = false;
-            _servedFromCache = true;
           });
         }
       }
     }
 
-    final result = await appController.api.productById(
-      latitude: point.latitude,
-      longitude: point.longitude,
-      id: id,
-      slug: id == null ? widget.slug : '',
-    );
+    // Bounded: keeps the painted cached/local details on stall instead of
+    // holding the page (the refresh below is idempotent).
+    final result = await appController.api
+        .productById(
+          latitude: point.latitude,
+          longitude: point.longitude,
+          id: id,
+          slug: id == null ? widget.slug : '',
+        )
+        .timeout(
+          const Duration(seconds: 12),
+          onTimeout: () => ApiResult({'status': 0}),
+        )
+        .catchError((_) => ApiResult({'status': 0}));
     if (!result.ok) {
       if (!mounted) return;
       // Keep cached row if available; show a retry button when nothing cached.
@@ -717,7 +756,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       product = data;
       variant = variants.isNotEmpty ? variants.first : data;
       loading = false;
-      _servedFromCache = false;
     });
     _loadExtras(data);
   }
@@ -974,11 +1012,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   Widget build(BuildContext context) {
     final app = appController;
     if (loading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return Scaffold(
+        appBar: AppBar(title: Text(app.t('product'))),
+        body: const Center(child: CircularProgressIndicator()),
+      );
     }
     if (product == null || product!.isEmpty) {
       return Scaffold(
-        appBar: AppBar(),
+        appBar: AppBar(title: Text(app.t('product'))),
         body: EmptyState(
           icon: Icons.error_outline,
           message: error ?? app.t('Oops'),
@@ -987,7 +1028,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
             setState(() {
               loading = true;
               error = null;
-              _servedFromCache = false;
             });
             _load();
           },
@@ -1005,7 +1045,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     return Scaffold(
       backgroundColor: AppTheme.surfaceGrey,
       appBar: AppBar(
-        title: Text(J.str(product!['name']), maxLines: 1),
+         title: Text(
+           J.str(product!['name']).isEmpty
+               ? app.t('product')
+               : J.str(product!['name']),
+           maxLines: 1,
+           overflow: TextOverflow.ellipsis,
+         ),
         actions: [
           ListenableBuilder(
             listenable: app,
@@ -1013,7 +1059,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
               onPressed: () => context.push('/cart'),
               icon: Badge(
                 isLabelVisible: app.cartCount > 0,
-                backgroundColor: AppTheme.accentOrange,
                 label: Text(
                   '${app.cartCount}',
                   style: const TextStyle(fontSize: 10, color: Colors.white),
@@ -1047,7 +1092,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       ),
       body: ListView(
         children: [
-          OfflineBanner(stale: _servedFromCache),
           // ---- Gallery with dots + badges ----
           Stack(
             clipBehavior: Clip.none,
@@ -1536,7 +1580,8 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   SizedBox(
                     height: 296,
                     child: ListView.separated(
-                      cacheExtent: 600, scrollDirection: Axis.horizontal,
+                      scrollCacheExtent: ScrollCacheExtent.pixels(250),
+                      scrollDirection: Axis.horizontal,
                       itemCount: similar.length,
                       separatorBuilder: (_, _) => const SizedBox(width: 10),
                       itemBuilder: (_, i) => SizedBox(

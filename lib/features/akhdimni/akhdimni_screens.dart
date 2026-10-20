@@ -91,8 +91,6 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
     _load();
   }
 
-  bool _servedFromCache = false;
-
   Future<void> _load() async {
     final app = appController;
     // Local-first: last categories/config snapshot paints offline.
@@ -105,29 +103,30 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
           categories = snapCats;
           enabled = true;
           loading = false;
-          _servedFromCache = true;
         });
       }
     }
     try {
       List<Map<String, dynamic>> cats = [];
-      try {
-        final catRes = await app.api.akhdimniCategories();
-        if (catRes.ok) cats = catRes.dataMaps;
-      } catch (_) {}
+      final results = await Future.wait([
+        app.api.akhdimniCategories().catchError(
+          (_) => ApiResult({'status': 0}),
+        ),
+        app.api.akhdimniConfig().catchError((_) => ApiResult({'status': 0})),
+      ]);
+      final catRes = results[0];
+      final cfgRes = results[1];
+      if (catRes.ok) cats = catRes.dataMaps;
       bool en = app.akhdimniEnabled;
-      try {
-        final cfgRes = await app.api.akhdimniConfig();
-        if (cfgRes.ok) {
-          final data = J.map(cfgRes.dataMap['data']);
-          final raw = data.isNotEmpty ? data : cfgRes.dataMap;
-          if (raw['akhdimni_enabled'] != null) {
-            en = _isOn(raw['akhdimni_enabled']);
-          }
-          final cfgCats = J.maps(raw['categories']);
-          if (cats.isEmpty && cfgCats.isNotEmpty) cats = cfgCats;
+      if (cfgRes.ok) {
+        final data = J.map(cfgRes.dataMap['data']);
+        final raw = data.isNotEmpty ? data : cfgRes.dataMap;
+        if (raw['akhdimni_enabled'] != null) {
+          en = _isOn(raw['akhdimni_enabled']);
         }
-      } catch (_) {}
+        final cfgCats = J.maps(raw['categories']);
+        if (cats.isEmpty && cfgCats.isNotEmpty) cats = cfgCats;
+      }
       cats = cats.where(_catActive).toList()
         ..sort((a, b) {
           final sa = int.tryParse('${a['sort_order'] ?? 0}') ?? 0;
@@ -141,7 +140,6 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
         categories = fresh ? cats : categories;
         enabled = en;
         loading = false;
-        _servedFromCache = !fresh && categories.isNotEmpty;
       });
       if (fresh) {
         await app.cachePublicSnapshot('akhdimni_home', {'categories': cats});
@@ -151,7 +149,6 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
         setState(() {
           enabled = app.akhdimniEnabled;
           loading = false;
-          _servedFromCache = categories.isNotEmpty;
         });
       }
     }
@@ -162,16 +159,10 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
     final app = appController;
     final isAr = app.i18n.code == 'ar';
     if (loading) {
-      return Scaffold(
-        appBar: null,
-        body: const Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     if (!enabled) {
-      return Scaffold(
-        appBar: null,
-        body: Center(child: Text(app.t('akhdimni_disabled'))),
-      );
+      return Scaffold(body: Center(child: Text(app.t('akhdimni_disabled'))));
     }
     final steps = [
       (
@@ -191,13 +182,11 @@ class _AkhdimniHomeScreenState extends State<AkhdimniHomeScreen> {
       ),
     ];
     return Scaffold(
-      appBar: null,
       body: RefreshIndicator(
         onRefresh: _load,
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            OfflineBanner(stale: _servedFromCache),
             _sectionHeader(
               app.t('akhdimni_choose_service'),
               app.t('akhdimni_choose_service_hint'),
@@ -544,9 +533,10 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
     try {
       final snap = appController.readPublicSnapshot('akhdimni_home');
       if (snap is Map) {
-        final seeded = J.maps(
-          J.map(snap)['categories'],
-        ).where(_catActive).toList();
+        final seeded = J
+            .maps(J.map(snap)['categories'])
+            .where(_catActive)
+            .toList();
         if (seeded.isNotEmpty && mounted) {
           setState(() => categories = seeded);
         }
@@ -766,6 +756,7 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
         try {
           await app.offline.removeDraft(app.accountScope, _draftFormId);
         } catch (_) {}
+        if (!mounted) return;
         final data = J.map(result.dataMap['data']);
         final id = J.str(data['id']).isNotEmpty
             ? J.str(data['id'])
@@ -947,7 +938,7 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                         else
                           RadioGroup<String>(
                             groupValue: dropoffLat != null && dropoffLng != null
-                                ? '${dropoffLat}_${dropoffLng}'
+                                ? '${dropoffLat}_$dropoffLng'
                                 : null,
                             onChanged: (value) {
                               final addr = saved.firstWhere(
@@ -968,8 +959,7 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                                         child: Text(
                                           J.str(addr['name']).isNotEmpty
                                               ? J.str(addr['name'])
-                                              : app.t(
-                                                  'akhdimni_saved_address'),
+                                              : app.t('akhdimni_saved_address'),
                                         ),
                                       ),
                                       if (J.str(addr['is_default']) == '1')
@@ -999,8 +989,8 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                             groupValue: !_hasPickup
                                 ? 'none'
                                 : (pickupLat != null && pickupLng != null
-                                    ? '${pickupLat}_${pickupLng}'
-                                    : null),
+                                      ? '${pickupLat}_$pickupLng'
+                                      : null),
                             onChanged: (value) {
                               if (value == 'none') {
                                 _clearPickup();
@@ -1018,8 +1008,9 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                                 RadioListTile<String>(
                                   value: 'none',
                                   title: Text(app.t('akhdimni_no_pickup')),
-                                  subtitle:
-                                      Text(app.t('akhdimni_no_pickup_hint')),
+                                  subtitle: Text(
+                                    app.t('akhdimni_no_pickup_hint'),
+                                  ),
                                 ),
                                 ...saved.map((addr) {
                                   return RadioListTile<String>(
@@ -1326,8 +1317,6 @@ class _AkhdimniOrdersScreenState extends State<AkhdimniOrdersScreen> {
     _load();
   }
 
-  bool _servedFromCache = false;
-
   Future<void> _load() async {
     if (!appController.isLoggedIn) {
       if (mounted) setState(() => loading = false);
@@ -1339,7 +1328,6 @@ class _AkhdimniOrdersScreenState extends State<AkhdimniOrdersScreen> {
       setState(() {
         items = J.maps(snap);
         loading = false;
-        _servedFromCache = true;
       });
     }
     if (mounted) setState(() => error = null);
@@ -1350,7 +1338,6 @@ class _AkhdimniOrdersScreenState extends State<AkhdimniOrdersScreen> {
       if (!mounted) return;
       setState(() {
         items = res.ok ? res.dataMaps : items;
-        _servedFromCache = !res.ok && items.isNotEmpty;
         if (!res.ok && items.isEmpty) {
           error = res.message.isNotEmpty
               ? res.message
@@ -1369,7 +1356,6 @@ class _AkhdimniOrdersScreenState extends State<AkhdimniOrdersScreen> {
         error = items.isEmpty
             ? appController.t('not_synced_yet')
             : appController.t('something_went_wrong');
-        _servedFromCache = items.isNotEmpty;
       });
     } finally {
       if (mounted) setState(() => loading = false);
@@ -1405,27 +1391,20 @@ class _AkhdimniOrdersScreenState extends State<AkhdimniOrdersScreen> {
               onRefresh: _load,
               child: ListView(
                 children: [
-                  OfflineBanner(stale: _servedFromCache),
-                  ...items
-                      .map(
-                        (item) => ListTile(
-                          title: Text(
-                            '#${item['id']} · ${akhdimniStatusLabel(J.str(item['active_status']))}',
-                          ),
-                          subtitle: Text(_orderSubtitle(item)),
-                          trailing: Text(
-                            money(
-                              item['final_total'],
-                              app.currency,
-                              app.decimals,
-                            ),
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          onTap: () =>
-                              context.push('/akhdimni/orders/${item['id']}'),
-                        ),
-                      )
-                      ,
+                  ...items.map(
+                    (item) => ListTile(
+                      title: Text(
+                        '#${item['id']} · ${akhdimniStatusLabel(J.str(item['active_status']))}',
+                      ),
+                      subtitle: Text(_orderSubtitle(item)),
+                      trailing: Text(
+                        money(item['final_total'], app.currency, app.decimals),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      onTap: () =>
+                          context.push('/akhdimni/orders/${item['id']}'),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -1631,7 +1610,11 @@ class _AkhdimniOrderDetailsScreenState
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('${app.t('akhdimni')} #${widget.id}'),
+        title: Text(
+          '${app.t('akhdimni')} #${widget.id}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
           if (canCancel)
             IconButton(
@@ -1656,7 +1639,6 @@ class _AkhdimniOrderDetailsScreenState
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          OfflineBanner(stale: _servedFromCache),
           if (_servedFromCache) const SavedStatusChip(),
           if (!terminalFail)
             Card(

@@ -1,32 +1,77 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
+import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 
 import 'catalog_db/catalog_config.dart';
 import 'catalog_db/catalog_database.dart';
 
-/// Bounded offline thumbnail prefetch with zero new dependencies.
+/// True when [url] is worth downloading: absolute http(s) URL whose path does
+/// not point at a format neither Android nor the downscaler can decode
+/// (HEIC/HEIF/AVIF/TIFF typically come from phone uploads; the platform
+/// decoder rejects them with 'unimplemented' and they can never display).
+bool _fetchableImageUrl(String url) {
+  final lower = url.toLowerCase();
+  if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+    return false;
+  }
+  try {
+    final path = Uri.parse(url).path.toLowerCase();
+    for (final ext in const ['.heic', '.heif', '.avif', '.tif', '.tiff']) {
+      if (path.endsWith(ext)) return false;
+    }
+  } catch (_) {
+    return false;
+  }
+  return true;
+}
+
+/// Decodes + downscales one image off the main isolate (decoding on the UI
+/// thread janks scrolling noticeably). Returns empty bytes on any failure.
+Uint8List _decodeThumb(Uint8List bytes) {
+  try {
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) return Uint8List(0);
+    final w = decoded.width;
+    final h = decoded.height;
+    final longest = w > h ? w : h;
+    final small = longest > ImagePrefetch.maxDimension
+        ? img.copyResize(
+            decoded,
+            width: w >= h ? ImagePrefetch.maxDimension : null,
+            height: h > w ? ImagePrefetch.maxDimension : null,
+          )
+        : decoded;
+    return img.encodeJpg(small, quality: ImagePrefetch.jpegQuality);
+  } catch (_) {
+    return Uint8List(0);
+  }
+}
+
+/// Bounded automatic offline thumbnail prefetch.
 ///
 /// Design constraints (deliberate):
-/// * opt-in only (see `AppController.offlineImagesEnabled`, default OFF —
-///   mobile-data safety; UI copy recommends Wi-Fi);
-/// * bounded: at most [maxFilesPerRun] files per run, [maxBytesPerFile] each,
-///   total manifest budget [CatalogDbConfig.imageBudgetBytes]; oldest-first
-///   LRU eviction via `evictCandidates`;
+/// * automatic: runs after every completed catalog sync (no settings toggle);
+///   tiny downscaled files keep mobile-data cost negligible;
+/// * every stored file is a ≤512px JPEG (quality 70): typical photos shrink
+///   ~20x versus originals, so the same disk budget holds ~20x more thumbnails;
+/// * bounded: at most [maxFilesPerRun] files per run, [maxBytesPerFile] input
+///   each, total manifest budget [CatalogDbConfig.imageBudgetBytes];
+///   oldest-first LRU eviction via `evictCandidates`;
 /// * file-safe ordering: write temp → rename → insert manifest row; eviction
 ///   removes the manifest row first, then the file (failures ignored);
 /// * best-effort: failures are skipped without retry; catalog data never
 ///   waits for images; a timed-out download never fails the run.
-///
-/// What this does NOT do (documented limitation): no client-side downscaling
-/// (no image codec dependency) — bounded originals are cached. A ≤512px
-/// JPEG pipeline remains future work.
 class ImagePrefetch {
   ImagePrefetch();
 
-  static const int maxFilesPerRun = 100;
+  static const int maxFilesPerRun = 12;
   static const int maxBytesPerFile = 2 * 1024 * 1024;
+  static const int maxDimension = 512;
+  static const int jpegQuality = 70;
 
   bool _running = false;
   bool _cancelRequested = false;
@@ -59,18 +104,9 @@ class ImagePrefetch {
       h1 = ((h1 << 5) + h1 + c) & 0xFFFFFFFF;
       h2 = (c + (h2 << 6) + (h2 << 16) - h2) & 0xFFFFFFFF;
     }
-    // Extension from the URL path only (query strings like ?format=png
-    // must not force a wrong decoder downstream).
-    var ext = '.jpg';
-    try {
-      final path = Uri.parse(url).path.toLowerCase();
-      if (path.endsWith('.png')) {
-        ext = '.png';
-      } else if (path.endsWith('.webp')) {
-        ext = '.webp';
-      }
-    } catch (_) {}
-    return '${h1.toRadixString(16)}_${h2.toRadixString(16)}_${url.length}$ext';
+    // Stored files are always re-encoded JPEG thumbnails, regardless of
+    // the source format.
+    return '${h1.toRadixString(16)}_${h2.toRadixString(16)}_${url.length}.jpg';
   }
 
   /// Downloads [urls] (deduplicated) into the thumbs directory, recording
@@ -124,6 +160,7 @@ class ImagePrefetch {
         if (_cancelRequested || stored >= maxFilesPerRun) break;
         final url = raw.trim();
         if (url.isEmpty || !seen.add(url)) continue;
+        if (!_fetchableImageUrl(url)) continue;
         try {
           final name = fileNameFor(url);
           final target = File('${dir.path}/$name');
@@ -175,9 +212,7 @@ class ImagePrefetch {
           if (mime.isNotEmpty && !mime.startsWith('image/')) continue;
           final contentLen = res.contentLength;
           if (contentLen > maxBytesPerFile) continue;
-          final tmp = File('${target.path}.part');
-          final sink = tmp.openWrite();
-          var bytes = 0;
+          final raw = BytesBuilder();
           var tooBig = false;
           var stalled = false;
           try {
@@ -186,50 +221,50 @@ class ImagePrefetch {
             await for (final chunk in res.timeout(
               const Duration(seconds: 10),
             )) {
-              bytes += chunk.length;
-              if (bytes > maxBytesPerFile) {
+              if (raw.length + chunk.length > maxBytesPerFile) {
                 tooBig = true;
                 break;
               }
-              sink.add(chunk);
+              raw.add(chunk);
             }
           } catch (_) {
             stalled = true;
           }
+          if (stalled || tooBig || raw.isEmpty) continue;
+          // Downscale to a small JPEG thumbnail in a background isolate:
+          // empty output means undecodable body — skip it instead of
+          // caching garbage.
+          Uint8List thumb;
           try {
-            await sink.close();
-          } catch (_) {}
-          if (stalled) {
-            try {
-              await tmp.delete();
-            } catch (_) {}
+            thumb = await compute(_decodeThumb, raw.toBytes());
+          } catch (_) {
             continue;
           }
-          if (tooBig || bytes == 0) {
-            try {
-              await tmp.delete();
-            } catch (_) {}
-            continue;
-          }
-          if (manifestBytes + bytes > CatalogDbConfig.imageBudgetBytes) {
-            await evict(bytes);
+          if (thumb.isEmpty) continue;
+          if (manifestBytes + thumb.length >
+              CatalogDbConfig.imageBudgetBytes) {
+            await evict(thumb.length);
             manifestBytes = await refreshManifestBytes();
-            if (manifestBytes + bytes > CatalogDbConfig.imageBudgetBytes) {
-              try {
-                await tmp.delete();
-              } catch (_) {}
+            if (manifestBytes + thumb.length >
+                CatalogDbConfig.imageBudgetBytes) {
               continue;
             }
+          }
+          final tmp = File('${target.path}.part');
+          try {
+            await tmp.writeAsBytes(thumb, flush: true);
+          } catch (_) {
+            continue;
           }
           await tmp.rename(target.path);
           try {
             await dao?.putImage(
               url: url,
               localPath: target.path,
-              bytes: bytes,
+              bytes: thumb.length,
               now: DateTime.now(),
             );
-            manifestBytes += bytes;
+            manifestBytes += thumb.length;
           } catch (_) {}
           stored++;
         } catch (_) {

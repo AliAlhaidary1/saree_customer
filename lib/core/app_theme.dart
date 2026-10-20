@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -76,11 +77,11 @@ abstract final class AppTheme {
       ),
       scaffoldBackgroundColor: surfaceGrey,
       textTheme: textTheme,
-      appBarTheme: AppBarTheme(
-        backgroundColor: navy,
-        foregroundColor: backgroundWhite,
-        elevation: 0,
-        centerTitle: false,
+       appBarTheme: AppBarTheme(
+         backgroundColor: navy,
+         foregroundColor: backgroundWhite,
+         elevation: 0,
+         centerTitle: false,
         titleTextStyle: textTheme.titleLarge?.copyWith(
           color: backgroundWhite,
           fontWeight: FontWeight.w700,
@@ -211,9 +212,45 @@ abstract final class AppTheme {
         final fade = CurvedAnimation(parent: animation, curve: Curves.easeOut);
         return FadeTransition(
           opacity: fade,
-          child: SlideTransition(position: offset, child: child),
+          child: SlideTransition(
+            position: offset,
+            child: PageBackGuard(child: child),
+          ),
         );
       },
+    );
+  }
+}
+
+/// Keeps the Android/system back button inside the app on every page.
+///
+/// go_router's `context.go` collapses the history to a single page, so back
+/// would otherwise close the app from any deep route (e.g. right after
+/// checkout navigates to `/orders`). This pops when there is a page to pop,
+/// otherwise returns to the home tab, and only exits the app from home.
+class PageBackGuard extends StatelessWidget {
+  const PageBackGuard({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final router = GoRouter.of(context);
+    final location = router.routerDelegate.currentConfiguration.uri.path;
+    final canPop = router.canPop();
+    return PopScope(
+      canPop: canPop || location == '/',
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (router.canPop()) {
+          router.pop();
+        } else if (location == '/') {
+          SystemNavigator.pop();
+        } else {
+          router.go('/');
+        }
+      },
+      child: child,
     );
   }
 }

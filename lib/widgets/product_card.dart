@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
 import '../core/app_theme.dart';
+import '../core/diag.dart';
 import '../core/json_util.dart';
 import '../core/product_media.dart';
 import '../core/promo_price.dart';
@@ -21,8 +22,12 @@ class ProductCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback? onAdd;
 
+  /// Diagnostic counter (see [Diag]); reset per frame by the host screen.
+  static int debugBuilds = 0;
+
   @override
   Widget build(BuildContext context) {
+    if (Diag.enabled) debugBuilds++;
     final app = appController;
     final variants = J.maps(product['variants']);
     final variant = variants.isNotEmpty ? variants.first : product;

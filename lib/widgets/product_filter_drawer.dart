@@ -175,6 +175,11 @@ class _ProductFilterSheetState extends State<ProductFilterSheet> {
       f = ProductFilterValue();
       _range = RangeValues(_lo, _hi);
     });
+    // Apply immediately: clearing is final even when the sheet is dismissed
+    // without tapping "show results", so the list returns to the default
+    // state instead of keeping the previous filter. A copy is passed because
+    // the sheet keeps mutating [f] while it stays open.
+    widget.onApply(f.copy());
   }
 
   void _apply() {
@@ -411,19 +416,9 @@ class _ProductFilterSheetState extends State<ProductFilterSheet> {
                   child: Column(
                     children: [
                       _switchRow(
-                        t('in_stock_only'),
-                        f.inStock,
-                        (v) => setState(() => f.inStock = v),
-                      ),
-                      _switchRow(
                         t('offers'),
                         f.onlyOffers,
                         (v) => setState(() => f.onlyOffers = v),
-                      ),
-                      _switchRow(
-                        t('can_deliver'),
-                        f.canDeliver,
-                        (v) => setState(() => f.canDeliver = v),
                       ),
                       _switchRow(
                         t('returnable_only'),
