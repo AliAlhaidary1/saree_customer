@@ -37,51 +37,48 @@ class BrandHeader extends StatelessWidget {
   /// Optional widget rendered below the top row (e.g. a search field).
   final Widget? searchChild;
 
-
   @override
   Widget build(BuildContext context) {
-    return Container(
-       decoration: const BoxDecoration(
-         color: AppTheme.primaryNavy,
-       ),
-       child: SafeArea(
-         bottom: false,
-         child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 2, 12, 4),
-           child: Column(
-             children: [
-                Row(
+    return ColoredBox(
+      color: AppTheme.primaryNavy,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                height: 48,
+                child: Row(
                   children: [
-                    if (onBack != null)
-                    IconButton(
-                      onPressed: onBack,
-                      icon: const Icon(
-                        Icons.arrow_back,
-                        color: AppTheme.backgroundWhite,
+                    if (onBack != null) ...[
+                      HeaderIconButton(
+                        icon: Icons.arrow_back,
+                        tooltip: MaterialLocalizations.of(
+                          context,
+                        ).backButtonTooltip,
+                        onPressed: onBack!,
                       ),
-                      tooltip: MaterialLocalizations.of(
-                        context,
-                      ).backButtonTooltip,
+                      const SizedBox(width: 2),
+                    ],
+                    BrandLogo(url: app.brand.logoUrl),
+                    const SizedBox(width: 10),
+                    Expanded(child: _titleBlock()),
+                    const NotificationBell(),
+                    _CartButton(app: app),
+                    HeaderIconButton(
+                      icon: Icons.person_outline,
+                      tooltip: app.t('my_account'),
+                      onPressed: () => context.push('/account'),
                     ),
-                  BrandLogo(url: app.brand.logoUrl),
-                  const SizedBox(width: 8),
-                  Expanded(child: _titleBlock()),
-                  const NotificationBell(),
-                  _CartButton(app: app),
-                  IconButton(
-                    onPressed: () => context.push('/account'),
-                    icon: const Icon(
-                      Icons.person_outline,
-                      color: AppTheme.backgroundWhite,
-                    ),
-                    tooltip: app.t('my_account'),
-                  ),
-                 ],
-               ),
-                if (searchChild != null) ...[
-                 const SizedBox(height: 10),
-                 searchChild!,
-               ],
+                  ],
+                ),
+              ),
+              if (searchChild != null) ...[
+                const SizedBox(height: 8),
+                searchChild!,
+              ],
             ],
           ),
         ),
@@ -93,7 +90,8 @@ class BrandHeader extends StatelessWidget {
     const titleStyle = TextStyle(
       color: AppTheme.backgroundWhite,
       fontWeight: FontWeight.w700,
-      fontSize: 13,
+      fontSize: 15,
+      height: 1.2,
     );
     if (subtitle == null || subtitle!.isEmpty) {
       return Text(
@@ -115,13 +113,46 @@ class BrandHeader extends StatelessWidget {
         Text(
           subtitle!,
           style: TextStyle(
-            color: AppTheme.backgroundWhite.withValues(alpha: 0.7),
-            fontSize: 12,
+            color: AppTheme.backgroundWhite.withValues(alpha: 0.72),
+            fontSize: 11.5,
+            height: 1.2,
           ),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
         ),
       ],
+    );
+  }
+}
+
+/// Compact 42dp header action. Regular [IconButton]s reserve 48dp each, which
+/// squeezes the title to a few characters once the back button is also shown.
+class HeaderIconButton extends StatelessWidget {
+  const HeaderIconButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.iconSize = 22,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+  final double iconSize;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      onPressed: onPressed,
+      tooltip: tooltip,
+      icon: Icon(icon, color: AppTheme.backgroundWhite, size: iconSize),
+      style: IconButton.styleFrom(
+        minimumSize: const Size(42, 42),
+        maximumSize: const Size(42, 42),
+        padding: EdgeInsets.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
     );
   }
 }
@@ -138,7 +169,7 @@ class BrandLogo extends StatelessWidget {
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
         color: AppTheme.backgroundWhite,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(9),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(6),
@@ -148,10 +179,10 @@ class BrandLogo extends StatelessWidget {
             if (logo != null && logo.isNotEmpty && displayableLogo(logo)) {
               return CachedNetworkImage(
                 imageUrl: logo,
-                width: 22,
-                height: 22,
+                width: 24,
+                height: 24,
                 fit: BoxFit.contain,
-                memCacheWidth: 64,
+                memCacheWidth: 72,
                 fadeInDuration: Duration.zero,
                 fadeOutDuration: Duration.zero,
                 errorWidget: (_, _, _) => _assetLogo(),
@@ -167,16 +198,16 @@ class BrandLogo extends StatelessWidget {
   Widget _assetLogo() {
     return Image.asset(
       'assets/brand/sareemart-logo.png',
-                width: 22,
-                height: 22,
+      width: 24,
+      height: 24,
       errorBuilder: (_, _, _) => Image.asset(
         'assets/brand/sareemart-mark.png',
-        width: 32,
-        height: 32,
+        width: 24,
+        height: 24,
         errorBuilder: (_, _, _) => const Icon(
           Icons.shopping_cart_rounded,
           color: AppTheme.accentOrange,
-          size: 26,
+          size: 24,
         ),
       ),
     );
@@ -193,6 +224,13 @@ class _CartButton extends StatelessWidget {
       listenable: app,
       builder: (_, _) => IconButton(
         onPressed: () => context.push('/cart'),
+        tooltip: app.t('cart'),
+        style: IconButton.styleFrom(
+          minimumSize: const Size(42, 42),
+          maximumSize: const Size(42, 42),
+          padding: EdgeInsets.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
         icon: Badge(
           isLabelVisible: app.cartCount > 0,
           label: Text(
@@ -202,17 +240,18 @@ class _CartButton extends StatelessWidget {
           child: const Icon(
             Icons.shopping_cart_outlined,
             color: AppTheme.backgroundWhite,
+            size: 22,
           ),
         ),
-        tooltip: app.t('cart'),
       ),
     );
   }
 }
 
-/// The single page-aware search field (under the brand header).
-/// Visible only on searchable pages (home, products, haraj); searches the
-/// page you are on.
+/// The single page-aware search bar (under the brand header).
+/// Visible only on searchable pages (home, products, haraj):
+/// - Home shows a read-only bar that opens `/search`.
+/// - Products / haraj filter their own list in place (debounced).
 class HeaderSearchBar extends StatefulWidget {
   const HeaderSearchBar({
     super.key,
@@ -231,6 +270,33 @@ class _HeaderSearchBarState extends State<HeaderSearchBar> {
   Timer? _deb;
 
   @override
+  void initState() {
+    super.initState();
+    _syncFromScope();
+  }
+
+  @override
+  void didUpdateWidget(HeaderSearchBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The shell reuses this State across tabs, so mirror the query that
+    // belongs to the page we just moved to instead of carrying stale text.
+    if (widget.onProducts != oldWidget.onProducts ||
+        widget.onHaraj != oldWidget.onHaraj) {
+      _deb?.cancel();
+      _syncFromScope();
+    }
+  }
+
+  void _syncFromScope() {
+    _ctrl.text = widget.onProducts
+        ? headerSearch.productQuery
+        : widget.onHaraj
+        ? headerSearch.harajQuery
+        : '';
+    _ctrl.selection = TextSelection.collapsed(offset: _ctrl.text.length);
+  }
+
+  @override
   void dispose() {
     _deb?.cancel();
     _ctrl.dispose();
@@ -243,17 +309,55 @@ class _HeaderSearchBarState extends State<HeaderSearchBar> {
       headerSearch.submitProducts(q);
     } else if (widget.onHaraj) {
       headerSearch.submitHaraj(q);
-    } else if (q.isNotEmpty) {
-      context.push('/products?search=${Uri.encodeComponent(q)}');
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final app = appController;
+    // Home: the bar is a shortcut into the dedicated search page (recent
+    // searches + suggestions). Editing in place only makes sense on pages
+    // that can filter their own list (products / haraj).
+    if (!widget.onProducts && !widget.onHaraj) {
+      return Material(
+        color: AppTheme.backgroundWhite,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => context.push('/search'),
+          child: SizedBox(
+            height: 42,
+            child: Row(
+              children: [
+                const SizedBox(width: 12),
+                Icon(
+                  Icons.search,
+                  color: AppTheme.primaryNavy.withValues(alpha: 0.45),
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    app.t('i_am_looking_for'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppTheme.textSecondary,
+                      fontSize: 13.5,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    final hasText = _ctrl.text.isNotEmpty;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      height: 36,
+      height: 42,
+      padding: EdgeInsetsDirectional.only(start: 12, end: hasText ? 4 : 12),
       decoration: BoxDecoration(
         color: AppTheme.backgroundWhite,
         borderRadius: BorderRadius.circular(12),
@@ -262,23 +366,28 @@ class _HeaderSearchBarState extends State<HeaderSearchBar> {
         children: [
           Icon(
             Icons.search,
-            color: AppTheme.primaryNavy.withValues(alpha: 0.5),
-            size: 22,
+            color: AppTheme.primaryNavy.withValues(alpha: 0.45),
+            size: 20,
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
           Expanded(
             child: TextField(
               controller: _ctrl,
               textInputAction: TextInputAction.search,
-              onSubmitted: _submit,
+              textAlignVertical: TextAlignVertical.center,
+              style: const TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+              onSubmitted: (value) {
+                _deb?.cancel();
+                _submit(value);
+                FocusScope.of(context).unfocus();
+              },
               onChanged: (_) {
-                // Debounced live search while on the products/haraj page.
-                if (!widget.onProducts && !widget.onHaraj) return;
                 _deb?.cancel();
                 _deb = Timer(
                   const Duration(milliseconds: 450),
                   () => _submit(_ctrl.text),
                 );
+                setState(() {});
               },
               decoration: InputDecoration(
                 hintText: widget.onHaraj
@@ -286,7 +395,7 @@ class _HeaderSearchBarState extends State<HeaderSearchBar> {
                     : app.t('i_am_looking_for'),
                 hintStyle: const TextStyle(
                   color: AppTheme.textSecondary,
-                  fontSize: 14,
+                  fontSize: 13.5,
                 ),
                 filled: false,
                 isDense: true,
@@ -298,36 +407,27 @@ class _HeaderSearchBarState extends State<HeaderSearchBar> {
               ),
             ),
           ),
-          InkWell(
-            onTap: () => context.push('/search'),
-            borderRadius: BorderRadius.circular(8),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: AppTheme.accentOrange.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(8),
+          if (hasText)
+            IconButton(
+              onPressed: () {
+                _deb?.cancel();
+                _ctrl.clear();
+                _submit('');
+                setState(() {});
+              },
+              tooltip: MaterialLocalizations.of(context).deleteButtonTooltip,
+              icon: const Icon(
+                Icons.close_rounded,
+                size: 18,
+                color: AppTheme.textSecondary,
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.search_outlined,
-                    size: 14,
-                    color: AppTheme.accentOrange,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    app.t('search'),
-                    style: const TextStyle(
-                      color: AppTheme.accentOrange,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
+              style: IconButton.styleFrom(
+                minimumSize: const Size(32, 32),
+                maximumSize: const Size(32, 32),
+                padding: EdgeInsets.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
             ),
-          ),
         ],
       ),
     );

@@ -215,6 +215,17 @@ GoRouter buildRouter() {
         ),
       ),
       GoRoute(
+        // Kept outside the ShellRoute: pushing a ShellRoute branch from a
+        // top-level page (product details) created a second match for the same
+        // shell route, whose page key is the route hash and therefore
+        // duplicated ("!keyReservation.contains(key)").
+        path: '/cart',
+        pageBuilder: (_, state) => AppTheme.slidePage(
+          key: state.pageKey,
+          child: AppShell(location: state.uri.path, child: const CartScreen()),
+        ),
+      ),
+      GoRoute(
         path: '/checkout-groups',
         pageBuilder: (_, s) => AppTheme.slidePage(
           key: s.pageKey,
@@ -349,35 +360,9 @@ GoRouter buildRouter() {
           ),
           GoRoute(
             path: '/products',
-            // Web parity: in stores_only the catalog is hidden entirely.
-            redirect: (_, _) => appController.isStoresOnly ? '/sellers' : null,
-            pageBuilder: (_, state) {
-              final q = state.uri.queryParameters;
-              return AppTheme.slidePage(
-                key: state.pageKey,
-                child: ProductsScreen(
-                  categoryId: q['category'],
-                  search: q['search'],
-                  hasOffer: q['offer'] == '1',
-                  sectionId: q['section'],
-                  sellerId: q['seller'],
-                  sort: q['sort'],
-                  minRating: q['rating'],
-                  inStock: q['in_stock'] == '1',
-                  priceMin: q['price_min'],
-                  priceMax: q['price_max'],
-                  canDeliver: q['deliver'] == '1',
-                  isReturnable: q['returnable'] == '1',
-                ),
-              );
-            },
-          ),
-          GoRoute(
-            path: '/cart',
-            pageBuilder: (_, state) => AppTheme.slidePage(
-              key: state.pageKey,
-              child: const CartScreen(),
-            ),
+            // The legacy standalone catalog page is gone: every browse entry
+            // point lands on the unified home design.
+            redirect: (_, _) => '/',
           ),
           GoRoute(
             path: '/orders',
@@ -452,19 +437,15 @@ class AppShell extends StatelessWidget {
     return AppTheme.brandNameAr;
   }
 
-  /// Pages that render their own AppBar must not stack the shell brand header
-  /// on top of them. Keep this list explicit so a new standalone AppBar page
-  /// only needs a single entry here.
-  static const _ownAppBarPaths = <String>{'/orders'};
-
-  bool get _hasOwnAppBar => _ownAppBarPaths.contains(location);
+  /// Pages named in the header itself instead of carrying the brand name.
+  String _headerTitle() {
+    if (location == '/orders') return appController.t('my_orders');
+    return _brandTitle();
+  }
 
   /// Search exists only on searchable pages (home, products, haraj).
   Widget? _headerSearchFor(String location) {
     if (location == '/') return const HeaderSearchBar();
-    if (location.startsWith('/products')) {
-      return const HeaderSearchBar(onProducts: true);
-    }
     if (location == '/haraj') return const HeaderSearchBar(onHaraj: true);
     return null;
   }
@@ -490,18 +471,17 @@ class AppShell extends StatelessWidget {
         backgroundColor: AppTheme.primaryNavy,
         body: Column(
           children: [
-            if (!_hasOwnAppBar)
-              BrandHeader(
-                app: app,
-                title: _brandTitle(),
-                searchChild: _headerSearchFor(location),
-              ),
+            BrandHeader(
+              app: app,
+              title: _headerTitle(),
+              searchChild: _headerSearchFor(location),
+            ),
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.only(top: 24),
+                padding: const EdgeInsets.only(top: 12),
                 child: ClipRRect(
                   borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(48),
+                    top: Radius.circular(32),
                   ),
                   // Material (not Container): ListTile paints background/ink
                   // on the nearest Material ancestor; a bare ColoredBox would
@@ -513,7 +493,10 @@ class AppShell extends StatelessWidget {
           ],
         ),
         floatingActionButton: FloatingActionButton(
-          heroTag: 'assistant_fab',
+          // Unique per shell instance: /cart is now rendered in its own
+          // AppShell above the tab shell, and two visible FABs sharing one
+          // hero tag trip the Hero duplicate-tag assertion.
+          heroTag: 'assistant_fab_$location',
           mini: true,
           backgroundColor: AppTheme.accentOrange,
           tooltip: app.t('assistant_title'),

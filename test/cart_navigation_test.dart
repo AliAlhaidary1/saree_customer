@@ -20,8 +20,15 @@ class _FailingApi extends CustomerApi {
     Map<String, dynamic> filters = const {},
     String tagNames = '',
     String slug = '',
-  }) async =>
-      ApiResult({'status': 0, 'message': 'offline'});
+  }) async => ApiResult({'status': 0, 'message': 'offline'});
+
+  @override
+  Future<ApiResult> productById({
+    required double latitude,
+    required double longitude,
+    dynamic id,
+    String slug = '',
+  }) async => ApiResult({'status': 0, 'message': 'offline'});
 }
 
 Future<void> _setup() async {
@@ -46,8 +53,7 @@ void main() {
     expect(find.byType(CartScreen), findsWidgets);
   });
 
-  testWidgets('cart opens from product detail (D4 fix)',
-      (tester) async {
+  testWidgets('cart opens from product detail (D4 fix)', (tester) async {
     await _setup();
     final router = buildRouter();
     await tester.pumpWidget(MaterialApp.router(routerConfig: router));
@@ -58,26 +64,63 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     await tester.pump(const Duration(seconds: 1));
     expect(tester.takeException(), isNull);
-    // Pop the product detail route before pushing cart to avoid key reservation conflict
-    if (router.canPop()) router.pop();
+    // Push cart while the product detail page is still on the root stack. This
+    // used to build the ShellRoute page twice (duplicate page key assertion).
     router.push('/cart');
     await tester.pump(const Duration(seconds: 1));
     await tester.pump(const Duration(seconds: 1));
-    expect(tester.takeException(), isNull,
-        reason: 'pushing cart from detail threw');
+    expect(
+      tester.takeException(),
+      isNull,
+      reason: 'pushing cart from detail threw',
+    );
     expect(find.byType(CartScreen), findsWidgets);
   });
 
-  testWidgets('account opens from product detail via go (D4 fix)',
-      (tester) async {
+  testWidgets('tapping the cart icon on product detail does not throw', (
+    tester,
+  ) async {
+    await _setup();
+    await appController.cacheProductDetails('some-slug', {
+      'id': 1,
+      'name': 'Test product',
+      'slug': 'some-slug',
+      'variants': [
+        {'id': 11, 'price': 100, 'stock': 5, 'name': 'Default'},
+      ],
+    });
+    final router = buildRouter();
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.pump(const Duration(seconds: 1));
+    if (router.canPop()) router.pop();
+    router.push('/product/some-slug');
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.byIcon(Icons.shopping_cart_outlined), findsWidgets);
+    await tester.tap(find.byIcon(Icons.shopping_cart_outlined).first);
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    expect(
+      tester.takeException(),
+      isNull,
+      reason: 'tapping the cart icon from detail threw',
+    );
+    expect(find.byType(CartScreen), findsWidgets);
+  });
+
+  testWidgets('account opens from product detail via go (D4 fix)', (
+    tester,
+  ) async {
     await _setup();
     final router = buildRouter();
     // Scaffold above the router emulates the AppShell-provided Scaffold that
     // AccountScreen relies on in production (it stays a shell-branch tab).
-    await tester.pumpWidget(MaterialApp.router(
-      routerConfig: router,
-      builder: (context, child) => Scaffold(body: child!),
-    ));
+    await tester.pumpWidget(
+      MaterialApp.router(
+        routerConfig: router,
+        builder: (context, child) => Scaffold(body: child!),
+      ),
+    );
     await tester.pump(const Duration(seconds: 1));
     // Pop any existing route to ensure clean navigator state
     if (router.canPop()) router.pop();
@@ -90,7 +133,10 @@ void main() {
     router.go('/account');
     await tester.pump(const Duration(seconds: 1));
     await tester.pump(const Duration(seconds: 1));
-    expect(tester.takeException(), isNull,
-        reason: 'navigating to account from detail threw');
+    expect(
+      tester.takeException(),
+      isNull,
+      reason: 'navigating to account from detail threw',
+    );
   });
 }

@@ -827,259 +827,300 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
       appBar: AppBar(title: Text(_title())),
       body: Stack(
         children: [
-          ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+          Column(
             children: [
-              if (subtitle.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Text(
-                    subtitle,
-                    style: const TextStyle(color: Colors.grey, fontSize: 13),
-                  ),
-                ),
-              // 1 — order details
-              _card(
-                num: '1',
-                title: app.t('akhdimni_order_details'),
-                hint: app.t('akhdimni_order_details_hint'),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
                   children: [
-                    if (!_isCategoryMode &&
-                        widget.type == null &&
-                        categories.isNotEmpty)
-                      DropdownButtonFormField<String>(
-                        initialValue: null,
-                        decoration: InputDecoration(
-                          labelText: app.t('akhdimni_select_category'),
+                    if (subtitle.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Text(
+                          subtitle,
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 13,
+                          ),
                         ),
-                        items: [
-                          DropdownMenuItem(
-                            value: '',
-                            child: Text(app.t('akhdimni_choose_option')),
-                          ),
-                          ...categories.map(
-                            (c) => DropdownMenuItem(
-                              value: '${c['id']}',
-                              child: Text(_catName(c, isAr)),
-                            ),
-                          ),
-                        ],
-                        onChanged: (v) {
-                          if (v != null && v.isNotEmpty) {
-                            context.push('/akhdimni/create?category_id=$v');
-                          }
-                        },
                       ),
-                    TextField(
-                      controller: description,
-                      maxLines: 4,
-                      decoration: InputDecoration(
-                        labelText: '${app.t('akhdimni_what_do_you_need')} *',
-                        hintText: app.t('akhdimni_what_need_placeholder'),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      app.t('akhdimni_what_need_hint'),
-                      style: const TextStyle(color: Colors.grey, fontSize: 12),
-                    ),
-                    const SizedBox(height: 8),
-                    TextButton.icon(
-                      onPressed: () async {
-                        final picked = await ImagePicker().pickMultiImage();
-                        if (picked.isNotEmpty && mounted) {
-                          setState(() => images = [...images, ...picked]);
-                        }
-                      },
-                      icon: const Icon(Icons.image),
-                      label: Text(
-                        images.isEmpty
-                            ? '${app.t('images')} (${app.t('optional')}) — ${app.t('akhdimni_add_photos')}'
-                            : '${images.length} ✓',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-              // 2 — locations
-              _card(
-                num: '2',
-                title: app.t('akhdimni_locations'),
-                hint: app.t('akhdimni_locations_hint'),
-                done: _hasDropoff,
-                child: ListenableBuilder(
-                  listenable: app,
-                  builder: (_, _) {
-                    final saved = app.addresses;
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '${app.t('akhdimni_dropoff_label')} *',
-                          style: const TextStyle(fontWeight: FontWeight.w700),
-                        ),
-                        if (saved.isEmpty)
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(app.t('no_address_yet')),
-                                TextButton(
-                                  onPressed: () => context.push('/addresses'),
-                                  child: Text(app.t('manage_address')),
-                                ),
-                              ],
-                            ),
-                          )
-                        else
-                          RadioGroup<String>(
-                            groupValue: dropoffLat != null && dropoffLng != null
-                                ? '${dropoffLat}_$dropoffLng'
-                                : null,
-                            onChanged: (value) {
-                              final addr = saved.firstWhere(
-                                (a) =>
-                                    '${J.str(a['latitude'])}_${J.str(a['longitude'])}' ==
-                                    value,
-                              );
-                              _applySavedDropoff(addr);
-                            },
-                            child: Column(
-                              children: saved.map((addr) {
-                                return RadioListTile<String>(
-                                  value:
-                                      '${J.str(addr['latitude'])}_${J.str(addr['longitude'])}',
-                                  title: Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          J.str(addr['name']).isNotEmpty
-                                              ? J.str(addr['name'])
-                                              : app.t('akhdimni_saved_address'),
-                                        ),
-                                      ),
-                                      if (J.str(addr['is_default']) == '1')
-                                        Text(
-                                          app.t('default_address_badge'),
-                                          style: TextStyle(
-                                            color: app.accentColor,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                  subtitle: Text(
-                                    _humanAddress(_formatAddressLine(addr)),
-                                  ),
-                                );
-                              }).toList(),
-                            ),
-                          ),
-                        if (_showPickupSection) ...[
-                          const SizedBox(height: 8),
-                          Text(
-                            app.t('akhdimni_pickup_optional'),
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          RadioGroup<String>(
-                            groupValue: !_hasPickup
-                                ? 'none'
-                                : (pickupLat != null && pickupLng != null
-                                      ? '${pickupLat}_$pickupLng'
-                                      : null),
-                            onChanged: (value) {
-                              if (value == 'none') {
-                                _clearPickup();
-                              } else {
-                                final addr = saved.firstWhere(
-                                  (a) =>
-                                      '${J.str(a['latitude'])}_${J.str(a['longitude'])}' ==
-                                      value,
-                                );
-                                _applySavedPickup(addr);
-                              }
-                            },
-                            child: Column(
-                              children: [
-                                RadioListTile<String>(
-                                  value: 'none',
-                                  title: Text(app.t('akhdimni_no_pickup')),
-                                  subtitle: Text(
-                                    app.t('akhdimni_no_pickup_hint'),
-                                  ),
-                                ),
-                                ...saved.map((addr) {
-                                  return RadioListTile<String>(
-                                    value:
-                                        '${J.str(addr['latitude'])}_${J.str(addr['longitude'])}',
-                                    title: Text(
-                                      J.str(addr['name']).isNotEmpty
-                                          ? J.str(addr['name'])
-                                          : app.t('akhdimni_saved_address'),
-                                    ),
-                                    subtitle: Text(
-                                      _humanAddress(_formatAddressLine(addr)),
-                                    ),
-                                  );
-                                }),
-                              ],
-                            ),
-                          ),
-                        ],
-                        if (!_hasDropoff)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 6),
-                            child: Text(
-                              app.t('akhdimni_select_dropoff_first'),
-                              style: const TextStyle(
-                                color: Colors.red,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                      ],
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 12),
-              // 3 — pricing & review
-              _card(
-                num: '3',
-                title: app.t('akhdimni_pricing_review'),
-                hint: app.t('akhdimni_pricing_review_hint'),
-                child: Column(
-                  children: [
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.info_outline, size: 18),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(app.t('akhdimni_delivery_may_change')),
-                        ),
-                      ],
-                    ),
-                    if (_isManualReviewCategory) ...[
-                      const SizedBox(height: 8),
-                      Row(
+                    // 1 — order details
+                    _card(
+                      num: '1',
+                      title: app.t('akhdimni_order_details'),
+                      hint: app.t('akhdimni_order_details_hint'),
+                      child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Icon(Icons.info_outline, size: 18),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(app.t('akhdimni_manual_price_note')),
+                          if (!_isCategoryMode &&
+                              widget.type == null &&
+                              categories.isNotEmpty)
+                            DropdownButtonFormField<String>(
+                              initialValue: null,
+                              decoration: InputDecoration(
+                                labelText: app.t('akhdimni_select_category'),
+                              ),
+                              items: [
+                                DropdownMenuItem(
+                                  value: '',
+                                  child: Text(app.t('akhdimni_choose_option')),
+                                ),
+                                ...categories.map(
+                                  (c) => DropdownMenuItem(
+                                    value: '${c['id']}',
+                                    child: Text(_catName(c, isAr)),
+                                  ),
+                                ),
+                              ],
+                              onChanged: (v) {
+                                if (v != null && v.isNotEmpty) {
+                                  context.push(
+                                    '/akhdimni/create?category_id=$v',
+                                  );
+                                }
+                              },
+                            ),
+                          TextField(
+                            controller: description,
+                            maxLines: 4,
+                            decoration: InputDecoration(
+                              labelText:
+                                  '${app.t('akhdimni_what_do_you_need')} *',
+                              hintText: app.t('akhdimni_what_need_placeholder'),
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            app.t('akhdimni_what_need_hint'),
+                            style: const TextStyle(
+                              color: Colors.grey,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          TextButton.icon(
+                            onPressed: () async {
+                              final picked = await ImagePicker()
+                                  .pickMultiImage();
+                              if (picked.isNotEmpty && mounted) {
+                                setState(() => images = [...images, ...picked]);
+                              }
+                            },
+                            icon: const Icon(Icons.image),
+                            label: Text(
+                              images.isEmpty
+                                  ? '${app.t('images')} (${app.t('optional')}) — ${app.t('akhdimni_add_photos')}'
+                                  : '${images.length} ✓',
+                            ),
                           ),
                         ],
                       ),
-                    ],
+                    ),
+                    const SizedBox(height: 12),
+                    // 2 — locations
+                    _card(
+                      num: '2',
+                      title: app.t('akhdimni_locations'),
+                      hint: app.t('akhdimni_locations_hint'),
+                      done: _hasDropoff,
+                      child: ListenableBuilder(
+                        listenable: app,
+                        builder: (_, _) {
+                          final saved = app.addresses;
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${app.t('akhdimni_dropoff_label')} *',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              if (saved.isEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 8,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(app.t('no_address_yet')),
+                                      TextButton(
+                                        onPressed: () =>
+                                            context.push('/addresses'),
+                                        child: Text(app.t('manage_address')),
+                                      ),
+                                    ],
+                                  ),
+                                )
+                              else
+                                RadioGroup<String>(
+                                  groupValue:
+                                      dropoffLat != null && dropoffLng != null
+                                      ? '${dropoffLat}_$dropoffLng'
+                                      : null,
+                                  onChanged: (value) {
+                                    final addr = saved.firstWhere(
+                                      (a) =>
+                                          '${J.str(a['latitude'])}_${J.str(a['longitude'])}' ==
+                                          value,
+                                    );
+                                    _applySavedDropoff(addr);
+                                  },
+                                  child: Column(
+                                    children: saved.map((addr) {
+                                      return RadioListTile<String>(
+                                        value:
+                                            '${J.str(addr['latitude'])}_${J.str(addr['longitude'])}',
+                                        title: Row(
+                                          children: [
+                                            Expanded(
+                                              child: Text(
+                                                J.str(addr['name']).isNotEmpty
+                                                    ? J.str(addr['name'])
+                                                    : app.t(
+                                                        'akhdimni_saved_address',
+                                                      ),
+                                              ),
+                                            ),
+                                            if (J.str(addr['is_default']) ==
+                                                '1')
+                                              Text(
+                                                app.t('default_address_badge'),
+                                                style: TextStyle(
+                                                  color: app.accentColor,
+                                                  fontSize: 11,
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                        subtitle: Text(
+                                          _humanAddress(
+                                            _formatAddressLine(addr),
+                                          ),
+                                        ),
+                                      );
+                                    }).toList(),
+                                  ),
+                                ),
+                              if (_showPickupSection) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  app.t('akhdimni_pickup_optional'),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                RadioGroup<String>(
+                                  groupValue: !_hasPickup
+                                      ? 'none'
+                                      : (pickupLat != null && pickupLng != null
+                                            ? '${pickupLat}_$pickupLng'
+                                            : null),
+                                  onChanged: (value) {
+                                    if (value == 'none') {
+                                      _clearPickup();
+                                    } else {
+                                      final addr = saved.firstWhere(
+                                        (a) =>
+                                            '${J.str(a['latitude'])}_${J.str(a['longitude'])}' ==
+                                            value,
+                                      );
+                                      _applySavedPickup(addr);
+                                    }
+                                  },
+                                  child: Column(
+                                    children: [
+                                      RadioListTile<String>(
+                                        value: 'none',
+                                        title: Text(
+                                          app.t('akhdimni_no_pickup'),
+                                        ),
+                                        subtitle: Text(
+                                          app.t('akhdimni_no_pickup_hint'),
+                                        ),
+                                      ),
+                                      ...saved.map((addr) {
+                                        return RadioListTile<String>(
+                                          value:
+                                              '${J.str(addr['latitude'])}_${J.str(addr['longitude'])}',
+                                          title: Text(
+                                            J.str(addr['name']).isNotEmpty
+                                                ? J.str(addr['name'])
+                                                : app.t(
+                                                    'akhdimni_saved_address',
+                                                  ),
+                                          ),
+                                          subtitle: Text(
+                                            _humanAddress(
+                                              _formatAddressLine(addr),
+                                            ),
+                                          ),
+                                        );
+                                      }),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                              if (!_hasDropoff)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 6),
+                                  child: Text(
+                                    app.t('akhdimni_select_dropoff_first'),
+                                    style: const TextStyle(
+                                      color: Colors.red,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    // 3 — pricing & review
+                    _card(
+                      num: '3',
+                      title: app.t('akhdimni_pricing_review'),
+                      hint: app.t('akhdimni_pricing_review_hint'),
+                      child: Column(
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.info_outline, size: 18),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  app.t('akhdimni_delivery_may_change'),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (_isManualReviewCategory) ...[
+                            const SizedBox(height: 8),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Icon(Icons.info_outline, size: 18),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    app.t('akhdimni_manual_price_note'),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
+              _checkoutBar(app),
             ],
           ),
           if (submitting)
@@ -1113,128 +1154,125 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
                 ),
               ),
             ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
-              decoration: BoxDecoration(
-                color: Theme.of(context).scaffoldBackgroundColor,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.08),
-                    blurRadius: 12,
-                  ),
-                ],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (previewLoading && pricePreview == null)
-                    const Padding(
-                      padding: EdgeInsets.only(bottom: 8),
-                      child: LinearProgressIndicator(),
-                    ),
-                  if (previewLoading && pricePreview == null)
+        ],
+      ),
+    );
+  }
+
+  Widget _checkoutBar(AppController app) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 12,
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (previewLoading && pricePreview == null)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: LinearProgressIndicator(),
+                ),
+              if (previewLoading && pricePreview == null)
+                Text(
+                  app.t('akhdimni_calculating_fee'),
+                  style: const TextStyle(color: Colors.grey, fontSize: 12),
+                ),
+              if (pricePreview != null) ...[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(app.t('akhdimni_delivery_fee')),
                     Text(
-                      app.t('akhdimni_calculating_fee'),
-                      style: const TextStyle(color: Colors.grey, fontSize: 12),
-                    ),
-                  if (pricePreview != null) ...[
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(app.t('akhdimni_delivery_fee')),
-                        Text(
-                          money(
-                            pricePreview!['delivery_charge'] ??
-                                pricePreview!['estimated_delivery_charge'],
-                            app.currency,
-                            app.decimals,
-                          ),
-                          style: const TextStyle(fontWeight: FontWeight.w700),
-                        ),
-                      ],
-                    ),
-                    if (pricePreview!['initial_service_fee'] != null)
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(app.t('akhdimni_service_fee')),
-                          Text(
-                            money(
-                              pricePreview!['initial_service_fee'],
-                              app.currency,
-                              app.decimals,
-                            ),
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                        ],
+                      money(
+                        pricePreview!['delivery_charge'] ??
+                            pricePreview!['estimated_delivery_charge'],
+                        app.currency,
+                        app.decimals,
                       ),
-                    if (pricePreview!['estimated_total'] != null)
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            app.t('akhdimni_estimated_total'),
-                            style: const TextStyle(fontWeight: FontWeight.w800),
-                          ),
-                          Text(
-                            money(
-                              pricePreview!['estimated_total'],
-                              app.currency,
-                              app.decimals,
-                            ),
-                            style: const TextStyle(fontWeight: FontWeight.w800),
-                          ),
-                        ],
-                      ),
-                    Text(
-                      app.t('akhdimni_initial_price_note'),
-                      style: const TextStyle(color: Colors.grey, fontSize: 11),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
                     ),
                   ],
+                ),
+                if (pricePreview!['initial_service_fee'] != null)
                   Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Icon(Icons.info_outline, size: 16),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          app.t('akhdimni_submit_agree_note'),
-                          style: const TextStyle(
-                            color: Colors.grey,
-                            fontSize: 11,
-                          ),
+                      Text(app.t('akhdimni_service_fee')),
+                      Text(
+                        money(
+                          pricePreview!['initial_service_fee'],
+                          app.currency,
+                          app.decimals,
                         ),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 8),
-                  FilledButton(
-                    onPressed: submitting ? null : _submit,
-                    child: submitting
-                        ? const BusySpinner()
-                        : Text(app.t('akhdimni_place_order')),
-                  ),
-                  if (_draftRestored)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        app.t('draft_saved'),
-                        style: const TextStyle(
-                          color: Colors.black54,
-                          fontSize: 12,
-                        ),
+                if (pricePreview!['estimated_total'] != null)
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        app.t('akhdimni_estimated_total'),
+                        style: const TextStyle(fontWeight: FontWeight.w800),
                       ),
+                      Text(
+                        money(
+                          pricePreview!['estimated_total'],
+                          app.currency,
+                          app.decimals,
+                        ),
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                    ],
+                  ),
+                Text(
+                  app.t('akhdimni_initial_price_note'),
+                  style: const TextStyle(color: Colors.grey, fontSize: 11),
+                ),
+              ],
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.info_outline, size: 16),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      app.t('akhdimni_submit_agree_note'),
+                      style: const TextStyle(color: Colors.grey, fontSize: 11),
                     ),
+                  ),
                 ],
               ),
-            ),
+              const SizedBox(height: 8),
+              FilledButton(
+                onPressed: submitting ? null : _submit,
+                child: submitting
+                    ? const BusySpinner()
+                    : Text(app.t('akhdimni_place_order')),
+              ),
+              if (_draftRestored)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    app.t('draft_saved'),
+                    style: const TextStyle(color: Colors.black54, fontSize: 12),
+                  ),
+                ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

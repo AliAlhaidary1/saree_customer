@@ -2,10 +2,10 @@ import 'package:flutter/foundation.dart';
 
 /// Header search bus.
 ///
-/// The AppShell header owns the single search field. It is only visible on
+/// The AppShell header owns the single search bar. It is only visible on
 /// searchable pages (home `/`, `/products` and `/haraj` — never
 /// cart/account/orders).
-/// - On home: submit navigates to `/products?search=…`.
+/// - On home: the bar opens the dedicated `/search` page.
 /// - On `/products`: submit notifies listeners and ProductsScreen filters
 ///   in place (no route stacking, no rebuild hacks).
 /// - On `/haraj`: submit notifies listeners and HarajListScreen filters in

@@ -552,9 +552,10 @@ class _SellersScreenState extends State<SellersScreen> {
 
   /// Search pill shown under the shared [BrandHeader] on the stores list.
   Widget _storeSearchBar(AppController app) {
+    final hasText = _searchC.text.isNotEmpty;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      height: 44,
+      height: 42,
+      padding: EdgeInsetsDirectional.only(start: 12, end: hasText ? 4 : 12),
       decoration: BoxDecoration(
         color: AppTheme.backgroundWhite,
         borderRadius: BorderRadius.circular(12),
@@ -563,25 +564,28 @@ class _SellersScreenState extends State<SellersScreen> {
         children: [
           Icon(
             Icons.search,
-            color: AppTheme.primaryNavy.withValues(alpha: 0.5),
-            size: 22,
+            color: AppTheme.primaryNavy.withValues(alpha: 0.45),
+            size: 20,
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
           Expanded(
             child: TextField(
               controller: _searchC,
               textInputAction: TextInputAction.search,
+              textAlignVertical: TextAlignVertical.center,
+              style: const TextStyle(color: AppTheme.textPrimary, fontSize: 14),
               onSubmitted: (v) {
                 _searchDeb?.cancel();
                 setState(() => search = v.trim());
                 _load();
+                FocusScope.of(context).unfocus();
               },
               onChanged: _onSearchChanged,
               decoration: InputDecoration(
                 hintText: app.t('search_stores_placeholder'),
                 hintStyle: const TextStyle(
                   color: AppTheme.textSecondary,
-                  fontSize: 14,
+                  fontSize: 13.5,
                 ),
                 filled: false,
                 isDense: true,
@@ -592,20 +596,25 @@ class _SellersScreenState extends State<SellersScreen> {
               ),
             ),
           ),
-          if (_searchC.text.isNotEmpty)
-            GestureDetector(
-              onTap: () {
+          if (hasText)
+            IconButton(
+              onPressed: () {
+                _searchDeb?.cancel();
                 _searchC.clear();
                 setState(() => search = '');
                 _load();
               },
-              child: const Padding(
-                padding: EdgeInsets.all(4),
-                child: Icon(
-                  Icons.cancel,
-                  size: 18,
-                  color: AppTheme.textSecondary,
-                ),
+              tooltip: MaterialLocalizations.of(context).deleteButtonTooltip,
+              icon: const Icon(
+                Icons.close_rounded,
+                size: 18,
+                color: AppTheme.textSecondary,
+              ),
+              style: IconButton.styleFrom(
+                minimumSize: const Size(32, 32),
+                maximumSize: const Size(32, 32),
+                padding: EdgeInsets.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
             ),
         ],
@@ -1629,7 +1638,6 @@ class _SellerPageScreenState extends State<SellerPageScreen> {
               sellerId: id,
               sellerSectionId: sectionId,
               listenHeaderSearch: false,
-              hideHeader: true,
             ),
           ),
         ],
@@ -1870,6 +1878,8 @@ class _SearchScreenState extends State<SearchScreen> {
   List<Map<String, dynamic>> items = [];
   bool searched = false;
   bool loading = false;
+  bool _loadingMore = false;
+  bool _hasMore = false;
 
   @override
   void dispose() {
@@ -1891,6 +1901,7 @@ class _SearchScreenState extends State<SearchScreen> {
       setState(() {
         items = [];
         searched = false;
+        _hasMore = false;
       });
       return;
     }
@@ -1926,6 +1937,7 @@ class _SearchScreenState extends State<SearchScreen> {
         items = result.dataMaps;
         searched = true;
         loading = false;
+        _hasMore = result.dataMaps.length >= 20;
         _lastSearchOk = true;
       });
       await appController.addRecentSearch(q);
@@ -1940,6 +1952,36 @@ class _SearchScreenState extends State<SearchScreen> {
     } else {
       setState(() => _lastSearchOk = false);
     }
+  }
+
+  Future<void> _loadMore() async {
+    if (_loadingMore || !_hasMore) return;
+    final q = controller.text.trim();
+    if (q.isEmpty) return;
+    final mySeq = _seq;
+    setState(() => _loadingMore = true);
+    final point = appController.browseCoords;
+    final result = await appController.api
+        .products(
+          latitude: point.latitude,
+          longitude: point.longitude,
+          filters: {'search': q, 'limit': 20, 'offset': items.length},
+        )
+        .timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => ApiResult({'status': 0}),
+        )
+        .catchError((_) => ApiResult({'status': 0}));
+    if (!mounted || mySeq != _seq) return;
+    setState(() {
+      if (result.ok) {
+        items = J.appendUnique(items, result.dataMaps);
+        _hasMore = result.dataMaps.length >= 20;
+      } else {
+        _hasMore = false;
+      }
+      _loadingMore = false;
+    });
   }
 
   @override
@@ -2016,12 +2058,19 @@ class _SearchScreenState extends State<SearchScreen> {
                           ),
                         ),
                       ),
-                      TextButton(
-                        onPressed: () => context.push(
-                          '/products?search=${Uri.encodeComponent(controller.text.trim())}',
+                      if (_hasMore)
+                        TextButton(
+                          onPressed: _loadingMore ? null : _loadMore,
+                          child: _loadingMore
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : Text(app.t('see_all_results')),
                         ),
-                        child: Text(app.t('see_all_results')),
-                      ),
                     ],
                   ),
                 ),

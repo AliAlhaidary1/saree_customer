@@ -1360,9 +1360,41 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Finds the delivered order line that lets the signed-in customer rate
+  /// [productId]. Product reviews are purchase-gated by the backend, which
+  /// requires an `order_item_id`; scanning the delivered order history keeps
+  /// the product page from offering (or submitting) a review without one.
+  Future<Map<String, dynamic>?> rateableOrderItemForProduct(
+    dynamic productId,
+  ) async {
+    if (!isLoggedIn || productId == null) return null;
+    const pageSize = 50;
+    try {
+      for (var offset = 0; offset < 200; offset += pageSize) {
+        final res = await api
+            .orders(limit: pageSize, offset: offset, type: 2)
+            .timeout(const Duration(seconds: 12));
+        if (!res.ok) break;
+        final rows = res.dataMaps;
+        for (final order in rows) {
+          for (final item in J.maps(order['items'])) {
+            if ('${item['product_id']}' != '$productId') continue;
+            final canRate = J.flag(item['can_rate']);
+            final editable = J
+                .maps(item['item_rating'])
+                .any((rating) => J.flag(rating['can_edit']));
+            if (!canRate && !editable) continue;
+            return {'order_id': order['id'], 'order_item_id': item['id']};
+          }
+        }
+        if (rows.length < pageSize) break;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   CanPlaceOrderResult canPlaceOrder() =>
       canPlaceOrderFromBusinessHours(businessHours);
-
   Future<void> loadAddresses() async {
     if (!isLoggedIn) return;
     final scope = accountScope;
@@ -1691,8 +1723,8 @@ class AppController extends ChangeNotifier {
       Diag.log(
         'sync:catalog',
         '${swSync.elapsedMilliseconds}ms complete=${result.complete} '
-        'products=${result.products} stores=${result.stores} '
-        'categories=${result.categories} error=${result.error}',
+            'products=${result.products} stores=${result.stores} '
+            'categories=${result.categories} error=${result.error}',
       );
     }
     notifyListeners();
@@ -1905,7 +1937,8 @@ class AppController extends ChangeNotifier {
           break;
         case 'name':
           rows.sort(
-            (a, b) => J.str(a['store_name'] ?? a['name'])
+            (a, b) => J
+                .str(a['store_name'] ?? a['name'])
                 .toLowerCase()
                 .compareTo(J.str(b['store_name'] ?? b['name']).toLowerCase()),
           );
@@ -2480,7 +2513,7 @@ class AppController extends ChangeNotifier {
         // deleted twice. A checkout read (is_checkout=1) can fail for
         // delivery reasons instead, so never wipe local lines for those.
         if (checkout == 0) {
-          cart = null;
+          cart = {'cart': <dynamic>[], 'sub_total': 0};
           cartProducts = [];
           cartSubTotal = 0;
           try {
@@ -2488,6 +2521,14 @@ class AppController extends ChangeNotifier {
               OfflineCache.snapshotKey('cart::$accountScope'),
             );
           } catch (_) {}
+          notifyListeners();
+          // Report the reachable empty cart as success: the UI must show the
+          // empty state, not a misleading "connection failed" retry screen.
+          return ApiResult({
+            'status': 1,
+            'message': result.message,
+            'data': {'cart': <dynamic>[], 'sub_total': 0},
+          });
         }
       } else if (cartProducts.isEmpty) {
         // Request failed (transport/server error) with no live lines: restore
@@ -2690,41 +2731,41 @@ class AppController extends ChangeNotifier {
           variantId: variantId,
           qty: qty,
         );
-       } catch (_) {
-         // Transport threw outside ApiResult: keep the optimistic change when
-         // the backend looks unreachable (offline add is accepted locally);
-         // otherwise revert and report a generic error.
-         if (api.likelyOffline) {
-           try {
-             await offline.writeDoc(
-               OfflineCache.snapshotKey('cart::$accountScope'),
-               {'products': cartProducts, 'subTotal': cartSubTotal},
-               scope: accountScope,
-             );
-           } catch (_) {}
-           await _invalidateCheckoutSession();
-           return null;
-         }
-         cartProducts = snapshot;
-         notifyListeners();
-         return api.likelyOffline
-             ? kRequiresInternet
-             : t('something_went_wrong');
-       }
-       if (_isNetworkResult(result)) {
-         // Offline: keep the optimistic local change (add-to-cart is accepted
-         // offline); only the final checkout is rejected. Persist a snapshot so
-         // an offline restart still shows the lines.
-         try {
-           await offline.writeDoc(
-             OfflineCache.snapshotKey('cart::$accountScope'),
-             {'products': cartProducts, 'subTotal': cartSubTotal},
-             scope: accountScope,
-           );
-         } catch (_) {}
-         await _invalidateCheckoutSession();
-         return null;
-       }
+      } catch (_) {
+        // Transport threw outside ApiResult: keep the optimistic change when
+        // the backend looks unreachable (offline add is accepted locally);
+        // otherwise revert and report a generic error.
+        if (api.likelyOffline) {
+          try {
+            await offline.writeDoc(
+              OfflineCache.snapshotKey('cart::$accountScope'),
+              {'products': cartProducts, 'subTotal': cartSubTotal},
+              scope: accountScope,
+            );
+          } catch (_) {}
+          await _invalidateCheckoutSession();
+          return null;
+        }
+        cartProducts = snapshot;
+        notifyListeners();
+        return api.likelyOffline
+            ? kRequiresInternet
+            : t('something_went_wrong');
+      }
+      if (_isNetworkResult(result)) {
+        // Offline: keep the optimistic local change (add-to-cart is accepted
+        // offline); only the final checkout is rejected. Persist a snapshot so
+        // an offline restart still shows the lines.
+        try {
+          await offline.writeDoc(
+            OfflineCache.snapshotKey('cart::$accountScope'),
+            {'products': cartProducts, 'subTotal': cartSubTotal},
+            scope: accountScope,
+          );
+        } catch (_) {}
+        await _invalidateCheckoutSession();
+        return null;
+      }
       if (result.oneSellerError == 1) {
         await _refreshCartInner(checkout: 0);
         await _invalidateCheckoutSession();

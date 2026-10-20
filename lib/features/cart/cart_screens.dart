@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/api/api_errors.dart';
 import '../../core/app_controller.dart';
 import '../../core/app_theme.dart';
 import '../../core/business_hours.dart';
@@ -210,10 +211,13 @@ class _CartScreenState extends State<CartScreen> {
       );
       if (!mounted) return;
       if (!result.ok && lines.isEmpty) {
-        // Offline with no restorable snapshot: retryable error, never a
-        // misleading "empty cart".
+        // A reachable server that answered a business error (e.g. an empty
+        // cart) is not a connectivity failure: show the empty state instead
+        // of the retry screen. Only transport/server failures are retryable.
         setState(() {
-          error = appController.t('cart_load_failed');
+          error = result.classifiedError == null
+              ? null
+              : appController.t('cart_load_failed');
         });
       } else {
         setState(() {
@@ -269,7 +273,7 @@ class _CartScreenState extends State<CartScreen> {
         icon: Icons.shopping_cart_outlined,
         message: app.t('empty_cart'),
         actionLabel: app.t('shop_now'),
-        onAction: () => context.go('/products'),
+        onAction: () => context.go('/'),
       );
     }
     final total = app.isLoggedIn ? app.cartSubTotal : app.guestCartTotal;
@@ -278,7 +282,7 @@ class _CartScreenState extends State<CartScreen> {
     final promoDiscount = J.d(
       app.promoCode?['discount'] ?? cartMap?['promo_discount'],
     );
-      return Column(
+    return Column(
       children: [
         Expanded(
           child: RefreshIndicator(
@@ -377,15 +381,6 @@ class _CartScreenState extends State<CartScreen> {
                         ),
                     ],
                   ),
-                  onTap: () {
-                    final slug = J.str(item['slug']);
-                    final pid = item['product_id'] ?? item['id'];
-                    if (slug.isNotEmpty) {
-                      context.push('/product/$slug');
-                    } else if (pid != null) {
-                      context.push('/product/$pid');
-                    }
-                  },
                   trailing: SizedBox(
                     width: 148,
                     child: Row(

@@ -321,7 +321,6 @@ class PushNotifications {
       '/store/',
       '/haraj',
       '/akhdimni',
-      '/products',
       '/sellers',
       '/offers',
       '/category/',
@@ -337,6 +336,11 @@ class PushNotifications {
       '/faq',
       '/assistant',
     ];
+    // The legacy catalog page no longer exists; its links open the home page.
+    if (link == '/products' || link.startsWith('/products?') ||
+        link.startsWith('/products/')) {
+      return '/';
+    }
     if (link.startsWith('/') &&
         (link == '/' || allowed.any((p) => link == p || link.startsWith(p)))) {
       return link;

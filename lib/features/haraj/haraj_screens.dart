@@ -250,107 +250,273 @@ class _HarajListScreenState extends State<HarajListScreen> {
     _load(reset: true);
   }
 
-  /// Home-style grey band: search + circular category tiles + condition pills.
-  /// The city selector is intentionally hidden (always the current city).
+  /// Modern marketplace header: a bold hero card on the public feed, a compact
+  /// search header on "my ads", then one polished filter panel.
   Widget _topSection(AppController app) {
+    return Column(
+      children: [
+        if (widget.mine) _mineHeader(app) else _hero(app),
+        _filtersPanel(app),
+      ],
+    );
+  }
+
+  Widget _hero(AppController app) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
-      padding: const EdgeInsets.only(top: 14, bottom: 14),
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: AppTheme.surfaceGrey,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(24),
+        gradient: const LinearGradient(
+          begin: AlignmentDirectional.topStart,
+          end: AlignmentDirectional.bottomEnd,
+          colors: [Color(0xFF0A2540), Color(0xFF154A73)],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.primaryNavy.withValues(alpha: 0.18),
+            blurRadius: 20,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Stack(
+        children: [
+          PositionedDirectional(
+            top: -46,
+            end: -34,
+            child: _glowCircle(
+              132,
+              AppTheme.accentOrange.withValues(alpha: 0.22),
+            ),
+          ),
+          PositionedDirectional(
+            bottom: -52,
+            start: -38,
+            child: _glowCircle(120, Colors.white.withValues(alpha: 0.06)),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
+            child: Row(
+              children: [
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(15),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.12),
+                    ),
+                  ),
+                  child: const Icon(
+                    Icons.campaign_rounded,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        app.t('haraj'),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 24,
+                          fontWeight: FontWeight.w900,
+                          height: 1.1,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        app.t('haraj_hero_subtitle'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.72),
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                FilledButton.icon(
+                  onPressed: () => app.isLoggedIn
+                      ? context.push('/haraj/create')
+                      : context.push(
+                          '/login?next=${Uri.encodeComponent('/haraj/create')}',
+                        ),
+                  icon: const Icon(Icons.add_rounded, size: 18),
+                  label: Text(app.t('add_post')),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppTheme.accentOrange,
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(0, 44),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    textStyle: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _glowCircle(double size, Color color) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+    );
+  }
+
+  Widget _mineHeader(AppController app) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+      decoration: BoxDecoration(
+        color: AppTheme.backgroundWhite,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: AppTheme.primaryNavy.withValues(alpha: 0.05)),
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.primaryNavy.withValues(alpha: 0.06),
+            blurRadius: 14,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: AppTheme.accentOrange.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(
+                  Icons.sell_rounded,
+                  color: AppTheme.accentOrange,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Text(
+                  app.t('my_posts'),
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: search,
+            textInputAction: TextInputAction.search,
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => _load(reset: true),
+            decoration: InputDecoration(
+              hintText: app.t('search_in_haraj'),
+              prefixIcon: const Icon(
+                Icons.search_rounded,
+                color: AppTheme.textSecondary,
+                size: 20,
+              ),
+              suffixIcon: search.text.isEmpty
+                  ? null
+                  : IconButton(
+                      onPressed: () {
+                        search.clear();
+                        setState(() {});
+                        _load(reset: true);
+                      },
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        size: 18,
+                        color: AppTheme.textSecondary,
+                      ),
+                    ),
+              filled: true,
+              fillColor: AppTheme.surfaceGrey,
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(vertical: 12),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide.none,
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide.none,
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: const BorderSide(
+                  color: AppTheme.accentOrange,
+                  width: 1.5,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _filtersPanel(AppController app) {
+    final conditionOptions = <(String?, String, IconData)>[
+      (null, app.t('all_conditions'), Icons.grid_view_rounded),
+      ('new', app.t('condition_new'), Icons.auto_awesome_rounded),
+      ('like_new', app.t('condition_like_new'), Icons.verified_rounded),
+      ('used', app.t('condition_used'), Icons.recycling_rounded),
+    ];
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      decoration: BoxDecoration(
+        color: AppTheme.backgroundWhite,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: AppTheme.primaryNavy.withValues(alpha: 0.05)),
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.primaryNavy.withValues(alpha: 0.05),
+            blurRadius: 14,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!widget.mine)
-            Padding(
-              padding: const EdgeInsetsDirectional.only(start: 16, end: 12),
-              child: Row(
-                children: [
-                  _accentBar(20),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      app.t('haraj'),
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                        color: AppTheme.textPrimary,
-                      ),
-                    ),
-                  ),
-                  FilledButton.icon(
-                    onPressed: () => app.isLoggedIn
-                        ? context.push('/haraj/create')
-                        : context.push(
-                            '/login?next=${Uri.encodeComponent('/haraj/create')}',
-                          ),
-                    icon: const Icon(Icons.add, size: 18),
-                    label: Text(app.t('add_post')),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppTheme.accentOrange,
-                      foregroundColor: Colors.white,
-                      minimumSize: const Size(0, 38),
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      textStyle: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          if (widget.mine)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
-                controller: search,
-                onSubmitted: (_) => _load(reset: true),
-                decoration: InputDecoration(
-                  hintText: app.t('search_in_haraj'),
-                  prefixIcon: const Icon(
-                    Icons.search,
-                    color: AppTheme.accentOrange,
-                  ),
-                  filled: true,
-                  fillColor: AppTheme.backgroundWhite,
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(
-                      color: AppTheme.accentOrange,
-                      width: 1.5,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          const SizedBox(height: 16),
           Padding(
             padding: const EdgeInsetsDirectional.only(start: 16, end: 8),
             child: Row(
               children: [
-                _accentBar(20),
+                _accentBar(18),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     app.t('categories').trim(),
                     style: const TextStyle(
-                      fontSize: 16,
+                      fontSize: 15,
                       fontWeight: FontWeight.w800,
                       color: AppTheme.textPrimary,
                     ),
@@ -372,9 +538,38 @@ class _HarajListScreenState extends State<HarajListScreen> {
               ],
             ),
           ),
-          const SizedBox(height: 12),
-          SizedBox(height: 96, child: _categoryTiles(app)),
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 40,
+            child: ListView.separated(
+              scrollCacheExtent: ScrollCacheExtent.pixels(250),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              scrollDirection: Axis.horizontal,
+              itemCount: categories.length + 1,
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                final isAll = i == 0;
+                final cat = isAll ? null : categories[i - 1];
+                final selected = isAll
+                    ? categoryId == null
+                    : '$categoryId' == '${cat!['id']}';
+                return _categoryPill(
+                  app: app,
+                  label: isAll ? app.t('all').trim() : _catName(cat!),
+                  icon: isAll ? Icons.apps_rounded : Icons.category_rounded,
+                  imageUrl: isAll
+                      ? null
+                      : J.str(cat!['image_url'] ?? cat['image']),
+                  selected: selected,
+                  onTap: () {
+                    setState(() => categoryId = isAll ? null : '${cat!['id']}');
+                    _load(reset: true);
+                  },
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 14),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(
@@ -384,7 +579,7 @@ class _HarajListScreenState extends State<HarajListScreen> {
                 Text(
                   app.t('haraj_condition'),
                   style: const TextStyle(
-                    fontSize: 14,
+                    fontSize: 13.5,
                     fontWeight: FontWeight.w800,
                     color: AppTheme.textPrimary,
                   ),
@@ -392,30 +587,26 @@ class _HarajListScreenState extends State<HarajListScreen> {
               ],
             ),
           ),
-          const SizedBox(height: 10),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _pill(app.t('all_conditions'), condition == null, () {
-                  setState(() => condition = null);
-                  _load(reset: true);
-                }),
-                _pill(app.t('condition_new'), condition == 'new', () {
-                  setState(() => condition = 'new');
-                  _load(reset: true);
-                }),
-                _pill(app.t('condition_like_new'), condition == 'like_new', () {
-                  setState(() => condition = 'like_new');
-                  _load(reset: true);
-                }),
-                _pill(app.t('condition_used'), condition == 'used', () {
-                  setState(() => condition = 'used');
-                  _load(reset: true);
-                }),
-              ],
+          const SizedBox(height: 9),
+          SizedBox(
+            height: 36,
+            child: ListView.separated(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              scrollDirection: Axis.horizontal,
+              itemCount: conditionOptions.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                final option = conditionOptions[i];
+                return _conditionPill(
+                  option.$2,
+                  option.$3,
+                  condition == option.$1,
+                  () {
+                    setState(() => condition = option.$1);
+                    _load(reset: true);
+                  },
+                );
+              },
             ),
           ),
         ],
@@ -434,120 +625,62 @@ class _HarajListScreenState extends State<HarajListScreen> {
     );
   }
 
-  Widget _categoryTiles(AppController app) {
-    return ListView.separated(
-      scrollCacheExtent: ScrollCacheExtent.pixels(250),
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      scrollDirection: Axis.horizontal,
-      itemCount: categories.length + 1,
-      separatorBuilder: (_, _) => const SizedBox(width: 14),
-      itemBuilder: (_, i) {
-        final isAll = i == 0;
-        final cat = isAll ? null : categories[i - 1];
-        final selected = isAll
-            ? categoryId == null
-            : '$categoryId' == '${cat!['id']}';
-        return GestureDetector(
-          onTap: () {
-            setState(() => categoryId = isAll ? null : '${cat!['id']}');
-            _load(reset: true);
-          },
-          child: SizedBox(
-            width: 74,
-            child: Column(
-              children: [
-                Container(
-                  width: 62,
-                  height: 62,
-                  padding: const EdgeInsets.all(4),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: selected
-                        ? AppTheme.accentOrange
-                        : AppTheme.backgroundWhite,
-                    border: Border.all(
-                      color: selected
-                          ? AppTheme.accentOrange
-                          : AppTheme.primaryNavy.withValues(alpha: 0.06),
-                      width: 1.5,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppTheme.primaryNavy.withValues(alpha: 0.06),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: isAll
-                      ? Icon(
-                          Icons.apps_rounded,
-                          size: 26,
-                          color: selected
-                              ? Colors.white
-                              : AppTheme.accentOrange,
-                        )
-                      : ClipOval(
-                          child: AppImage(
-                            J.str(cat!['image_url'] ?? cat['image']),
-                            placeholder: app.placeholder,
-                            thumb: true,
-                          ),
-                        ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  isAll ? app.t('all').trim() : _catName(cat!),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w700,
-                    color: selected
-                        ? AppTheme.accentOrange
-                        : AppTheme.textPrimary,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _pill(String label, bool selected, VoidCallback onTap) {
+  Widget _categoryPill({
+    required AppController app,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+    IconData? icon,
+    String? imageUrl,
+  }) {
+    final hasImage = imageUrl != null && imageUrl.trim().isNotEmpty;
     return Material(
-      color: selected ? AppTheme.accentOrange : AppTheme.backgroundWhite,
-      borderRadius: BorderRadius.circular(999),
+      color: Colors.transparent,
       child: InkWell(
-        onTap: onTap,
         borderRadius: BorderRadius.circular(999),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+          padding: const EdgeInsetsDirectional.fromSTEB(7, 6, 14, 6),
           decoration: BoxDecoration(
+            color: selected ? AppTheme.accentOrange : AppTheme.surfaceGrey,
             borderRadius: BorderRadius.circular(999),
             border: Border.all(
               color: selected
                   ? AppTheme.accentOrange
-                  : AppTheme.primaryNavy.withValues(alpha: 0.10),
+                  : AppTheme.primaryNavy.withValues(alpha: 0.06),
             ),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (selected)
-                const Padding(
-                  padding: EdgeInsetsDirectional.only(end: 5),
-                  child: Icon(
-                    Icons.check_rounded,
-                    size: 15,
-                    color: Colors.white,
-                  ),
+              Container(
+                width: 26,
+                height: 26,
+                clipBehavior: Clip.antiAlias,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white,
                 ),
+                child: hasImage
+                    ? AppImage(
+                        imageUrl,
+                        placeholder: app.placeholder,
+                        thumb: true,
+                      )
+                    : Icon(
+                        icon ?? Icons.category_rounded,
+                        size: 15,
+                        color: selected
+                            ? AppTheme.accentOrange
+                            : AppTheme.textSecondary,
+                      ),
+              ),
+              const SizedBox(width: 7),
               Text(
                 label,
+                maxLines: 1,
                 style: TextStyle(
                   fontSize: 12.5,
                   fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
@@ -555,6 +688,366 @@ class _HarajListScreenState extends State<HarajListScreen> {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _conditionPill(
+    String label,
+    IconData icon,
+    bool selected,
+    VoidCallback onTap,
+  ) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: selected ? AppTheme.primaryNavy : AppTheme.backgroundWhite,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: selected
+                  ? AppTheme.primaryNavy
+                  : AppTheme.primaryNavy.withValues(alpha: 0.10),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 14,
+                color: selected ? Colors.white : AppTheme.textSecondary,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                  color: selected ? Colors.white : AppTheme.textPrimary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String? _conditionLabelOf(Map<String, dynamic> post) {
+    final raw = J.str(post['condition']).toLowerCase().trim();
+    switch (raw) {
+      case 'new':
+        return appController.t('condition_new');
+      case 'like_new':
+      case 'like-new':
+        return appController.t('condition_like_new');
+      case 'used':
+        return appController.t('condition_used');
+    }
+    return null;
+  }
+
+  Widget _sectionHeader(AppController app) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
+      child: Row(
+        children: [
+          _accentBar(20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              widget.mine ? app.t('my_posts') : app.t('latest_haraj'),
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+                color: AppTheme.textPrimary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _postCard(Map<String, dynamic> post, AppController app) {
+    final sold = '${post['status']}' == '2';
+    final negotiable =
+        post['is_negotiable'] == 1 ||
+        post['is_negotiable'] == true ||
+        post['is_negotiable'] == '1';
+    final city = J.str(
+      post['city'] ?? post['cityRef']?['name'] ?? post['city_ref']?['name'],
+    );
+    final category = _catNameOf(post);
+    final postedAt = timeAgo(J.str(post['created_at'] ?? post['date']));
+    final conditionLabel = _conditionLabelOf(post);
+    final meta = [
+      city,
+      category,
+      conditionLabel,
+    ].whereType<String>().where((e) => e.isNotEmpty).join(' • ');
+    return Material(
+      color: AppTheme.backgroundWhite,
+      borderRadius: BorderRadius.circular(18),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => context.push('/haraj/${post['id']}'),
+        child: Ink(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: AppTheme.primaryNavy.withValues(alpha: 0.04),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    AppImage(
+                      J.str(
+                        post['main_image_url'] ??
+                            post['image_url'] ??
+                            post['thumbnail'],
+                      ),
+                      placeholder: app.placeholder,
+                    ),
+                    PositionedDirectional(
+                      start: 0,
+                      end: 0,
+                      bottom: 0,
+                      child: IgnorePointer(
+                        child: Container(
+                          height: 54,
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.transparent,
+                                Colors.black.withValues(alpha: 0.35),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (sold || negotiable)
+                      PositionedDirectional(
+                        top: 8,
+                        start: 8,
+                        child: _statusBadge(sold, negotiable, app),
+                      ),
+                    if (widget.mine)
+                      PositionedDirectional(
+                        top: 6,
+                        end: 6,
+                        child: _mineMenu(post, sold, app),
+                      ),
+                    if (postedAt.isNotEmpty)
+                      PositionedDirectional(
+                        bottom: 8,
+                        end: 8,
+                        child: _imageMetaChip(Icons.schedule_rounded, postedAt),
+                      ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 9, 10, 11),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      J.str(post['title']),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.textPrimary,
+                        height: 1.25,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      money(post['price'], app.currency, app.decimals),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: app.accentColor,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    if (meta.isNotEmpty) ...[
+                      const SizedBox(height: 5),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.location_on_outlined,
+                            size: 12,
+                            color: AppTheme.textSecondary.withValues(
+                              alpha: 0.8,
+                            ),
+                          ),
+                          const SizedBox(width: 2),
+                          Expanded(
+                            child: Text(
+                              meta,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 10.5,
+                                color: AppTheme.textSecondary,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _statusBadge(bool sold, bool negotiable, AppController app) {
+    final color = sold ? const Color(0xFFDC2626) : const Color(0xFF16A34A);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(999),
+        boxShadow: [
+          BoxShadow(
+            color: color.withValues(alpha: 0.3),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            sold ? Icons.sell_rounded : Icons.handshake_rounded,
+            size: 11,
+            color: Colors.white,
+          ),
+          const SizedBox(width: 3),
+          Text(
+            sold ? app.t('sold') : app.t('negotiable'),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 10.5,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _imageMetaChip(IconData icon, String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: Colors.white),
+          const SizedBox(width: 3),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _mineMenu(Map<String, dynamic> post, bool sold, AppController app) {
+    return Material(
+      color: Colors.white.withValues(alpha: 0.94),
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: PopupMenuButton<String>(
+        tooltip: '',
+        padding: EdgeInsets.zero,
+        onSelected: (value) {
+          if (value == 'edit') {
+            context.push('/haraj/edit/${post['id']}');
+          } else if (value == 'sold') {
+            _markSold(post['id']);
+          } else if (value == 'delete') {
+            _deletePost(post['id']);
+          }
+        },
+        itemBuilder: (_) => [
+          PopupMenuItem(
+            value: 'edit',
+            child: Row(
+              children: [
+                const Icon(Icons.edit_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text(app.t('edit')),
+              ],
+            ),
+          ),
+          if (!sold)
+            PopupMenuItem(
+              value: 'sold',
+              child: Row(
+                children: [
+                  const Icon(Icons.check_circle_outline, size: 18),
+                  const SizedBox(width: 8),
+                  Text(app.t('mark_as_sold')),
+                ],
+              ),
+            ),
+          PopupMenuItem(
+            value: 'delete',
+            child: Row(
+              children: [
+                const Icon(Icons.delete_outline, size: 18, color: Colors.red),
+                const SizedBox(width: 8),
+                Text(
+                  app.t('delete'),
+                  style: const TextStyle(color: Colors.red),
+                ),
+              ],
+            ),
+          ),
+        ],
+        child: const SizedBox(
+          width: 32,
+          height: 32,
+          child: Icon(
+            Icons.more_horiz_rounded,
+            size: 18,
+            color: AppTheme.textPrimary,
           ),
         ),
       ),
@@ -688,6 +1181,8 @@ class _HarajListScreenState extends State<HarajListScreen> {
                 ),
               ),
             SliverToBoxAdapter(child: _topSection(app)),
+            if (!loading && items.isNotEmpty)
+              SliverToBoxAdapter(child: _sectionHeader(app)),
             if (loading)
               const SliverFillRemaining(
                 hasScrollBody: false,
@@ -716,11 +1211,11 @@ class _HarajListScreenState extends State<HarajListScreen> {
                       ? 3
                       : 2;
                   return SliverPadding(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
                     sliver: SliverGrid(
                       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                         crossAxisCount: count,
-                        mainAxisSpacing: 10,
+                        mainAxisSpacing: 12,
                         crossAxisSpacing: 10,
                         childAspectRatio: 0.68,
                       ),
@@ -738,155 +1233,7 @@ class _HarajListScreenState extends State<HarajListScreen> {
                             child: CircularProgressIndicator(),
                           );
                         }
-                        final post = items[i];
-                        final sold = '${post['status']}' == '2';
-                        final negotiable =
-                            post['is_negotiable'] == 1 ||
-                            post['is_negotiable'] == true ||
-                            post['is_negotiable'] == '1';
-                        return InkWell(
-                          onTap: () => context.push('/haraj/${post['id']}'),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                child: Stack(
-                                  children: [
-                                    Positioned.fill(
-                                      child: ClipRRect(
-                                        borderRadius: BorderRadius.circular(12),
-                                        child: AppImage(
-                                          J.str(
-                                            post['main_image_url'] ??
-                                                post['image_url'] ??
-                                                post['thumbnail'],
-                                          ),
-                                          placeholder: app.placeholder,
-                                        ),
-                                      ),
-                                    ),
-                                    if (sold)
-                                      Positioned.directional(
-                                        textDirection: Directionality.of(
-                                          context,
-                                        ),
-                                        top: 6,
-                                        start: 6,
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 3,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: Colors.red,
-                                            borderRadius: BorderRadius.circular(
-                                              10,
-                                            ),
-                                          ),
-                                          child: Text(
-                                            app.t('sold'),
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                        ),
-                                      )
-                                    else if (negotiable)
-                                      Positioned.directional(
-                                        textDirection: Directionality.of(
-                                          context,
-                                        ),
-                                        top: 6,
-                                        start: 6,
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 3,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: Colors.green,
-                                            borderRadius: BorderRadius.circular(
-                                              10,
-                                            ),
-                                          ),
-                                          child: Text(
-                                            app.t('negotiable'),
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                J.str(post['title']),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 13),
-                              ),
-                              Text(
-                                money(
-                                  post['price'],
-                                  app.currency,
-                                  app.decimals,
-                                ),
-                                style: TextStyle(
-                                  color: app.accentColor,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              Text(
-                                [
-                                  J.str(
-                                    post['city'] ??
-                                        post['cityRef']?['name'] ??
-                                        post['city_ref']?['name'],
-                                  ),
-                                  _catNameOf(post),
-                                  timeAgo(
-                                    J.str(post['created_at'] ?? post['date']),
-                                  ),
-                                ].where((p) => p.isNotEmpty).join(' • '),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.grey,
-                                  fontSize: 11,
-                                ),
-                              ),
-                              if (widget.mine)
-                                Row(
-                                  children: [
-                                    IconButton(
-                                      icon: const Icon(Icons.edit, size: 16),
-                                      tooltip: app.t('edit'),
-                                      onPressed: () => context.push(
-                                        '/haraj/edit/${post['id']}',
-                                      ),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.delete, size: 16),
-                                      tooltip: app.t('delete'),
-                                      onPressed: () => _deletePost(post['id']),
-                                    ),
-                                    if (!sold)
-                                      IconButton(
-                                        icon: const Icon(Icons.check, size: 16),
-                                        tooltip: app.t('mark_as_sold'),
-                                        onPressed: () => _markSold(post['id']),
-                                      ),
-                                  ],
-                                ),
-                            ],
-                          ),
-                        );
+                        return _postCard(items[i], app);
                       }, childCount: items.length + (page < lastPage ? 1 : 0)),
                     ),
                   );
@@ -936,8 +1283,6 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
   bool loading = true;
   bool failed = false;
   dynamic replyTo;
-  double userRating = 0;
-  bool blocked = false;
 
   @override
   void initState() {
@@ -1122,113 +1467,6 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     if (res.ok) _load();
   }
 
-  Future<void> _rateUser() async {
-    final app = appController;
-    final uid = post?['user_id'] ?? post?['user']?['id'];
-    if (uid == null) return;
-    if (!app.isLoggedIn) {
-      if (mounted) {
-        context.push(
-          '/login?next=${Uri.encodeComponent('/haraj/${widget.id}')}',
-        );
-      }
-      return;
-    }
-    int rating = 5;
-    final ctrl = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setS) => AlertDialog(
-          title: Text(app.t('haraj_rate_seller')),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  for (var i = 1; i <= 5; i++)
-                    IconButton(
-                      icon: Icon(
-                        i <= rating ? Icons.star : Icons.star_border,
-                        color: Colors.amber,
-                      ),
-                      onPressed: () => setS(() => rating = i),
-                    ),
-                ],
-              ),
-              TextField(
-                controller: ctrl,
-                maxLines: 2,
-                decoration: InputDecoration(hintText: app.t('write_comment')),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text(app.t('cancel')),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text(app.t('rate')),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (ok != true) return;
-    if (!mounted) return;
-    if (!await _needInternet(context)) return;
-    final res = await appController.api.harajRate({
-      'rated_user_id': uid,
-      'post_id': widget.id,
-      'rating': rating,
-      'comment': ctrl.text.trim(),
-    });
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          res.message.isNotEmpty
-              ? res.message
-              : app.t('rating_saved_successfully'),
-        ),
-      ),
-    );
-    if (res.ok) _load();
-  }
-
-  Future<void> _toggleBlock() async {
-    final app = appController;
-    final uid = post?['user_id'] ?? post?['user']?['id'];
-    if (uid == null) return;
-    if (!await _needInternet(context)) return;
-    if (!mounted) return;
-    if (!blocked) {
-      final ok = await confirmAction(
-        context,
-        title: app.t('block'),
-        body: app.t('haraj_block_confirm'),
-      );
-      if (!ok) return;
-    }
-    final res = blocked
-        ? await appController.api.harajUnblock(uid)
-        : await appController.api.harajBlock(uid);
-    if (!mounted) return;
-    if (res.ok) setState(() => blocked = !blocked);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          res.message.isNotEmpty
-              ? res.message
-              : (blocked ? app.t('block') : app.t('unblock')),
-        ),
-      ),
-    );
-  }
-
   static const _reportReasons = [
     'fake',
     'scam',
@@ -1411,11 +1649,11 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     final showContact = !isMine && !sold;
     return Scaffold(
       appBar: AppBar(
-         title: Text(
-           J.str(p['title']).isEmpty ? app.t('haraj') : J.str(p['title']),
-           maxLines: 1,
-           overflow: TextOverflow.ellipsis,
-         ),
+        title: Text(
+          J.str(p['title']).isEmpty ? app.t('haraj') : J.str(p['title']),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
           if (isMine) ...[
             IconButton(
@@ -1449,22 +1687,6 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
                 tooltip: app.t('mark_as_sold'),
                 onPressed: _markSold,
               ),
-          ] else ...[
-            IconButton(
-              icon: const Icon(Icons.star_border),
-              tooltip: app.t('haraj_rate_seller'),
-              onPressed: _rateUser,
-            ),
-            IconButton(
-              icon: Icon(blocked ? Icons.block : Icons.person_off_outlined),
-              tooltip: blocked ? app.t('unblock') : app.t('block'),
-              onPressed: _toggleBlock,
-            ),
-            IconButton(
-              icon: const Icon(Icons.flag_outlined),
-              tooltip: app.t('haraj_report'),
-              onPressed: _report,
-            ),
           ],
         ],
       ),
@@ -1554,9 +1776,20 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
             subtitle: _ownerRatingRow(ownerRating, myRating),
           ),
           if (myRating.isNotEmpty)
-            Text(
-              '${app.t('haraj_my_rating')}: ${J.str(myRating['rating'])} ★',
-              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                children: [
+                  Text(
+                    '${app.t('haraj_my_rating')}: ',
+                    style: const TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                  _stars(
+                    double.tryParse('${myRating['rating']}') ?? 0,
+                    size: 14,
+                  ),
+                ],
+              ),
             ),
           const SizedBox(height: 8),
           if (showContact) ...[
@@ -1585,6 +1818,34 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
             Text(
               app.t('haraj_safety_hint'),
               style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ],
+          if (!isMine) ...[
+            const SizedBox(height: 10),
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: OutlinedButton.icon(
+                onPressed: _report,
+                icon: const Icon(Icons.flag_outlined, size: 18),
+                label: Text(app.t('haraj_report')),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFDC2626),
+                  side: BorderSide(
+                    color: const Color(0xFFDC2626).withValues(alpha: 0.25),
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
             ),
           ],
           const Divider(),
@@ -1686,20 +1947,52 @@ class _HarajDetailsScreenState extends State<HarajDetailsScreen> {
     );
   }
 
+  /// Read-only 5-star summary derived automatically from the saved average.
+  Widget _stars(double rating, {double size = 16}) {
+    final value = rating.clamp(0.0, 5.0);
+    final full = value.floor();
+    final half = value - full >= 0.5;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(5, (i) {
+        final index = i + 1;
+        final isFull = index <= full;
+        final isHalf = !isFull && index == full + 1 && half;
+        return Icon(
+          isFull
+              ? Icons.star_rounded
+              : isHalf
+              ? Icons.star_half_rounded
+              : Icons.star_outline_rounded,
+          size: size,
+          color: isFull || isHalf ? Colors.amber : Colors.grey.shade400,
+        );
+      }),
+    );
+  }
+
   Widget _ownerRatingRow(
     Map<String, dynamic> ownerRating,
     Map<String, dynamic> myRating,
   ) {
-    if (ownerRating.isEmpty && myRating.isEmpty) return const SizedBox.shrink();
+    if (ownerRating.isEmpty && myRating.isEmpty) {
+      return Row(
+        children: [
+          _stars(0, size: 14),
+          const SizedBox(width: 6),
+          const Text('—', style: TextStyle(fontSize: 12, color: Colors.grey)),
+        ],
+      );
+    }
     final avg = double.tryParse('${ownerRating['average'] ?? ''}') ?? 0;
     final count = J.str(ownerRating['count']);
     return Row(
       children: [
-        const Icon(Icons.star, size: 14, color: Colors.amber),
-        const SizedBox(width: 2),
+        _stars(avg, size: 14),
+        const SizedBox(width: 6),
         Text(
           avg > 0 ? avg.toStringAsFixed(1) : '—',
-          style: const TextStyle(fontSize: 12),
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
         ),
         if (count.isNotEmpty)
           Text(

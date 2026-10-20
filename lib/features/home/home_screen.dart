@@ -786,7 +786,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       width: double.infinity,
                       decoration: BoxDecoration(
                         borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(48),
+                          topLeft: Radius.circular(32),
                           topRight: Radius.zero,
                           bottomLeft: Radius.circular(16),
                           bottomRight: Radius.circular(16),

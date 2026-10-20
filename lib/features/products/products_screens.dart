@@ -18,7 +18,6 @@ import '../../core/search_scope.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/closed_store_badge.dart';
 import '../../widgets/product_card.dart';
-import '../../widgets/product_filter_drawer.dart';
 import '../../widgets/product_variant_sheet.dart';
 import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
@@ -101,7 +100,6 @@ class ProductsScreen extends StatefulWidget {
     this.canDeliver = false,
     this.isReturnable = false,
     this.listenHeaderSearch = true,
-    this.hideHeader = false,
   });
 
   final String? categoryId;
@@ -122,16 +120,11 @@ class ProductsScreen extends StatefulWidget {
   /// a stale query into another seller's catalog.
   final bool listenHeaderSearch;
 
-  /// True when embedded in a store page: the global store-type tabs and the
-  /// filter button are hidden — the store shows only its own sections as tabs.
-  final bool hideHeader;
-
   @override
   State<ProductsScreen> createState() => _ProductsScreenState();
 }
 
-class _ProductsScreenState extends State<ProductsScreen>
-    with SingleTickerProviderStateMixin {
+class _ProductsScreenState extends State<ProductsScreen> {
   // Hidden query holder: the single visible search field lives in the app
   // header and drives this screen through [headerSearch].
   final _search = TextEditingController();
@@ -145,7 +138,6 @@ class _ProductsScreenState extends State<ProductsScreen>
   String? categoryId;
   bool inStock = false;
   bool onlyOffers = false;
-  TabController? _tabC;
 
   @override
   void initState() {
@@ -182,7 +174,6 @@ class _ProductsScreenState extends State<ProductsScreen>
   @override
   void dispose() {
     headerSearch.removeListener(_onHeaderSearch);
-    _tabC?.dispose();
     _search.dispose();
     super.dispose();
   }
@@ -200,105 +191,6 @@ class _ProductsScreenState extends State<ProductsScreen>
   bool canDeliver = false;
   bool isHome = false;
   bool isReturnable = false;
-
-  String _catName(Map<String, dynamic> cat) {
-    final isAr = appController.i18n.code == 'ar';
-    final ar = J.str(cat['name_ar']);
-    final en = J.str(cat['name_en'] ?? cat['name']);
-    return isAr ? (ar.isNotEmpty ? ar : en) : (en.isNotEmpty ? en : ar);
-  }
-
-  int _tabIndexFor(List<Map<String, dynamic>> cats) {
-    if (categoryId == null || categoryId!.isEmpty) return 0;
-    final i = cats.indexWhere((c) => '${c['id']}' == '$categoryId');
-    return i < 0 ? 0 : i + 1;
-  }
-
-  Widget _categoryTabs(AppController app) {
-    final cats = app.rootCategories;
-    if (cats.isEmpty) return const SizedBox(height: 48);
-    if (_tabC == null || _tabC!.length != cats.length + 1) {
-      _tabC?.dispose();
-      _tabC = TabController(
-        length: cats.length + 1,
-        vsync: this,
-        initialIndex: _tabIndexFor(cats),
-      );
-    } else {
-      final want = _tabIndexFor(cats);
-      if (_tabC!.index != want && !_tabC!.indexIsChanging) {
-        _tabC!.index = want;
-      }
-    }
-    return TabBar(
-      controller: _tabC,
-      isScrollable: true,
-      tabAlignment: TabAlignment.start,
-      labelColor: AppTheme.accentOrange,
-      unselectedLabelColor: AppTheme.textSecondary,
-      indicatorColor: AppTheme.accentOrange,
-      indicatorWeight: 3,
-      labelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-      unselectedLabelStyle: const TextStyle(
-        fontWeight: FontWeight.w500,
-        fontSize: 14,
-      ),
-      onTap: (i) {
-        final next = i == 0 ? null : '${cats[i - 1]['id']}';
-        if ('$next' == '$categoryId') return;
-        setState(() => categoryId = next);
-        _load(reset: true);
-      },
-      tabs: [
-        Tab(text: app.t('all') == 'all' ? 'الكل' : app.t('all')),
-        for (final c in cats) Tab(text: _catName(c)),
-      ],
-    );
-  }
-
-  ProductFilterValue get _drawerValue => ProductFilterValue(
-    sort: sort,
-    categoryId: categoryId,
-    priceMin: priceMin,
-    priceMax: priceMax,
-    minRating: minRating,
-    inStock: inStock,
-    onlyOffers: onlyOffers,
-    canDeliver: canDeliver,
-    isReturnable: isReturnable,
-  );
-
-  void _applyDrawer(ProductFilterValue v) {
-    sort = v.sort;
-    categoryId = v.categoryId;
-    priceMin = v.priceMin;
-    priceMax = v.priceMax;
-    minRating = v.minRating;
-    inStock = v.inStock;
-    onlyOffers = v.onlyOffers;
-    canDeliver = v.canDeliver;
-    isReturnable = v.isReturnable;
-    _load(reset: true);
-  }
-
-  /// Opens the filter bottom sheet; the price slider bounds follow the
-  /// prices present in the currently loaded list.
-  void _openFilters() {
-    var hi = 0.0;
-    for (final p in items) {
-      final variants = J.maps(p['variants']);
-      final variant = variants.isNotEmpty ? variants.first : p;
-      final price = variantDisplayPrice(variant).finalPrice;
-      if (price > hi) hi = price;
-    }
-    showProductFilterSheet(
-      context,
-      initial: _drawerValue,
-      categories: appController.rootCategories,
-      onApply: _applyDrawer,
-      priceMaxBound: hi > 0 ? (hi * 1.1).ceilToDouble() : 1000,
-    );
-  }
 
   Map<String, dynamic> get _filters => {
     'limit': AppConfig.productPageSize,
@@ -345,18 +237,19 @@ class _ProductsScreenState extends State<ProductsScreen>
     // Kick the network page off now, in parallel with the local-first reads
     // below. Local DB work must never postpone the request that actually
     // refreshes the grid; the response is awaited further down.
-    final network = Future.sync(
-      () => appController.api.products(
-        latitude: point.latitude,
-        longitude: point.longitude,
-        filters: _filters,
-      ),
-    )
-        .timeout(
-          const Duration(seconds: 10),
-          onTimeout: () => ApiResult({'status': 0}),
-        )
-        .catchError((_) => ApiResult({'status': 0}));
+    final network =
+        Future.sync(
+              () => appController.api.products(
+                latitude: point.latitude,
+                longitude: point.longitude,
+                filters: _filters,
+              ),
+            )
+            .timeout(
+              const Duration(seconds: 10),
+              onTimeout: () => ApiResult({'status': 0}),
+            )
+            .catchError((_) => ApiResult({'status': 0}));
     if (reset) {
       _catalogStatus = (await appController.catalogScopeState()).status;
       if (!mounted || mySeq != _seq) return;
@@ -411,7 +304,7 @@ class _ProductsScreenState extends State<ProductsScreen>
         Diag.log(
           'products:load',
           '${swLoad.elapsedMilliseconds}ms status=${result.status} '
-          'rows=${result.dataMaps.length} reset=$reset offset=$offset',
+              'rows=${result.dataMaps.length} reset=$reset offset=$offset',
         );
       }
       if (result.ok) {
@@ -519,66 +412,9 @@ class _ProductsScreenState extends State<ProductsScreen>
   @override
   Widget build(BuildContext context) {
     final app = appController;
-    final activeCount = [
-      sort.isNotEmpty,
-      minRating.isNotEmpty,
-      priceMin.isNotEmpty || priceMax.isNotEmpty,
-      inStock,
-      onlyOffers,
-      canDeliver,
-      isReturnable,
-    ].where((e) => e).length;
     return Scaffold(
       body: Column(
         children: [
-          // When embedded in a store page [hideHeader] is true: skip the global
-          // store-type tabs + filter button entirely. The store renders its own
-          // sections as tabs above.
-          if (!widget.hideHeader)
-            Container(
-              color: Colors.white,
-              padding: const EdgeInsetsDirectional.only(start: 8),
-              child: Row(
-                children: [
-                  Expanded(child: _categoryTabs(app)),
-                  Stack(
-                    alignment: Alignment.topRight,
-                    children: [
-                      IconButton(
-                        onPressed: _openFilters,
-                        icon: const Icon(Icons.tune),
-                        tooltip: app.t('filters'),
-                      ),
-                      if (activeCount > 0)
-                        Positioned(
-                          right: 6,
-                          top: 6,
-                          child: Container(
-                            padding: const EdgeInsets.all(4),
-                            decoration: BoxDecoration(
-                              color: AppTheme.accentOrange,
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: Colors.white,
-                                width: 1.5,
-                              ),
-                            ),
-                            child: Text(
-                              '$activeCount',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 9,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          if (!widget.hideHeader) const Divider(height: 1),
           const _CatalogSyncStrip(),
           Expanded(
             child: loading
@@ -674,6 +510,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   List<Map<String, dynamic>> ratings = [];
   double ratingAvg = 0;
   int ratingCount = 0;
+  Map<String, dynamic>? _rateableOrderItem;
   int _imgIndex = 0;
   final _pageC = PageController();
 
@@ -800,19 +637,17 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     final s = results.length == 3 ? results[1] : null;
     setState(() {
       if (r.ok) {
-        final d = J.map(r.dataMap['data']);
-        final list = J.maps(r.dataMap['data']).isNotEmpty
-            ? J.maps(r.dataMap['data'])
-            : r.dataMaps;
+        final d = r.dataMap;
+        final list = J.maps(d['rating_list']);
         ratings = list;
         ratingAvg =
             double.tryParse(
-              '${d['average'] ?? data['average_rating'] ?? ''}',
+              '${d['average_rating'] ?? d['average'] ?? data['average_rating'] ?? ''}',
             ) ??
             0;
         ratingCount =
             int.tryParse(
-              '${d['count'] ?? d['total'] ?? data['rating_count'] ?? ''}',
+              '${d['rating_count'] ?? d['count'] ?? d['total'] ?? data['rating_count'] ?? ''}',
             ) ??
             list.length;
       }
@@ -824,6 +659,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       }
       if (o.ok) offers = o.dataMaps;
     });
+    // Reviews are purchase-gated (delivered order line required). Resolve the
+    // eligible line so "write review" is only offered when the backend would
+    // accept it.
+    if (app.isLoggedIn) {
+      final rateable = await app.rateableOrderItemForProduct(data['id']);
+      if (!mounted) return;
+      setState(() => _rateableOrderItem = rateable);
+    }
   }
 
   Future<void> _share() async {
@@ -901,6 +744,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       }
       return;
     }
+    final rateable = _rateableOrderItem;
+    if (rateable == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(app.t('rating_after_purchase_only'))),
+      );
+      return;
+    }
     int stars = 0;
     final ctrl = TextEditingController();
     final ok = await showDialog<bool>(
@@ -959,6 +809,8 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       'product_id': product!['id'],
       'rate': stars,
       'review': ctrl.text.trim(),
+      'order_item_id': rateable['order_item_id'],
+      'order_id': rateable['order_id'],
     });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1045,13 +897,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     return Scaffold(
       backgroundColor: AppTheme.surfaceGrey,
       appBar: AppBar(
-         title: Text(
-           J.str(product!['name']).isEmpty
-               ? app.t('product')
-               : J.str(product!['name']),
-           maxLines: 1,
-           overflow: TextOverflow.ellipsis,
-         ),
+        title: Text(
+          J.str(product!['name']).isEmpty
+              ? app.t('product')
+              : J.str(product!['name']),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
           ListenableBuilder(
             listenable: app,
@@ -1516,18 +1368,19 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                         ),
                         const SizedBox(width: 8),
                       ],
-                      GestureDetector(
-                        onTap: _writeReview,
-                        child: Text(
-                          app.t('write_review'),
-                          style: const TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                            color: AppTheme.accentOrange,
-                            decoration: TextDecoration.underline,
+                      if (_rateableOrderItem != null)
+                        GestureDetector(
+                          onTap: _writeReview,
+                          child: Text(
+                            app.t('write_review'),
+                            style: const TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w700,
+                              color: AppTheme.accentOrange,
+                              decoration: TextDecoration.underline,
+                            ),
                           ),
                         ),
-                      ),
                     ],
                   ),
                   child: ratings.isEmpty
@@ -1551,6 +1404,17 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           ],
                         ),
                 ),
+                if (app.isLoggedIn && _rateableOrderItem == null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6, right: 4, left: 4),
+                    child: Text(
+                      app.t('rating_after_purchase_only'),
+                      style: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
                 if (similar.isNotEmpty) ...[
                   const SizedBox(height: 16),
                   Row(

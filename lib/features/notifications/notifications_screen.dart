@@ -158,7 +158,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       '/wallet': '/wallet',
       '/cart': '/cart',
       '/checkout': '/checkout',
-      '/products': '/products',
+      '/products': '/',
       '/sellers': '/sellers',
       '/haraj': '/haraj',
       '/akhdimni': '/akhdimni',
@@ -489,13 +489,24 @@ class _NotificationBellState extends State<NotificationBell>
         await context.push('/notifications');
         _refresh();
       },
+      tooltip: appController.t('notification'),
+      style: IconButton.styleFrom(
+        minimumSize: const Size(42, 42),
+        maximumSize: const Size(42, 42),
+        padding: EdgeInsets.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
       icon: Badge(
         isLabelVisible: unread > 0,
         label: Text(
           unread > 99 ? '99+' : '$unread',
           style: const TextStyle(fontSize: 10, color: Colors.white),
         ),
-        child: const Icon(Icons.notifications_outlined, color: Colors.white),
+        child: const Icon(
+          Icons.notifications_outlined,
+          color: Colors.white,
+          size: 22,
+        ),
       ),
     );
   }

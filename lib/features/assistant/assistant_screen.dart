@@ -298,7 +298,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
       '/register/customer': '/register',
       '/register/seller': '/register',
       '/register/delivery': '/register',
-      '/categories': '/products',
+      '/categories': '/',
       '/flash-sales': '/offers',
       '/profile/wishlist': '/wishlist',
     };
