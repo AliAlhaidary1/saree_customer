@@ -23,6 +23,10 @@ class CheckoutSession {
   final LocalStore _store;
   final String scope;
 
+  /// Serializes [begin] calls. Two rapid taps used to observe `key == null`
+  /// together, clear each other's write, and send two different keys.
+  Future<void> _beginTail = Future<void>.value();
+
   String get _key => 'checkout_session::$scope';
 
   Map<String, dynamic>? load() {
@@ -51,22 +55,37 @@ class CheckoutSession {
   /// Begins (or resumes) a session. Returns the stable key to send.
   /// If the cart fingerprint changed since the session started, a fresh key
   /// is generated so the backend does not attach an old key to a new order.
-  Future<String> begin({Map<String, dynamic>? context}) async {
+  Future<String> begin({Map<String, dynamic>? context}) {
+    final result = _beginTail.then((_) => _begin(context));
+    _beginTail = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
+  Future<String> _begin(Map<String, dynamic>? context) async {
     final fingerprint = context?['fingerprint']?.toString();
     final existing = key;
-    if (existing != null && (fingerprint == null || matchesFingerprint(fingerprint))) {
+    if (existing != null &&
+        (fingerprint == null || matchesFingerprint(fingerprint))) {
       return existing;
     }
-    await clear();
     final now = DateTime.now();
     final entropy = Random().nextInt(0x7fffffff).toRadixString(36);
     final fresh =
         'checkout-$scope-${now.microsecondsSinceEpoch}-${now.millisecond.toRadixString(36)}-$entropy';
-    await _store.writeString(_key, jsonEncode({
-      'idempotency_key': fresh,
-      'started_at': DateTime.now().millisecondsSinceEpoch,
-      'context': context ?? {},
-    }));
+    final saved = await _store.writeString(
+      _key,
+      jsonEncode({
+        'idempotency_key': fresh,
+        'started_at': DateTime.now().millisecondsSinceEpoch,
+        'context': context ?? {},
+      }),
+    );
+    if (!saved) {
+      // Keep any previous uncertain session intact. Sending an unpersisted
+      // key would let a restart/retry generate another key and duplicate the
+      // order after an ambiguous network result.
+      throw StateError('checkout_session_persist_failed');
+    }
     return fresh;
   }
 

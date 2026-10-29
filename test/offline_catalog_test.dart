@@ -7,6 +7,7 @@ import 'package:sareemart_customer/core/catalog_db/catalog_database.dart';
 import 'package:sareemart_customer/core/catalog_store.dart';
 import 'package:sareemart_customer/core/image_prefetch.dart';
 import 'package:sareemart_customer/core/json_util.dart';
+import 'package:sareemart_customer/core/offline/local_cart.dart' as local_cart;
 import 'package:sareemart_customer/core/offline/local_store.dart';
 import 'package:sareemart_customer/core/offline/offline_cache.dart';
 import 'package:sareemart_customer/core/offline/pending_ops.dart';
@@ -78,6 +79,20 @@ class _CatalogApi extends CustomerApi {
   List<Map<String, dynamic>> allCategories = [];
 
   @override
+  Future<ApiResult> cities({
+    int limit = 100,
+    int offset = 0,
+    String search = '',
+  }) async {
+    return ApiResult({
+      'status': 1,
+      'data': [
+        {'id': 4, 'name': 'Test City'},
+      ],
+    });
+  }
+
+  @override
   Future<ApiResult> products({
     required double latitude,
     required double longitude,
@@ -113,8 +128,39 @@ class _CatalogApi extends CustomerApi {
     dynamic offset,
     String? slug,
   }) async {
-    return ApiResult({'status': 1, 'data': allCategories});
+    final start = J.i(offset);
+    final take = J.i(limit, 100);
+    final slice = allCategories.skip(start).take(take).toList();
+    return ApiResult({'status': 1, 'data': slice});
   }
+}
+
+class _OfflineProbeApi extends _CatalogApi {
+  @override
+  Future<ApiResult> cities({
+    int limit = 100,
+    int offset = 0,
+    String search = '',
+  }) async => ApiResult({
+    'status': 0,
+    'message': 'offline',
+    'error': {'code': 'ECONNREFUSED'},
+  });
+}
+
+class _ClearCartApi extends _CatalogApi {
+  @override
+  Future<ApiResult> clearCart() async => ApiResult({'status': 1});
+
+  @override
+  Future<ApiResult> cart({
+    required double latitude,
+    required double longitude,
+    int checkout = 0,
+  }) async => ApiResult({
+    'status': 1,
+    'data': {'cart': <dynamic>[], 'sub_total': 0},
+  });
 }
 
 Future<AppController> _controller(
@@ -363,41 +409,44 @@ void main() {
       await db.close();
     });
 
-    test('interrupted run re-walks from the start without duplicates', () async {
-      final db = await CatalogDatabase.openMemory();
-      final svc = CatalogSyncService();
-      final all = List.generate(120, (i) => _productRow(i + 1));
-      final first = await svc.syncScope(
-        db: db,
-        scope: 'city:4',
-        fetchProducts: pager(all, failOnCall: 2),
-        fetchStores: pager(const []),
-        fetchCategories: pager(const []),
-        delay: (_) async {},
-      );
-      expect(first.complete, isFalse);
-      expect(first.products, 48);
-      expect(await CatalogDao(db).productCount('city:4'), 48);
-      // Every walk starts at offset 0 (partial resume would poison
-      // end-of-walk reconciliation), so the retry re-walks fully — idempotent
-      // upserts make repeats no-ops.
-      var firstOffset = -1;
-      final second = await svc.syncScope(
-        db: db,
-        scope: 'city:4',
-        fetchProducts: ({required int limit, required int offset}) async {
-          if (firstOffset < 0) firstOffset = offset;
-          return pager(all)(limit: limit, offset: offset);
-        },
-        fetchStores: pager(const []),
-        fetchCategories: pager(const []),
-        delay: (_) async {},
-      );
-      expect(firstOffset, 0);
-      expect(second.complete, isTrue);
-      expect(await CatalogDao(db).productCount('city:4'), 120);
-      await db.close();
-    });
+    test(
+      'interrupted run re-walks from the start without duplicates',
+      () async {
+        final db = await CatalogDatabase.openMemory();
+        final svc = CatalogSyncService();
+        final all = List.generate(120, (i) => _productRow(i + 1));
+        final first = await svc.syncScope(
+          db: db,
+          scope: 'city:4',
+          fetchProducts: pager(all, failOnCall: 2),
+          fetchStores: pager(const []),
+          fetchCategories: pager(const []),
+          delay: (_) async {},
+        );
+        expect(first.complete, isFalse);
+        expect(first.products, 48);
+        expect(await CatalogDao(db).productCount('city:4'), 48);
+        // Every walk starts at offset 0 (partial resume would poison
+        // end-of-walk reconciliation), so the retry re-walks fully — idempotent
+        // upserts make repeats no-ops.
+        var firstOffset = -1;
+        final second = await svc.syncScope(
+          db: db,
+          scope: 'city:4',
+          fetchProducts: ({required int limit, required int offset}) async {
+            if (firstOffset < 0) firstOffset = offset;
+            return pager(all)(limit: limit, offset: offset);
+          },
+          fetchStores: pager(const []),
+          fetchCategories: pager(const []),
+          delay: (_) async {},
+        );
+        expect(firstOffset, 0);
+        expect(second.complete, isTrue);
+        expect(await CatalogDao(db).productCount('city:4'), 120);
+        await db.close();
+      },
+    );
 
     test('failed page preserves prior data and checkpoint', () async {
       final db = await CatalogDatabase.openMemory();
@@ -546,15 +595,16 @@ void main() {
             delay: (_) async {},
           );
       c.city = {'id': 4};
-      expect((await syncCity([_productRow(1), _productRow(2)])).complete,
-          isTrue);
+      expect(
+        (await syncCity([_productRow(1), _productRow(2)])).complete,
+        isTrue,
+      );
       c.city = {'id': 5};
       expect((await syncCity([_productRow(9)])).complete, isTrue);
       expect(await c.catalogProductCountLocal(), 1);
-      expect(
-        (await c.catalogProductsLocal(limit: 50)).map((m) => m['id']),
-        [9],
-      );
+      expect((await c.catalogProductsLocal(limit: 50)).map((m) => m['id']), [
+        9,
+      ]);
       // Switch back: city 4 rows intact, city 5 rows invisible here.
       c.city = {'id': 4};
       expect(await c.catalogProductCountLocal(), 2);
@@ -568,6 +618,108 @@ void main() {
       final state6 = await c.catalogScopeState();
       expect(state6.status, CatalogScopeStatus.neverSynced);
       await db.close();
+    });
+  });
+
+  group('guest cart Drift mirror (C-07)', () {
+    local_cart.CartItem item(int variantId, int qty) => local_cart.CartItem(
+      productId: variantId,
+      variantId: variantId,
+      qty: qty,
+      sellerId: 5,
+      name: 'P$variantId',
+      imageUrl: '',
+      price: 10,
+    );
+
+    test('persist replaces the mirror instead of appending/merging', () async {
+      final c = await _controller({}, _CatalogApi());
+      final db = await CatalogDatabase.openMemory();
+      final repo = await c.attachLocalCartForTest(db);
+      await repo.addItem(item(11, 1));
+      await repo.addItem(item(99, 2)); // stale ghost that must disappear
+      c.guestCart = [
+        {
+          'product_id': 11,
+          'product_variant_id': 11,
+          'qty': 3,
+          'seller_id': 5,
+          'name': 'P11',
+          'price': 10,
+        },
+      ];
+      await c.persistGuestCart();
+      expect(repo.items.map((i) => i.variantId), [11]);
+      expect(repo.items.single.qty, 3);
+      // Reload from SQLite: the replacement is durable, not memory-only.
+      final reloaded = local_cart.LocalCartRepository(db);
+      await reloaded.load();
+      expect(reloaded.items.map((i) => i.variantId), [11]);
+      expect(reloaded.items.single.qty, 3);
+      await db.close();
+    });
+
+    test('clearAllCart clears the mirror as well as prefs/memory', () async {
+      final c = await _controller({}, _CatalogApi());
+      final db = await CatalogDatabase.openMemory();
+      final repo = await c.attachLocalCartForTest(db);
+      c.guestCart = [
+        {
+          'product_id': 11,
+          'product_variant_id': 11,
+          'qty': 2,
+          'seller_id': 5,
+          'name': 'P11',
+          'price': 10,
+        },
+      ];
+      await c.persistGuestCart();
+      expect(repo.items, isNotEmpty);
+      await c.clearAllCart();
+      expect(c.guestCart, isEmpty);
+      expect(repo.items, isEmpty);
+      final reloaded = local_cart.LocalCartRepository(db);
+      await reloaded.load();
+      expect(reloaded.items, isEmpty);
+      await db.close();
+    });
+
+    test('guest total is computed locally on persist', () async {
+      final c = await _controller({}, _CatalogApi());
+      c.guestCart = [
+        {'product_variant_id': 11, 'qty': 3, 'price': 10},
+        {'product_variant_id': 12, 'qty': 2, 'price': 5.5},
+      ];
+      await c.persistGuestCart();
+      expect(c.guestCartTotal, 41);
+    });
+
+    test('guest clear works offline and resets the total', () async {
+      final c = await _controller({}, _OfflineProbeApi());
+      c.guestCart = [
+        {'product_variant_id': 11, 'qty': 1, 'price': 10},
+      ];
+      c.guestCartTotal = 10;
+      await c.clearAllCart();
+      expect(c.guestCart, isEmpty);
+      expect(c.guestCartTotal, 0);
+    });
+
+    test('logged-in clear leaves the guest cart untouched', () async {
+      final c = await _controller({}, _ClearCartApi());
+      c.token = 'token';
+      c.user = {'id': 7};
+      c.city = {'id': 1, 'latitude': 15.0, 'longitude': 45.0};
+      c.cartProducts = [
+        {'product_variant_id': 21, 'qty': 1, 'price': 10},
+      ];
+      c.guestCart = [
+        {'product_variant_id': 22, 'qty': 2, 'price': 5},
+      ];
+      await c.clearAllCart();
+      expect(c.cartProducts, isEmpty);
+      expect(c.guestCart, hasLength(1));
+      expect(c.guestCart.single['product_variant_id'], 22);
     });
   });
 

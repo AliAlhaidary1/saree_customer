@@ -35,8 +35,11 @@ class YemenPhone {
     return '+$countryCode$localNumber';
   }
 
-  static bool backupDiffersFromPrimary(String? primary, String? backup,
-      {String countryCode = countryCode}) {
+  static bool backupDiffersFromPrimary(
+    String? primary,
+    String? backup, {
+    String countryCode = countryCode,
+  }) {
     if (backup == null || backup.trim().isEmpty) return true;
     final primaryCanonical = canonical(primary, countryCode: countryCode);
     final backupCanonical = canonical(backup, countryCode: countryCode);
@@ -45,7 +48,7 @@ class YemenPhone {
   }
 }
 
-const passwordMinLength = 6;
+const passwordMinLength = 12;
 
 bool isValidPassword(String? password) =>
     password != null && password.length >= passwordMinLength;

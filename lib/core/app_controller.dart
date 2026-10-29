@@ -52,7 +52,9 @@ class AppController extends ChangeNotifier {
   final CatalogSyncService catalogSync = CatalogSyncService();
   CatalogDatabase? _catalogDb;
   DateTime? _lastCatalogSyncAttempt;
+  DateTime? _lastCatalogSyncSuccess;
   local_cart.LocalCartRepository? _localCart;
+  Future<void>? _guestMergeInFlight;
 
   /// Bounded opt-in thumbnail prefetch (default OFF — mobile-data safety).
   final ImagePrefetch imagePrefetch = ImagePrefetch();
@@ -90,6 +92,7 @@ class AppController extends ChangeNotifier {
     offline = OfflineCache(store);
     sync = SyncEngine(
       outboxForCurrentScope: () => PendingOutbox(store, accountScope),
+      executor: runPendingOp,
     );
     _checkoutSession = null;
     // Test hygiene: never inherit cart serialization state across tests —
@@ -192,6 +195,8 @@ class AppController extends ChangeNotifier {
   /// Persists the guest cart with an encoded byte-size guard. Oversized carts
   /// stay memory-only (and syncable at login) instead of breaking prefs.
   Future<void> persistGuestCart() async {
+    // Offline/restart totals must not depend on a successful guest-cart call.
+    guestCartTotal = _guestCartLocalTotal();
     try {
       await store.writeJson('guest_cart', guestCart);
     } catch (_) {}
@@ -205,6 +210,21 @@ class AppController extends ChangeNotifier {
         }
       }
     } catch (_) {}
+  }
+
+  double _guestCartLocalTotal() {
+    var total = 0.0;
+    for (final item in guestCart) {
+      final unit = J.d(
+        item['price'] ??
+            item['final_price'] ??
+            item['productPrice'] ??
+            item['sale_price'],
+      );
+      final qty = J.i(item['qty'] ?? item['quantity']);
+      if (unit > 0 && qty > 0) total += unit * qty;
+    }
+    return total;
   }
 
   void _attachVariantLabels(List<Map<String, dynamic>> lines) {
@@ -365,6 +385,8 @@ class AppController extends ChangeNotifier {
       coords ?? (latitude: 0.0, longitude: 0.0);
 
   Future<void> bootstrap() async {
+    // A retry must not keep showing the previous failure once it succeeds.
+    bootstrapError = null;
     final sw = Stopwatch()..start();
     void mark(String tag) {
       if (!Diag.enabled) return;
@@ -378,9 +400,20 @@ class AppController extends ChangeNotifier {
     offline = OfflineCache(store);
     sync = SyncEngine(
       outboxForCurrentScope: () => PendingOutbox(store, accountScope),
+      executor: runPendingOp,
     );
-    apiUrl = AppConfig.defaultApiUrl;
-    await _prefs.setString('api_url', apiUrl);
+    final storedApiUrl = _prefs.getString('api_url')?.trim() ?? '';
+    final storedUri = Uri.tryParse(storedApiUrl);
+    apiUrl =
+        (!kReleaseMode &&
+            storedUri != null &&
+            storedUri.hasAuthority &&
+            (storedUri.scheme == 'http' || storedUri.scheme == 'https'))
+        ? storedApiUrl
+        : AppConfig.defaultApiUrl;
+    if (storedApiUrl != apiUrl) {
+      await _prefs.setString('api_url', apiUrl);
+    }
     mark('prefs');
     try {
       token = await vault.read();
@@ -454,11 +487,14 @@ class AppController extends ChangeNotifier {
       // Drift is now a mirror, guestCart stays the UI truth:
       // prefs -> Drift when prefs has rows, Drift -> guestCart otherwise.
       if (guestCart.isNotEmpty) {
-        for (final item in guestCart) {
-          try {
+        // Replace the mirror, never append: addItem() merges quantities, so a
+        // cold start over existing Drift rows doubled every guest line.
+        try {
+          await _localCart!.clear();
+          for (final item in guestCart) {
             await _localCart!.addItem(local_cart.CartItem.fromMap(item));
-          } catch (_) {}
-        }
+          }
+        } catch (_) {}
       } else if (_localCart!.items.isNotEmpty) {
         guestCart = _localCart!.items.map((c) => c.toMap()).toList();
         _attachVariantLabels(guestCart);
@@ -467,6 +503,7 @@ class AppController extends ChangeNotifier {
         } catch (_) {}
       }
     }
+    guestCartTotal = _guestCartLocalTotal();
     mark('localCart');
     // Offline-first cold start: paint every usable persisted document BEFORE
     // any network request, so a start without connectivity still shows the
@@ -570,6 +607,15 @@ class AppController extends ChangeNotifier {
   /// Runs the outbox with the safe executor (favorites/cart-merge only).
   Future<void> kickSync() => sync.run(executor: runPendingOp);
 
+  /// Resumes durable best-effort work when the app returns to foreground.
+  Future<void> handleAppResumed() async {
+    await Future.wait<void>([
+      kickSync(),
+      syncCatalogSoon(),
+      if (isLoggedIn && guestCart.isNotEmpty) _mergeGuestCartAfterLogin(),
+    ]);
+  }
+
   void kickSyncDelayed(Duration delay) {
     Future<void>.delayed(delay, () {
       try {
@@ -579,6 +625,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> setApiUrl(String url) async {
+    if (kReleaseMode) return;
     final value = url.trim();
     apiUrl = value.isEmpty ? AppConfig.defaultApiUrl : value;
     await _prefs.setString('api_url', apiUrl);
@@ -1317,6 +1364,7 @@ class AppController extends ChangeNotifier {
       await checkoutSession.clear();
     } catch (_) {}
     _checkoutSession = null;
+    unresolvedCheckout = false;
   }
 
   /// Called once at startup. If a checkout session exists, try to find a
@@ -1324,18 +1372,46 @@ class AppController extends ChangeNotifier {
   /// unresolved flag is set so the UI can block resubmission until the user
   /// reconciles manually.
   Future<void> reconcileCheckoutSession() async {
-    final key = checkoutSession.key;
+    final session = checkoutSession;
+    final scope = accountScope;
+    final key = session.key;
     if (key == null) {
       unresolvedCheckout = false;
       return;
     }
     final exists = await hasRecentOrderForSession(key);
+    // A response from the previous account/attempt must not clear a new
+    // account's checkout key while authentication or cart state changes.
+    if (scope != accountScope || session.key != key) return;
+    if (exists == null) {
+      // Lookup failed (offline/server error). Keep the session, but surface a
+      // retry/cancel choice instead of a permanent payment lock.
+      unresolvedCheckout = true;
+      notifyListeners();
+      return;
+    }
+    // A bounded history miss is not proof that checkout failed: keep the
+    // attempt locked until a positive match or explicit user cancellation.
     if (exists) {
-      await clearCheckoutSession();
+      await session.clear();
       unresolvedCheckout = false;
     } else {
       unresolvedCheckout = true;
     }
+    notifyListeners();
+  }
+
+  void markCheckoutUnresolved() {
+    unresolvedCheckout = true;
+    notifyListeners();
+  }
+
+  /// User explicitly abandons an unresolved checkout attempt. The next order
+  /// gets a fresh idempotency key.
+  Future<void> cancelUnresolvedCheckout() async {
+    await clearCheckoutSession();
+    unresolvedCheckout = false;
+    notifyListeners();
   }
 
   Future<void> _invalidateCheckoutSession() async {
@@ -1347,17 +1423,38 @@ class AppController extends ChangeNotifier {
   /// Reconciles an uncertain checkout (timeout / crash / killed app) against
   /// the authoritative order history BEFORE offering resubmission, so a timed
   /// out request that actually succeeded never becomes a duplicate order.
-  Future<bool> hasRecentOrderForSession(String sessionKey) async {
-    try {
-      final res = await api.orders(limit: 5, offset: 0);
-      if (!res.ok) return false;
-      for (final o in res.dataMaps) {
-        if ('${o['idempotency_key']}' == sessionKey) return true;
+  /// Returns `true` when an order with [sessionKey] is found, `false` when the
+  /// search completed without a match, and `null` when history is unreachable
+  /// (so callers can offer retry instead of treating it as "not found").
+  Future<bool?> hasRecentOrderForSession(String sessionKey) async {
+    // Active + completed orders, newest first. A single 5-row page used to
+    // miss confirmed orders and keep the checkout lock forever.
+    const pageSize = 50;
+    var completed = true;
+    for (final type in const [1, 2]) {
+      for (var offset = 0; offset < 150; offset += pageSize) {
+        try {
+          final res = await api.orders(
+            limit: pageSize,
+            offset: offset,
+            type: type,
+          );
+          if (!res.ok) {
+            completed = false;
+            break;
+          }
+          final rows = res.dataMaps;
+          for (final o in rows) {
+            if ('${o['idempotency_key']}' == sessionKey) return true;
+          }
+          if (rows.length < pageSize) break;
+        } catch (_) {
+          completed = false;
+          break;
+        }
       }
-      return false;
-    } catch (_) {
-      return false;
     }
+    return completed ? false : null;
   }
 
   /// Finds the delivered order line that lets the signed-in customer rate
@@ -1582,33 +1679,53 @@ class AppController extends ChangeNotifier {
     _catalogDb = db;
   }
 
+  /// Test seam: wires the Drift guest-cart mirror exactly like bootstrap does.
+  @visibleForTesting
+  Future<local_cart.LocalCartRepository> attachLocalCartForTest(
+    CatalogDatabase db,
+  ) async {
+    final repo = local_cart.LocalCartRepository(db);
+    await repo.load();
+    _localCart = repo;
+    return repo;
+  }
+
   /// Best-effort sync of the current city scope in the background. Safe to
   /// call from bootstrap/city-change/pull-to-refresh: debounced, single
   /// flight, never throws, never blocks the UI.
   ///
-  /// The debounce is PERSISTED: a full walk rewrites every catalog row plus
-  /// FTS, so it must not restart on every cold start (it previously did,
-  /// because the timestamp lived only in memory).
+  /// Successful full walks are debounced for 30 minutes. Failed attempts use
+  /// only a short in-memory cooldown, so returning connectivity is not hidden
+  /// behind a persisted failure timestamp.
   Future<void> syncCatalogSoon() async {
     if (!CatalogDbConfig.enabledForUse) return;
     final now = DateTime.now();
-    final last = _lastCatalogSyncAttempt ?? _readLastCatalogSyncAttempt();
-    if (last != null && now.difference(last) < _catalogSyncMinInterval) {
+    final success = _lastCatalogSyncSuccess ?? _readLastCatalogSyncSuccess();
+    if (success != null && now.difference(success) < _catalogSyncMinInterval) {
+      return;
+    }
+    final attempt = _lastCatalogSyncAttempt;
+    if (attempt != null && now.difference(attempt) < _catalogRetryMinInterval) {
       return;
     }
     _lastCatalogSyncAttempt = now;
-    unawaited(_persistLastCatalogSyncAttempt(now));
     try {
-      await syncCatalogNow();
+      final result = await syncCatalogNow();
+      if (result?.complete == true) {
+        final completedAt = DateTime.now();
+        _lastCatalogSyncSuccess = completedAt;
+        await _persistLastCatalogSyncSuccess(completedAt);
+      }
     } catch (_) {}
   }
 
   static const Duration _catalogSyncMinInterval = Duration(minutes: 30);
-  static const String _kLastCatalogSyncAttempt = 'catalog_sync_attempt_at';
+  static const Duration _catalogRetryMinInterval = Duration(minutes: 1);
+  static const String _kLastCatalogSyncSuccess = 'catalog_sync_success_at';
 
-  DateTime? _readLastCatalogSyncAttempt() {
+  DateTime? _readLastCatalogSyncSuccess() {
     try {
-      final raw = _prefs.getString(_kLastCatalogSyncAttempt);
+      final raw = _prefs.getString(_kLastCatalogSyncSuccess);
       if (raw == null || raw.isEmpty) return null;
       return DateTime.tryParse(raw);
     } catch (_) {
@@ -1616,10 +1733,10 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> _persistLastCatalogSyncAttempt(DateTime at) async {
+  Future<void> _persistLastCatalogSyncSuccess(DateTime at) async {
     try {
       await _prefs.setString(
-        _kLastCatalogSyncAttempt,
+        _kLastCatalogSyncSuccess,
         at.toUtc().toIso8601String(),
       );
     } catch (_) {}
@@ -1699,12 +1816,11 @@ class AppController extends ChangeNotifier {
           }
           return CatalogPage(rows: const [], ok: false, error: res.message);
         }
-        // Prefer the server total (response envelope) so walks past the
-        // first page work; fall back to the page length for compat.
-        final total = J.i(
-          res.raw['total'] ?? res.dataMap['total'],
-          res.dataMaps.length,
-        );
+        // Prefer the server total. Never invent one from the page length:
+        // a full first page would look complete and reconciliation would
+        // delete every category beyond it. -1 forces the walker to continue
+        // until an explicit empty page.
+        final total = J.i(res.raw['total'] ?? res.dataMap['total'], -1);
         return CatalogPage(rows: res.dataMaps, total: total);
       } catch (e) {
         return CatalogPage(rows: const [], ok: false, error: '$e');
@@ -2289,6 +2405,19 @@ class AppController extends ChangeNotifier {
     if (token == null || token!.isEmpty) {
       throw StateError('missing_token');
     }
+    // Never let the previous account's cart/addresses paint under the new
+    // identity while the background refresh is still in flight (or offline).
+    cart = null;
+    cartProducts = [];
+    cartSubTotal = 0;
+    addresses = [];
+    selectedAddress = null;
+    sellerGroups = [];
+    checkoutGroups = [];
+    promoCode = null;
+    unresolvedCheckout = false;
+    _checkoutSession = null;
+    _variantLabels.clear();
     user = _normalizeAuthUser(result);
     try {
       await offline.writeDoc(
@@ -2325,30 +2454,6 @@ class AppController extends ChangeNotifier {
         await api.updateFcmToken(fcmToken);
       }
     } catch (_) {}
-    // Guest->account cart migration: attempt once during login. Because
-    // bulkAddToCart is NOT idempotent, we never enqueue an automatic retry;
-    // the guest cart is kept until the next successful login merge or until
-    // the user clears it manually.
-    if (guestCart.isNotEmpty) {
-      try {
-        final pending = List<Map<String, dynamic>>.from(guestCart);
-        final ids = pending
-            .map((item) => '${item['product_variant_id']}')
-            .join(',');
-        final qtys = pending.map((item) => '${item['qty']}').join(',');
-        final merged = await api.bulkAddToCart(
-          variantIds: ids,
-          quantities: qtys,
-        );
-        if (merged.ok) {
-          guestCart = [];
-          guestCartTotal = 0;
-          await _prefs.remove('guest_cart');
-        }
-        // On failure keep guestCart in memory and in prefs; refreshCart()
-        // reconciles against the server cart without duplicating lines.
-      } catch (_) {}
-    }
     try {
       await reloadSettings();
     } catch (_) {}
@@ -2356,15 +2461,100 @@ class AppController extends ChangeNotifier {
       await resolveCity();
     } catch (_) {}
     try {
+      await _mergeGuestCartAfterLogin();
+    } catch (_) {}
+    try {
       await loadShop();
     } catch (_) {}
     try {
       await refreshCart();
     } catch (_) {}
+    try {
+      await loadAddresses();
+    } catch (_) {}
     _bumpNav();
     _bumpChrome();
     try {
       await kickSync();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> _mergeGuestCartAfterLogin() {
+    final existing = _guestMergeInFlight;
+    if (existing != null) return existing;
+    final run = _mergeGuestCartAfterLoginInner();
+    _guestMergeInFlight = run;
+    return run.whenComplete(() {
+      if (identical(_guestMergeInFlight, run)) _guestMergeInFlight = null;
+    });
+  }
+
+  @visibleForTesting
+  Future<void> mergeGuestCartForTest() => _mergeGuestCartAfterLogin();
+
+  Future<void> _mergeGuestCartAfterLoginInner() async {
+    if (!isLoggedIn || guestCart.isEmpty) return;
+    final scope = accountScope;
+    final pending = guestCart
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList(growable: false);
+
+    // Read first: a previous bulk call may have committed while its response
+    // was lost. Matching final quantities prove the intent is already applied
+    // and avoid a second non-idempotent submission.
+    final before = await refreshCart();
+    if (scope != accountScope || !before.ok) return;
+    if (_guestMergeMatches(pending, cartProducts)) {
+      await _clearMergedGuestCart();
+      return;
+    }
+
+    final merged = await api.bulkAddToCart(
+      variantIds: pending
+          .map((item) => '${item['product_variant_id']}')
+          .join(','),
+      quantities: pending.map((item) => '${item['qty']}').join(','),
+    );
+    if (scope != accountScope) return;
+    if (merged.ok) {
+      await _clearMergedGuestCart();
+      return;
+    }
+
+    // Resolve an ambiguous timeout by reading the authoritative cart once.
+    final after = await refreshCart();
+    if (scope == accountScope &&
+        after.ok &&
+        _guestMergeMatches(pending, cartProducts)) {
+      await _clearMergedGuestCart();
+    }
+  }
+
+  bool _guestMergeMatches(
+    List<Map<String, dynamic>> pending,
+    List<Map<String, dynamic>> server,
+  ) {
+    final quantities = <String, int>{};
+    for (final item in server) {
+      final id =
+          '${item['product_variant_id'] ?? item['variant_id'] ?? item['id']}';
+      quantities[id] = J.i(item['qty'] ?? item['quantity']);
+    }
+    return pending.every((item) {
+      final id = '${item['product_variant_id']}';
+      return id.isNotEmpty &&
+          id != 'null' &&
+          quantities[id] == J.i(item['qty'] ?? item['quantity']);
+    });
+  }
+
+  Future<void> _clearMergedGuestCart() async {
+    guestCart = [];
+    guestCartTotal = 0;
+    await _prefs.remove('guest_cart');
+    try {
+      await _localCart?.clear();
     } catch (_) {}
     notifyListeners();
   }
@@ -2386,17 +2576,25 @@ class AppController extends ChangeNotifier {
     user = null;
     cart = null;
     cartProducts = [];
+    cartSubTotal = 0;
     addresses = [];
     selectedAddress = null;
+    sellerGroups = [];
+    checkoutGroups = [];
     promoCode = null;
     favoriteIds = [];
+    unresolvedCheckout = false;
     _checkoutSession = null;
     _variantLabels.clear();
     try {
       await store.writeJson('variant_labels', <String, String>{});
     } catch (_) {}
     api.setToken(null);
-    await vault.clear();
+    try {
+      await vault.clear();
+    } catch (_) {
+      // Tombstone in prefs already prevents restoring the old token.
+    }
     try {
       await offline.clearAccountDocs(scope);
     } catch (_) {}
@@ -2410,6 +2608,20 @@ class AppController extends ChangeNotifier {
 
   bool _isNetworkResult(ApiResult r) =>
       r.classifiedError?.category == ApiErrorCategory.network;
+
+  bool _isEmptyCartMessage(String message) {
+    final m = message.toLowerCase();
+    if (m.isEmpty) return false;
+    return m.contains('no item') ||
+        m.contains('no_item') ||
+        m.contains('cart is empty') ||
+        m.contains('empty cart') ||
+        m.contains('cart empty') ||
+        m.contains('لا توجد عناصر') ||
+        m.contains('لا توجد منتجات') ||
+        m.contains('السلة فارغة') ||
+        m.contains('سلة فارغة');
+  }
 
   Future<ApiResult> refreshCart({int checkout = 0}) {
     return _enqueueCart(() => _refreshCartInner(checkout: checkout));
@@ -2503,15 +2715,13 @@ class AppController extends ChangeNotifier {
           if (timeSlots.isEmpty) await loadTimeSlots();
           await loadCheckoutConfig();
         }
-      } else if (result.classifiedError == null) {
-        // The server is REACHABLE and answered a business `status:0` with no
-        // transport error map. For the non-checkout cart GET the only such
-        // answer is "no items in cart" (`no_items_found_in_users_cart`): the
-        // cart is genuinely EMPTY. Clearing here is essential — the old code
-        // fell into the offline-snapshot restore below and re-materialised
-        // the line the user had just deleted, so the last item had to be
-        // deleted twice. A checkout read (is_checkout=1) can fail for
-        // delivery reasons instead, so never wipe local lines for those.
+      } else if (result.classifiedError == null &&
+          _isEmptyCartMessage(result.message)) {
+        // The server is REACHABLE and explicitly says the cart has no items.
+        // Any OTHER business status:0 (validation, temporary failure, unknown
+        // error) must not be treated as an empty cart — that wiped the user's
+        // lines and snapshot. A checkout read can also fail for delivery
+        // reasons, so only wipe local lines for the regular cart GET.
         if (checkout == 0) {
           cart = {'cart': <dynamic>[], 'sub_total': 0};
           cartProducts = [];
@@ -2732,20 +2942,9 @@ class AppController extends ChangeNotifier {
           qty: qty,
         );
       } catch (_) {
-        // Transport threw outside ApiResult: keep the optimistic change when
-        // the backend looks unreachable (offline add is accepted locally);
-        // otherwise revert and report a generic error.
-        if (api.likelyOffline) {
-          try {
-            await offline.writeDoc(
-              OfflineCache.snapshotKey('cart::$accountScope'),
-              {'products': cartProducts, 'subTotal': cartSubTotal},
-              scope: accountScope,
-            );
-          } catch (_) {}
-          await _invalidateCheckoutSession();
-          return null;
-        }
+        // Logged-in cart mutations require the server: a local-only line would
+        // be silently erased by the next authoritative refresh. Revert the
+        // optimistic change and ask for a connection instead.
         cartProducts = snapshot;
         notifyListeners();
         return api.likelyOffline
@@ -2753,18 +2952,9 @@ class AppController extends ChangeNotifier {
             : t('something_went_wrong');
       }
       if (_isNetworkResult(result)) {
-        // Offline: keep the optimistic local change (add-to-cart is accepted
-        // offline); only the final checkout is rejected. Persist a snapshot so
-        // an offline restart still shows the lines.
-        try {
-          await offline.writeDoc(
-            OfflineCache.snapshotKey('cart::$accountScope'),
-            {'products': cartProducts, 'subTotal': cartSubTotal},
-            scope: accountScope,
-          );
-        } catch (_) {}
-        await _invalidateCheckoutSession();
-        return null;
+        cartProducts = snapshot;
+        notifyListeners();
+        return kRequiresInternet;
       }
       if (result.oneSellerError == 1) {
         await _refreshCartInner(checkout: 0);
@@ -2864,31 +3054,16 @@ class AppController extends ChangeNotifier {
           variantId: variantId,
         );
       } catch (_) {
-        if (api.likelyOffline) {
-          try {
-            await offline.writeDoc(
-              OfflineCache.snapshotKey('cart::$accountScope'),
-              {'products': cartProducts, 'subTotal': cartSubTotal},
-              scope: accountScope,
-            );
-          } catch (_) {}
-          await _invalidateCheckoutSession();
-          return null;
-        }
         cartProducts = snapshot;
         notifyListeners();
-        return t('something_went_wrong');
+        return api.likelyOffline
+            ? kRequiresInternet
+            : t('something_went_wrong');
       }
       if (_isNetworkResult(result)) {
-        try {
-          await offline.writeDoc(
-            OfflineCache.snapshotKey('cart::$accountScope'),
-            {'products': cartProducts, 'subTotal': cartSubTotal},
-            scope: accountScope,
-          );
-        } catch (_) {}
-        await _invalidateCheckoutSession();
-        return null;
+        cartProducts = snapshot;
+        notifyListeners();
+        return kRequiresInternet;
       }
       if (!result.ok) {
         if (_isAlreadyRemoved(result.message)) {
@@ -2924,14 +3099,13 @@ class AppController extends ChangeNotifier {
 
   Future<void> clearAllCart() {
     return _enqueueCart(() async {
-      // Guest clear stays probe-guarded (offline keeps the cart); logged-in
-      // attempts the server clear and restores the snapshot on failure.
-      if (isGuest && !await hasInternetAccess()) return;
-      final snapshot = List<Map<String, dynamic>>.from(
-        isLoggedIn ? cartProducts : guestCart,
-      );
       if (isLoggedIn) {
+        // Logged-in clear attempts the server call and restores the snapshot
+        // on failure. The guest cart belongs to a different identity and must
+        // never be touched from this branch.
+        final snapshot = List<Map<String, dynamic>>.from(cartProducts);
         cartProducts = [];
+        cartSubTotal = 0;
         notifyListeners();
         try {
           final res = await api.clearCart();
@@ -2946,11 +3120,19 @@ class AppController extends ChangeNotifier {
           return;
         }
       } else {
+        // Guest cart is entirely local: clearing works offline too.
         guestCart = [];
+        guestCartTotal = 0;
+        try {
+          await _prefs.remove('guest_cart');
+        } catch (_) {}
+        try {
+          await _localCart?.clear();
+        } catch (_) {}
         notifyListeners();
+        await _invalidateCheckoutSession();
+        return;
       }
-      guestCart = [];
-      await _prefs.remove('guest_cart');
       await _refreshCartInner(checkout: 0);
       await _invalidateCheckoutSession();
     });
@@ -2995,6 +3177,7 @@ class AppController extends ChangeNotifier {
   /// [sync]. Server removals win on next refresh (reconciliation).
   Future<void> toggleFavorite(dynamic productId) async {
     if (!isLoggedIn) return;
+    final scope = accountScope;
     final adding = !isFavorite(productId);
     if (adding) {
       favoriteIds.add(productId);
@@ -3003,18 +3186,20 @@ class AppController extends ChangeNotifier {
     }
     try {
       await offline.writeDoc(
-        OfflineCache.favoritesKey(accountScope),
+        OfflineCache.favoritesKey(scope),
         favoriteIds.toList(),
-        scope: accountScope,
+        scope: scope,
       );
     } catch (_) {}
     notifyListeners();
     final res = adding
         ? await api.addFavorite(productId)
         : await api.removeFavorite(productId);
+    // Never file account A's delayed result under account B.
+    if (scope != accountScope) return;
     if (!res.ok) {
       try {
-        await PendingOutbox(store, accountScope).enqueue(
+        final queued = await PendingOutbox(store, scope).enqueue(
           PendingOp(
             id: PendingOutbox.newId('fav'),
             type: adding
@@ -3024,12 +3209,43 @@ class AppController extends ChangeNotifier {
               'product_id': '$productId',
               // Owning account: the executor drops this op if the active
               // account changed before replay (never mutate B with A's intent).
-              'account_scope': accountScope,
+              'account_scope': scope,
             },
             createdAt: DateTime.now(),
           ),
         );
-      } catch (_) {}
+        if (!queued) {
+          // Accepting the optimistic state requires durable persistence. When
+          // the bounded queue/store refuses it, restore the previous truth.
+          if (adding) {
+            favoriteIds.removeWhere((id) => '$id' == '$productId');
+          } else if (!isFavorite(productId)) {
+            favoriteIds.add(productId);
+          }
+          await offline.writeDoc(
+            OfflineCache.favoritesKey(scope),
+            favoriteIds.toList(),
+            scope: scope,
+          );
+          notifyListeners();
+          return;
+        }
+      } catch (_) {
+        if (adding) {
+          favoriteIds.removeWhere((id) => '$id' == '$productId');
+        } else if (!isFavorite(productId)) {
+          favoriteIds.add(productId);
+        }
+        try {
+          await offline.writeDoc(
+            OfflineCache.favoritesKey(scope),
+            favoriteIds.toList(),
+            scope: scope,
+          );
+        } catch (_) {}
+        notifyListeners();
+        return;
+      }
       kickSyncDelayed(const Duration(seconds: 5));
     } else {
       // Direct success supersedes any queued opposite intent for this
@@ -3038,7 +3254,7 @@ class AppController extends ChangeNotifier {
       // Only same-product favorite ops in the current scope are cancelled;
       // every other queued op keeps its retry guarantees.
       try {
-        final outbox = PendingOutbox(store, accountScope);
+        final outbox = PendingOutbox(store, scope);
         final stale = outbox.load().where(
           (o) =>
               (adding

@@ -862,7 +862,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (fullWalletCover) method = 'Wallet';
     final codAllowed = J.flag(checkout?['cod_allowed'] ?? 1);
     final address = app.selectedAddress;
-    final bh = app.businessHours;
     final canPlace = app.canPlaceOrder();
     final sellerGroups = app.sellerGroups;
     final deliveryFees = app.deliveryFees;
@@ -913,8 +912,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
           if (app.minOrderAmount > 0 && subTotal < app.minOrderAmount)
             const SizedBox(height: 12),
-          // Business hours banner parity with front BusinessHoursBanner
-          if (bh != null && !canPlace.allowed)
+          // Business hours banner parity with front BusinessHoursBanner.
+          // Show it even when hours are unavailable, otherwise the pay button
+          // is disabled with no explanation at all.
+          if (!canPlace.allowed)
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -930,6 +931,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     child: Text(
                       canPlace.reason == 'platform'
                           ? buildMarketplaceClosedMessage(canPlace.status)
+                          : canPlace.reason == 'unavailable'
+                          ? app.t('business_hours_unavailable')
                           : buildSellerClosedMessage(
                               canPlace.status,
                               canPlace.status?.storeName ?? '',
@@ -940,7 +943,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 ],
               ),
             ),
-          if (bh != null && !canPlace.allowed) const SizedBox(height: 12),
+          if (!canPlace.allowed) const SizedBox(height: 12),
           // ── Delivery addresses (web parity: inline radio list, not a
           // single tile that forces leaving checkout) ──
           Card(
@@ -1700,7 +1703,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     double wallet,
     Map<String, dynamic> address,
   ) async {
+    if (placing) return;
+    setState(() => placing = true);
     if (app.unresolvedCheckout) {
+      setState(() => placing = false);
       await showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -1708,8 +1714,24 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           content: Text(app.t('unresolved_checkout_message')),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: Text(app.t('cancel')),
+              onPressed: () async {
+                Navigator.pop(ctx);
+                await app.reconcileCheckoutSession();
+                if (!mounted) return;
+                if (app.unresolvedCheckout) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(app.t('order_lookup_failed'))),
+                  );
+                }
+              },
+              child: Text(app.t('retry')),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                await app.cancelUnresolvedCheckout();
+              },
+              child: Text(app.t('unresolved_checkout_clear')),
             ),
             FilledButton(
               onPressed: () {
@@ -1726,11 +1748,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final online = await app.hasInternetAccess();
     if (!mounted) return;
     if (!online) {
+      setState(() => placing = false);
       await showRequiresInternetDialog(context);
       return;
     }
-    if (!mounted) return;
-    setState(() => placing = true);
     // Stable session key: identical across retries of this logical order so
     // the backend can deduplicate. Fresh-timestamp-per-tap would not.
     final payMethod = (walletUsed && finalTotal == 0) ? 'Wallet' : method;
@@ -1740,13 +1761,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       deliveryTime: deliveryTime,
       promoCodeId: app.promoCode?['id'] ?? app.promoCode?['promo_code_id'],
     );
-    final idempotencyKey = await app.checkoutKey(
-      context: {
-        'address_id': '${address['id']}',
-        'sellers': app.sellerGroups.length,
-        'fingerprint': fingerprint,
-      },
-    );
+    late final String idempotencyKey;
+    try {
+      idempotencyKey = await app.checkoutKey(
+        context: {
+          'address_id': '${address['id']}',
+          'sellers': app.sellerGroups.length,
+          'fingerprint': fingerprint,
+        },
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => placing = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(app.t('something_went_wrong'))));
+      return;
+    }
     // POST /customer/checkout is the single, idempotent checkout endpoint and
     // supports multi-seller carts. The legacy placeMultiSellerOrder route does
     // not exist on the backend and must not be used.
@@ -1764,16 +1795,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       // Uncertain result (timeout/unreachable) keeps the session: the order
       // may have succeeded server-side. Reconcile via history BEFORE any
       // resubmission instead of blindly retrying with a new key.
+      final checkoutErrorCode =
+          result.classifiedError?.publicCode.toUpperCase() ?? '';
       final uncertain =
+          result.classifiedError?.category == ApiErrorCategory.network ||
+          checkoutErrorCode == 'CHECKOUT_IN_PROGRESS' ||
+          checkoutErrorCode == 'CHECKOUT_REVIEW_REQUIRED' ||
+          app.api.likelyOffline ||
           result.message.isEmpty ||
           RegExp(
-            r'timeout|timed out|network|unreachable|try again|unavailable',
+            r'timeout|timed out|network|unreachable|try again|unavailable|تعذر الاتصال|انتهت مهلة|الإنترنت',
             caseSensitive: false,
           ).hasMatch(result.message);
       if (uncertain) {
+        app.markCheckoutUnresolved();
         final exists = await app.hasRecentOrderForSession(idempotencyKey);
         if (!mounted) return;
-        if (exists) {
+        if (exists == true) {
           await app.clearCheckoutSession();
           await app.refreshCart();
           if (!mounted) return;
@@ -1783,8 +1821,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           );
           return;
         }
-        // Keep session: the SAME key will be resent on the next attempt.
+        if (exists == null || exists == false) {
+          // Could not verify history. Keep the session; the next tap resends
+          // the SAME key, so a successful first attempt is deduplicated.
+          setState(() => placing = false);
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(app.t('order_lookup_failed'))),
+            );
+          }
+          return;
+        }
+      } else {
+        // A definitive validation/business refusal cannot have created an
+        // order. Release its key so corrected form/cart data gets a new one.
+        await app.clearCheckoutSession();
       }
+      if (!mounted) return;
       setState(() => placing = false);
       // Network-class failure: dedicated offline message (cart + session
       // kept, never reported as success). Other failures keep the backend's
@@ -1810,50 +1863,76 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
       return;
     }
-    await app.clearCheckoutSession();
-    await _clearDraft();
-    _draftRestored = false;
-    // gateway handling like front initiate_transaction
+    // Keep the idempotency session/draft until the gateway actually starts.
+    // The order already exists; clearing the key here and then failing to
+    // initialize the gateway made a retry create a SECOND order.
     if (_isGateway(payMethod)) {
       final checkoutGroupId =
           result.dataMap['checkout_group_id'] ??
           result.dataMap['id'] ??
           result.dataMap['group_id'];
-      if (checkoutGroupId != null) {
-        final init = await app.api.initiateTransactionForCheckoutGroup(
-          checkoutGroupId: checkoutGroupId,
-          paymentMethod: payMethod,
+      if (checkoutGroupId == null) {
+        setState(() => placing = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(app.t('order_created_payment_pending'))),
         );
-        if (!mounted) return;
-        if (!init.ok) {
-          setState(() => placing = false);
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(init.message)));
-          return;
-        }
-        // Parity with front: open gateway redirect (Stripe/Paypal/Cashfree/...) externally.
-        final data = init.dataMap;
-        final url = J.str(
-          data['url'] ??
-              data['redirect_url'] ??
-              data['redirectUrl'] ??
-              data['snap_url'] ??
-              data['payment_url'] ??
-              data['paymentUrl'],
+        return;
+      }
+      final init = await app.api.initiateTransactionForCheckoutGroup(
+        checkoutGroupId: checkoutGroupId,
+        paymentMethod: payMethod,
+      );
+      if (!mounted) return;
+      if (!init.ok) {
+        setState(() => placing = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              init.message.isEmpty
+                  ? app.t('order_created_payment_pending')
+                  : '${app.t('order_created_payment_pending')} ${init.message}',
+            ),
+          ),
         );
-        if (url.isNotEmpty && mounted) {
-          final uri = Uri.tryParse(url);
-          if (uri != null) {
-            await launchUrl(uri, mode: LaunchMode.externalApplication);
-          } else {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(SnackBar(content: Text(url)));
-          }
+        return;
+      }
+      // Parity with front: open gateway redirect (Stripe/Paypal/Cashfree/...) externally.
+      final data = init.dataMap;
+      final url = J.str(
+        data['url'] ??
+            data['redirect_url'] ??
+            data['redirectUrl'] ??
+            data['snap_url'] ??
+            data['payment_url'] ??
+            data['paymentUrl'],
+      );
+      final uri = Uri.tryParse(url);
+      var launched = false;
+      if (uri != null) {
+        try {
+          launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+        } catch (_) {
+          launched = false;
         }
       }
+      if (!mounted) return;
+      if (!launched) {
+        setState(() => placing = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              uri == null && url.isNotEmpty
+                  ? url
+                  : app.t('order_created_payment_pending'),
+            ),
+          ),
+        );
+        return;
+      }
     }
+    await app.clearCheckoutSession();
+    await _clearDraft();
+    _draftRestored = false;
     setState(() => placing = false);
     app.clearPromo();
     await app.refreshCart();

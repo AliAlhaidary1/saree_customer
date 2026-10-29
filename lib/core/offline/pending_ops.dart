@@ -46,10 +46,10 @@ class PendingOp {
   static PendingOp? fromJson(dynamic v) {
     if (v is! Map) return null;
     try {
-      final type = PendingOpType.values.firstWhere(
-        (t) => t.name == '${v['type']}',
-        orElse: () => PendingOpType.favoriteAdd,
-      );
+      final rawType = '${v['type']}';
+      final matches = PendingOpType.values.where((t) => t.name == rawType);
+      if (matches.isEmpty) return null;
+      final type = matches.first;
       final created = v['createdAt'] is int
           ? DateTime.fromMillisecondsSinceEpoch(v['createdAt'] as int)
           : DateTime.now();
@@ -108,13 +108,10 @@ class PendingOutbox {
     return ops;
   }
 
-  Future<void> _save(List<PendingOp> ops) async {
-    final trimmed = ops.length > maxOps
-        ? ops.sublist(ops.length - maxOps)
-        : ops;
-    await _store.writeString(
+  Future<bool> _save(List<PendingOp> ops) {
+    return _store.writeString(
       _key,
-      jsonEncode(trimmed.map((o) => o.toJson()).toList()),
+      jsonEncode(ops.map((o) => o.toJson()).toList()),
     );
   }
 
@@ -128,20 +125,20 @@ class PendingOutbox {
     if (op.type == PendingOpType.favoriteAdd ||
         op.type == PendingOpType.favoriteRemove) {
       final pid = '${op.payload['product_id']}';
+      // Collapse add+remove pairs for the same product into the latest op.
       ops.removeWhere(
         (e) =>
             (e.type == PendingOpType.favoriteAdd ||
                 e.type == PendingOpType.favoriteRemove) &&
             '${e.payload['product_id']}' == pid,
       );
-      // Collapse add+remove pairs for the same product into the latest op.
-      if (ops.isEmpty || true) {
-        // keep latest only (already removed older ones above)
-      }
     }
+    // Never discard an older acknowledged local intent to make room. The
+    // caller can revert the optimistic UI when the bounded durable queue is
+    // full, keeping local state honest instead of silently diverging.
+    if (ops.length >= maxOps) return false;
     ops.add(op);
-    await _save(ops);
-    return true;
+    return _save(ops);
   }
 
   Future<void> remove(String id) async {

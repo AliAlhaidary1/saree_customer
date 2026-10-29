@@ -11,8 +11,9 @@ import 'catalog_db/catalog_database.dart';
 
 /// True when [url] is worth downloading: absolute http(s) URL whose path does
 /// not point at a format neither Android nor the downscaler can decode
-/// (HEIC/HEIF/AVIF/TIFF typically come from phone uploads; the platform
-/// decoder rejects them with 'unimplemented' and they can never display).
+/// (HEIC/HEIF/AVIF/TIFF typically come from phone uploads; SVG is vector and
+/// the raster decoder cannot handle it). These can never become thumbnails, so
+/// downloading them would only waste bandwidth.
 bool _fetchableImageUrl(String url) {
   final lower = url.toLowerCase();
   if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
@@ -20,7 +21,14 @@ bool _fetchableImageUrl(String url) {
   }
   try {
     final path = Uri.parse(url).path.toLowerCase();
-    for (final ext in const ['.heic', '.heif', '.avif', '.tif', '.tiff']) {
+    for (final ext in const [
+      '.heic',
+      '.heif',
+      '.avif',
+      '.tif',
+      '.tiff',
+      '.svg',
+    ]) {
       if (path.endsWith(ext)) return false;
     }
   } catch (_) {
@@ -241,8 +249,7 @@ class ImagePrefetch {
             continue;
           }
           if (thumb.isEmpty) continue;
-          if (manifestBytes + thumb.length >
-              CatalogDbConfig.imageBudgetBytes) {
+          if (manifestBytes + thumb.length > CatalogDbConfig.imageBudgetBytes) {
             await evict(thumb.length);
             manifestBytes = await refreshManifestBytes();
             if (manifestBytes + thumb.length >

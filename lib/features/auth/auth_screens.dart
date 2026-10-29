@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/api/api_errors.dart';
 import '../../core/app_controller.dart';
 import '../../core/app_theme.dart';
+import '../../core/auth/token_vault.dart';
 import '../../core/otp_resend.dart';
 import '../../core/yemen_phone.dart';
 import '../../core/config.dart';
@@ -529,7 +530,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 ],
                               ),
                             ),
-                          if (_forgotSuccess != null)
+                          if (_forgotSuccess != null && view != 'login')
                             Padding(
                               padding: const EdgeInsets.only(top: 8),
                               child: Text(
@@ -776,11 +777,10 @@ class _LoginScreenState extends State<LoginScreen> {
           });
         }
       } else if (view == 'forgot') {
-        final result = await app.api.forgotPasswordOtp(
-          mobile: mobile.text.trim(),
-        );
+        final number = mobile.text.trim();
+        final result = await app.api.forgotPasswordOtp(mobile: number);
         if (!mounted) return;
-        _handleForgotSendResult(result, isBackground: false);
+        _handleForgotSendResult(result, isBackground: false, number: number);
       } else {
         if (otp.text.trim().isEmpty || newPassword.text.isEmpty) {
           setState(() => error = app.t('please_fill_all_required_fields'));
@@ -801,12 +801,17 @@ class _LoginScreenState extends State<LoginScreen> {
           } else {
             setState(() {
               view = 'login';
-              error = app.t('password_reset_ok');
+              error = null;
+              _forgotSuccess = app.t('password_reset_ok');
             });
           }
         }
       }
-    } catch (e) {
+    } on TokenVaultException {
+      if (mounted) setState(() => error = app.t('auth_session_error'));
+    } on StateError {
+      if (mounted) setState(() => error = app.t('auth_token_missing'));
+    } catch (_) {
       if (mounted) setState(() => error = app.t('network_error'));
     } finally {
       if (mounted) setState(() => busy = false);
@@ -823,6 +828,7 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _handleForgotSendResult(
     ApiResult result, {
     required bool isBackground,
+    String? number,
   }) async {
     if (!result.ok &&
         !isBackground &&
@@ -852,11 +858,9 @@ class _LoginScreenState extends State<LoginScreen> {
       final fallback = result.message;
       if (fallback.isNotEmpty &&
           !fallback.toLowerCase().contains('request failed')) {
-        final m = RegExp(r'\d+').firstMatch(fallback);
-        if (m != null) {
-          final v = int.tryParse(m.group(0) ?? '') ?? 0;
-          if (v > 0 && v <= 600) retryAfter = v;
-        }
+        // Same strict parser as the raw payload: only "wait N seconds/minutes",
+        // never the first number of a generic error.
+        retryAfter = extractOtpRetryAfter(const {}, fallback);
       }
     }
     final reason = extractOtpReason(raw);
@@ -897,9 +901,10 @@ class _LoginScreenState extends State<LoginScreen> {
       _showForgotSentSnack(sent);
       if (_forgotGate.canBackground) {
         final delay = retryAfter > 0 ? retryAfter : 60;
+        final sentTo = (number ?? mobile.text).trim();
         _forgotGate.scheduleBackground(Duration(seconds: delay), () {
           if (!mounted) return;
-          _backgroundForgotSend();
+          _backgroundForgotSend(sentTo);
         });
       }
       return;
@@ -925,7 +930,7 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       final result = await appController.api.forgotPasswordOtp(mobile: number);
       if (!mounted) return;
-      _handleForgotSendResult(result, isBackground: false);
+      _handleForgotSendResult(result, isBackground: false, number: number);
     } catch (_) {
       if (mounted) setState(() => error = appController.t('network_error'));
     } finally {
@@ -933,13 +938,13 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> _backgroundForgotSend() async {
+  Future<void> _backgroundForgotSend([String? number]) async {
     try {
-      final number = mobile.text.trim();
-      if (number.isEmpty || !YemenPhone.isValid(number)) return;
-      final result = await appController.api.forgotPasswordOtp(mobile: number);
+      final target = (number ?? mobile.text).trim();
+      if (target.isEmpty || !YemenPhone.isValid(target)) return;
+      final result = await appController.api.forgotPasswordOtp(mobile: target);
       if (!mounted) return;
-      _handleForgotSendResult(result, isBackground: true);
+      _handleForgotSendResult(result, isBackground: true, number: target);
     } catch (_) {}
   }
 }
@@ -963,6 +968,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   bool busy = false;
   bool acceptedTerms = false;
   bool otpSending = false;
+  bool _otpBypassed = false;
   bool hidePassword = true;
   bool hideConfirm = true;
   String? otpMethod;
@@ -1752,9 +1758,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
       error = null;
     });
     try {
-      final result = await _requestRegisterOtp();
+      final number = mobile.text.trim();
+      final result = await _requestRegisterOtp(number);
       if (!mounted) return;
-      _handleRegisterOtpResult(result);
+      _handleRegisterOtpResult(result, number: number);
     } catch (_) {
       if (mounted) setState(() => error = app.t('network_error'));
     } finally {
@@ -1762,11 +1769,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
     }
   }
 
-  Future<ApiResult> _requestRegisterOtp() {
+  Future<ApiResult> _requestRegisterOtp([String? number]) {
     final app = appController;
     final cityId = int.tryParse('${app.city?['id']}');
     return app.api.sendSms(
-      mobile.text.trim(),
+      (number ?? mobile.text).trim(),
       cityId: cityId,
       channel: otpMethod,
       purpose: 'register',
@@ -1780,8 +1787,19 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
   }
 
-  void _handleRegisterOtpResult(ApiResult result) {
+  void _handleRegisterOtpResult(ApiResult result, {String? number}) {
     if (result.ok) {
+      if (result.dataMap['requires_otp'] == false) {
+        const bypassText = 'تم السماح بالتسجيل مؤقتاً بسبب توقف بوابة التحقق';
+        _otpGate.cancelBackground();
+        setState(() {
+          _otpBypassed = true;
+          _otpSuccess = bypassText;
+          error = null;
+        });
+        _showRegisterSentSnack(bypassText);
+        return;
+      }
       final sent = otpT('otp_sent_successfully', 'تم إرسال الرمز بنجاح');
       _otpGate.lock();
       _otpGate.cancelBackground();
@@ -1799,11 +1817,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
       final fallback = result.message;
       if (fallback.isNotEmpty &&
           !fallback.toLowerCase().contains('request failed')) {
-        final m = RegExp(r'\d+').firstMatch(fallback);
-        if (m != null) {
-          final v = int.tryParse(m.group(0) ?? '') ?? 0;
-          if (v > 0 && v <= 600) retryAfter = v;
-        }
+        // Same strict parser as the raw payload: only "wait N seconds/minutes",
+        // never the first number of a generic error.
+        retryAfter = extractOtpRetryAfter(const {}, fallback);
       }
     }
     final reason = extractOtpReason(raw);
@@ -1843,9 +1859,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _showRegisterSentSnack(sent);
       if (_otpGate.canBackground) {
         final delay = retryAfter > 0 ? retryAfter : 60;
+        final sentTo = (number ?? mobile.text).trim();
         _otpGate.scheduleBackground(Duration(seconds: delay), () {
           if (!mounted) return;
-          _backgroundRegisterSend();
+          _backgroundRegisterSend(sentTo);
         });
       }
       return;
@@ -1856,11 +1873,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
     });
   }
 
-  Future<void> _backgroundRegisterSend() async {
+  Future<void> _backgroundRegisterSend([String? number]) async {
     try {
-      final result = await _requestRegisterOtp();
+      final target = (number ?? mobile.text).trim();
+      final result = await _requestRegisterOtp(target);
       if (!mounted) return;
-      _handleRegisterOtpResult(result);
+      _handleRegisterOtpResult(result, number: target);
     } catch (_) {}
   }
 
@@ -1896,7 +1914,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
         return;
       }
     }
-    if (_availableOtpMethods(cityConfig).isNotEmpty &&
+    if (!_otpBypassed &&
+        _availableOtpMethods(cityConfig).isNotEmpty &&
         otp.text.trim().isEmpty) {
       setState(() => error = app.t('enter_otp'));
       return;
@@ -1933,6 +1952,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
           if (mounted) context.go('/addresses');
         });
       }
+    } on TokenVaultException {
+      if (mounted) setState(() => error = app.t('auth_session_error'));
+    } on StateError {
+      if (mounted) setState(() => error = app.t('auth_token_missing'));
     } catch (_) {
       if (mounted) setState(() => error = app.t('network_error'));
     } finally {

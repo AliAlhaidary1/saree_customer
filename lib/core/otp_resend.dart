@@ -60,9 +60,15 @@ int extractOtpRetryAfter(Map<String, dynamic> raw, String message) {
     final v = _asPositiveInt(c);
     if (v > 0) return v;
   }
-  final match = RegExp(r'\d+').firstMatch(message);
+  // Only an explicit "wait N seconds/minutes" phrase is a cooldown. Scraping
+  // the first number in arbitrary errors turned error codes (500) and phone
+  // numbers into false cooldowns, suppressing real OTP failures.
+  final match = RegExp(
+    r'(\d{1,3})\s*(?:ثانية|ثواني|ثوان|دقيقة|دقائق|دقايق|seconds?|secs?|minutes?|mins?)',
+    caseSensitive: false,
+  ).firstMatch(message);
   if (match != null) {
-    final v = int.tryParse(match.group(0) ?? '') ?? 0;
+    final v = int.tryParse(match.group(1) ?? '') ?? 0;
     if (v > 0 && v <= 600) return v;
   }
   return 0;
@@ -121,7 +127,7 @@ final _coolReason = RegExp(
 );
 
 final _coolMessage = RegExp(
-  r'انتظر|ثوان|ثانية|دقيقة|الساعي|ساعة|متاح|لاحق|مؤقت|كثير|الحد|إعادة|wait|second|minute|hour|availab|later|temporar|many|limit|throttl|too many|try again|retry|cooldown|rate.?limit',
+  r'انتظر|ثوان|ثانية|دقيقة|الساعي|ساعة|كثير|الحد|wait|second|minute|hour|many|limit|throttl|too many|cooldown|rate.?limit|try again later|temporarily unavailable',
   caseSensitive: false,
 );
 
@@ -174,7 +180,7 @@ class OtpResendGate {
   Timer? _unlockTimer;
   Timer? _bgTimer;
   int bgTries = 0;
-  static const int maxBgTries = 2;
+  static const int maxBgTries = 0;
 
   bool get canSend => !DateTime.now().isBefore(allowedAt);
 

@@ -7,7 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// read state, so "viewed = read" and read IDs are stored locally per user.
 class NotificationRead {
   static const _prefix = 'sreamart_notif_read_';
-  static const _cap = 500;
+  static const _cap = 5000;
 
   static String keyFor(dynamic userId) {
     final uid = userId == null || '$userId'.isEmpty ? 'guest' : '$userId';
@@ -32,14 +32,19 @@ class NotificationRead {
     }
   }
 
-  static Future<List<String>> markAsRead(dynamic userId, List<dynamic> ids) async {
+  static Future<List<String>> markAsRead(
+    dynamic userId,
+    List<dynamic> ids,
+  ) async {
     final incoming = _normalize(ids);
     if (incoming.isEmpty) return getReadIds(userId);
     try {
       final prefs = await SharedPreferences.getInstance();
       final prev = await getReadIds(userId);
       final merged = {...prev, ...incoming}.toList();
-      final trimmed = merged.length > _cap ? merged.sublist(merged.length - _cap) : merged;
+      final trimmed = merged.length > _cap
+          ? merged.sublist(merged.length - _cap)
+          : merged;
       await prefs.setString(keyFor(userId), jsonEncode(trimmed));
       return trimmed;
     } catch (_) {

@@ -12,6 +12,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/app_controller.dart';
+import '../../core/app_navigation.dart';
 import '../../core/akhdimni_status.dart';
 import '../../core/city_mode.dart';
 import '../../core/json_util.dart';
@@ -313,7 +314,7 @@ class AccountScreen extends StatelessWidget {
       leading: Icon(icon, color: appController.accentColor),
       title: Text(title),
       trailing: const Icon(Icons.chevron_left),
-      onTap: () => context.push(path),
+      onTap: () => openAppLocation(context, path),
     );
   }
 
@@ -328,7 +329,7 @@ class AccountScreen extends StatelessWidget {
     return Card(
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: () => context.push(path),
+        onTap: () => openAppLocation(context, path),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 14),
           child: Column(
@@ -401,7 +402,7 @@ class AccountScreen extends StatelessWidget {
       leading: Icon(icon),
       title: Text(title),
       trailing: const Icon(Icons.chevron_left),
-      onTap: () => context.push(path),
+      onTap: () => openAppLocation(context, path),
     );
   }
 
@@ -416,7 +417,8 @@ class AccountScreen extends StatelessWidget {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) {
           final valid =
-              confirmationController.text.trim().toUpperCase() == 'DELETE';
+              confirmationController.text.trim().toUpperCase() == 'DELETE' &&
+              passwordController.text.isNotEmpty;
           return AlertDialog(
             title: Text(app.t('delete_account')),
             content: Column(
@@ -475,9 +477,7 @@ class AccountScreen extends StatelessWidget {
     if (ok != true || !context.mounted) return;
     final error = await app.deleteAccount(
       confirmation: confirmationController.text.trim().toUpperCase(),
-      password: passwordController.text.trim().isEmpty
-          ? null
-          : passwordController.text.trim(),
+      password: passwordController.text,
     );
     if (!context.mounted) return;
     if (error != null) {
@@ -504,21 +504,41 @@ class _OrdersScreenState extends State<OrdersScreen>
   List<Map<String, dynamic>> active = [];
   List<Map<String, dynamic>> previous = [];
   bool loading = true;
+  bool loadingMore = false;
+  bool _hasMore = true;
   int page = 1;
   int totalActive = 0;
   int _seq = 0;
   static const _perPage = 10;
+  final _activeScroll = ScrollController();
+  final _previousScroll = ScrollController();
 
   @override
   void initState() {
     super.initState();
+    _activeScroll.addListener(() => _maybeLoadMore(_activeScroll));
+    _previousScroll.addListener(() => _maybeLoadMore(_previousScroll));
     _load();
   }
 
   @override
   void dispose() {
+    _activeScroll.dispose();
+    _previousScroll.dispose();
     tab.dispose();
     super.dispose();
+  }
+
+  void _maybeLoadMore(ScrollController controller) {
+    if (!controller.hasClients || loading || loadingMore || !_hasMore) return;
+    if (controller.position.pixels <
+        controller.position.maxScrollExtent - 300) {
+      return;
+    }
+    setState(() => loadingMore = true);
+    _load(more: true).whenComplete(() {
+      if (mounted) setState(() => loadingMore = false);
+    });
   }
 
   /// Parity with front Order.jsx fetchOrders: legacy active + legacy prev +
@@ -616,6 +636,10 @@ class _OrdersScreenState extends State<OrdersScreen>
         totalActive =
             legacyActiveParsed.total + groupsParsed.total + akhActive.length;
       }
+      // A full page on either tab means another offset may exist. Combined
+      // with the scroll listener this enables the pagination the screen
+      // previously never triggered (`_load(more: true)` had no caller).
+      _hasMore = freshActive.length >= _perPage || freshPrev.length >= _perPage;
       loading = false;
     });
   }
@@ -726,10 +750,19 @@ class _OrdersScreenState extends State<OrdersScreen>
     return RefreshIndicator(
       onRefresh: () => _load(),
       child: ListView.separated(
+        controller: isActiveTab ? _activeScroll : _previousScroll,
         padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
-        itemCount: items.length,
+        itemCount: items.length + (loadingMore ? 1 : 0),
         separatorBuilder: (_, _) => const SizedBox(height: 10),
-        itemBuilder: (_, i) => _orderCard(items[i]),
+        itemBuilder: (_, i) {
+          if (i >= items.length) {
+            return const Padding(
+              padding: EdgeInsets.all(16),
+              child: Center(child: CircularProgressIndicator()),
+            );
+          }
+          return _orderCard(items[i]);
+        },
       ),
     );
   }
@@ -1081,6 +1114,7 @@ class OrderDetailsScreen extends StatefulWidget {
 class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   Map<String, dynamic>? order;
   bool loading = true;
+  bool _loadFailed = false;
   bool cancellingGroup = false;
 
   @override
@@ -1105,6 +1139,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         setState(() {
           order = J.map(payload);
           loading = false;
+          _loadFailed = false;
           _servedFromCache = true;
         });
       }
@@ -1123,6 +1158,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         setState(() {
           order = data;
           loading = false;
+          _loadFailed = false;
           _servedFromCache = false;
         });
         return;
@@ -1143,6 +1179,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       setState(() {
         order = data;
         loading = false;
+        _loadFailed = false;
         _servedFromCache = false;
       });
       return;
@@ -1150,7 +1187,8 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     // Refresh failed: keep cached row if available.
     if (!mounted) return;
     setState(() {
-      loading = order == null;
+      loading = false;
+      _loadFailed = order == null;
       _servedFromCache = order != null;
     });
   }
@@ -1395,11 +1433,14 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       if (mounted) await showRequiresInternetDialog(context);
       return;
     }
+    final ratingTarget = order?['is_checkout_group'] == true
+        ? {'checkout_group_id': order?['id'] ?? widget.id}
+        : {'order_id': order?['id'] ?? widget.id};
     final result = await appController.api.rateSeller({
       'seller_id': sellerId,
       'rate': res.stars,
       'review': res.review,
-      'order_id': order?['id'] ?? widget.id,
+      ...ratingTarget,
     });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1421,11 +1462,14 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       if (mounted) await showRequiresInternetDialog(context);
       return;
     }
+    final ratingTarget = order?['is_checkout_group'] == true
+        ? {'checkout_group_id': order?['id'] ?? widget.id}
+        : {'order_id': order?['id'] ?? widget.id};
     final result = await appController.api.rateDeliveryBoy({
       'delivery_boy_id': courierId,
       'rate': res.stars,
       'review': res.review,
-      'order_id': order?['id'] ?? widget.id,
+      ...ratingTarget,
     });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1509,10 +1553,13 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       return Scaffold(
         appBar: AppBar(title: Text('${app.t('order')} ${widget.id}')),
         body: EmptyState(
-          message: app.t('no_order'),
+          message: app.t(_loadFailed ? 'order_lookup_failed' : 'no_order'),
           actionLabel: app.t('retry'),
           onAction: () {
-            setState(() => loading = true);
+            setState(() {
+              loading = true;
+              _loadFailed = false;
+            });
             _load();
           },
         ),
@@ -1540,6 +1587,12 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     );
     final trackingOn =
         app.orderTrackingEnabled || J.flag(order?['order_tracking_enabled']);
+    final addressSnapshot = order?['address_snapshot'];
+    final trackingStatus = J.str(
+      order?['tracking_status'] ??
+          order?['delivery_status'] ??
+          (addressSnapshot is Map ? J.str(addressSnapshot['city']) : ''),
+    );
     final blocked = J.str(order?['cancel_blocked_reason']);
     final publicId = J.str(order?['public_id']).isNotEmpty
         ? J.str(order?['public_id'])
@@ -1910,15 +1963,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                   app.t('track_order'),
                   style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
-                subtitle: Text(
-                  J.str(
-                    order?['tracking_status'] ??
-                            order?['delivery_status'] ??
-                            order?['address_snapshot'] is Map
-                        ? J.str((order?['address_snapshot'] as Map)['city'])
-                        : '—',
-                  ),
-                ),
+                subtitle: Text(trackingStatus.isEmpty ? '—' : trackingStatus),
               ),
             ],
 
@@ -2696,8 +2741,29 @@ class _AddressesScreenState extends State<AddressesScreen> {
     String addressType = rawType.isNotEmpty ? rawType : 'Home';
     const types = ['Home', 'Office', 'Shop', 'Other'];
     if (!types.contains(addressType)) addressType = 'Home';
-    final city = app.city;
-    final cityId = int.tryParse('${city?['id']}');
+    final existingCityId = int.tryParse('${existing?['city_id']}');
+    // Editing an address must keep its own city, not the city currently being
+    // browsed. Only fall back to the browse city when the address has no city.
+    final city = existing != null
+        ? (cityFromAddress(existing, app.cities) ??
+              (existingCityId != null ||
+                      J.str(existing['city']).isNotEmpty ||
+                      J.str(existing['city_id']).isNotEmpty
+                  ? <String, dynamic>{
+                      'id': existing['city_id'] ?? existingCityId,
+                      'name': J.str(existing['city']),
+                      'state': J.str(existing['state']),
+                      'latitude': existing['latitude'],
+                      'longitude': existing['longitude'],
+                    }
+                  : app.city))
+        : app.city;
+    final cityId = int.tryParse('${city?['id']}') ?? existingCityId;
+    final cityChanged =
+        existing != null &&
+        existingCityId != null &&
+        cityId != null &&
+        cityId != existingCityId;
     List<Map<String, dynamic>> dynamicFields = [];
     Map<String, dynamic> customFields = {};
     if (cityId != null) {
@@ -2800,20 +2866,32 @@ class _AddressesScreenState extends State<AddressesScreen> {
       ).showSnackBar(SnackBar(content: Text(app.t('fill_required_fields'))));
       return;
     }
+    final addressLatitude = cityChanged
+        ? (city == null ? null : city['latitude'])
+        : (existing?['latitude'] ?? (city == null ? null : city['latitude']));
+    final addressLongitude = cityChanged
+        ? (city == null ? null : city['longitude'])
+        : (existing?['longitude'] ?? (city == null ? null : city['longitude']));
     final fields = {
       'name': name.text.trim(),
       'mobile': mobile.text.trim(),
       'type': addressType,
       'address': address.text.trim(),
       'landmark': J.str(existing?['landmark']),
-      'area': J.str(existing?['area'] ?? city?['name']),
+      'area': J.str(existing?['area']).isNotEmpty
+          ? J.str(existing?['area'])
+          : J.str(city?['name']),
       'pincode': J.str(existing?['pincode']),
-      'city': J.str(city?['name']),
-      'city_id': city?['id'],
-      'state': J.str(existing?['state'] ?? city?['state']),
+      'city': J.str(existing?['city']).isNotEmpty
+          ? J.str(existing?['city'])
+          : J.str(city?['name']),
+      'city_id': existing?['city_id'] ?? city?['id'],
+      'state': J.str(existing?['state']).isNotEmpty
+          ? J.str(existing?['state'])
+          : J.str(city?['state']),
       'country': 'Yemen',
-      'latitude': existing?['latitude'] ?? city?['latitude'],
-      'longitude': existing?['longitude'] ?? city?['longitude'],
+      'latitude': addressLatitude,
+      'longitude': addressLongitude,
       'is_default': existing != null
           ? (J.str(existing['is_default']) == '1' ? 1 : 0)
           : (app.addresses.isEmpty ? 1 : 0),
@@ -2997,9 +3075,7 @@ class _WishlistScreenState extends State<WishlistScreen> {
                                 fontWeight: FontWeight.w700,
                               ),
                             ),
-                            onTap: () => context.push(
-                              '/product/${item['slug'] ?? item['id']}',
-                            ),
+                            onTap: () => context.push(J.productPath(item)),
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [

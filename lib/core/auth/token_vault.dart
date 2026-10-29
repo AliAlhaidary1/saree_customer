@@ -24,10 +24,15 @@ class TokenVaultException implements Exception {
 
 class TokenVault {
   TokenVault({FlutterSecureStorage? secure, this._prefs})
-      : _secure = secure ?? const FlutterSecureStorage();
+    : _secure = secure ?? const FlutterSecureStorage();
 
   static const storageKey = 'auth_token_v1';
   static const legacyKey = 'token';
+
+  /// Plaintext tombstone set before deleting the secure token. If secure
+  /// deletion fails (Keystore/Keychain error), [read] still refuses to restore
+  /// the old session after a logout or 401.
+  static const invalidatedKey = 'auth_token_invalidated';
 
   final FlutterSecureStorage _secure;
   final SharedPreferences? _prefs;
@@ -37,13 +42,21 @@ class TokenVault {
 
   Future<String?> read() async {
     try {
+      final p = await _prefsAsync;
+      if (p.getBool(invalidatedKey) == true) {
+        // A previous clear() could not delete the secure entry. Never revive
+        // it; retry the delete best-effort and stay signed out.
+        try {
+          await _secure.delete(key: storageKey);
+        } catch (_) {}
+        return null;
+      }
+    } catch (_) {}
+    try {
       final v = await _secure.read(key: storageKey);
       if (v != null && v.isNotEmpty) return v;
     } catch (e) {
-      throw TokenVaultException(
-        'Secure storage read failed',
-        cause: e,
-      );
+      throw TokenVaultException('Secure storage read failed', cause: e);
     }
     // One-time migration from the legacy plaintext slot.
     try {
@@ -69,17 +82,30 @@ class TokenVault {
     try {
       final p = await _prefsAsync;
       await p.remove(legacyKey);
+      await p.setBool(invalidatedKey, false);
     } catch (_) {}
   }
 
   Future<void> clear() async {
-    try {
-      await _secure.delete(key: storageKey);
-    } catch (_) {}
+    // Set the tombstone BEFORE deleting: if deletion fails, read() must not
+    // resurrect the token on the next launch.
     try {
       final p = await _prefsAsync;
+      await p.setBool(invalidatedKey, true);
       await p.remove(legacyKey);
     } catch (_) {}
+    Object? failure;
+    try {
+      await _secure.delete(key: storageKey);
+    } catch (e) {
+      failure = e;
+    }
     if (kDebugMode) debugPrint('[auth] session cleared');
+    if (failure != null) {
+      throw TokenVaultException(
+        'Secure storage delete failed; token invalidated by tombstone',
+        cause: failure,
+      );
+    }
   }
 }

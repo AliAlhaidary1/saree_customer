@@ -9,58 +9,62 @@ import 'package:sareemart_customer/core/offline/operation_policy.dart';
 import 'package:sareemart_customer/features/cart/cart_screens.dart';
 
 ApiResult _networkFail() => ApiResult({
-      'status': 0,
-      'message': 'timeout',
-      'error': {'code': 'TIMEOUT', 'httpStatus': 504},
-    });
+  'status': 0,
+  'message': 'timeout',
+  'error': {'code': 'TIMEOUT', 'httpStatus': 504},
+});
 
 ApiResult _serverFail() => ApiResult({
-      'status': 0,
-      'message': 'boom',
-      'error': {'code': 'HTTP_500', 'httpStatus': 500},
-    });
+  'status': 0,
+  'message': 'boom',
+  'error': {'code': 'HTTP_500', 'httpStatus': 500},
+});
 
-ApiResult _ok([dynamic data]) => ApiResult({
-      'status': 1,
-      'data': data ?? const {},
-    });
+ApiResult _ok([dynamic data]) =>
+    ApiResult({'status': 1, 'data': data ?? const {}});
 
 class _ScenarioApi extends CustomerApi {
   _ScenarioApi() : super(baseUrl: 'http://test.invalid', token: null);
 
   ApiResult citiesResult = _ok([
-    {'id': 1, 'name': 'Test City'}
+    {'id': 1, 'name': 'Test City'},
   ]);
   ApiResult loginResult = _ok({
     'token': 'tok123',
-    'user': {'id': 7, 'name': 'Tester', 'mobile': '777000000'}
+    'user': {'id': 7, 'name': 'Tester', 'mobile': '777000000'},
   });
-  ApiResult cartResult = _ok({
-    'cart': [],
-    'sub_total': 0,
-  });
+  ApiResult cartResult = _ok({'cart': [], 'sub_total': 0});
   ApiResult removeResult = _ok({});
+  ApiResult checkoutResult = _ok({'checkout_group_id': 9001});
+  ApiResult initResult = _serverFail();
+  String? lastCheckoutKey;
+  int checkoutCalls = 0;
 
   @override
-  Future<ApiResult> cities(
-      {int limit = 100, int offset = 0, String search = ''}) async {
+  Future<ApiResult> cities({
+    int limit = 100,
+    int offset = 0,
+    String search = '',
+  }) async {
     return citiesResult;
   }
 
   @override
-  Future<ApiResult> loginMobile(
-      {required String mobile,
-      required String password,
-      String fcm = '',
-      String countryCode = '967'}) async {
+  Future<ApiResult> loginMobile({
+    required String mobile,
+    required String password,
+    String fcm = '',
+    String countryCode = '967',
+  }) async {
     return loginResult;
   }
 
   @override
-  Future<ApiResult> cart(
-      {required double latitude,
-      required double longitude,
-      int checkout = 0}) async {
+  Future<ApiResult> cart({
+    required double latitude,
+    required double longitude,
+    int checkout = 0,
+  }) async {
     return cartResult;
   }
 
@@ -73,12 +77,38 @@ class _ScenarioApi extends CustomerApi {
   }
 
   @override
-  Future<ApiResult> guestCart(
-      {required double latitude,
-      required double longitude,
-      required String variantIds,
-      required String quantities}) async {
+  Future<ApiResult> guestCart({
+    required double latitude,
+    required double longitude,
+    required String variantIds,
+    required String quantities,
+  }) async {
     return _networkFail();
+  }
+
+  @override
+  Future<ApiResult> checkout({
+    required dynamic addressId,
+    String paymentMethod = 'COD',
+    bool useWallet = false,
+    dynamic promocodeId,
+    dynamic campaignId,
+    String deliveryTime = '',
+    String orderNote = '',
+    String? idempotencyKey,
+  }) async {
+    checkoutCalls++;
+    lastCheckoutKey = idempotencyKey;
+    return checkoutResult;
+  }
+
+  @override
+  Future<ApiResult> initiateTransactionForCheckoutGroup({
+    required dynamic checkoutGroupId,
+    required String paymentMethod,
+    String type = 'checkout_group',
+  }) async {
+    return initResult;
   }
 }
 
@@ -144,7 +174,10 @@ void main() {
         sellerId: 5,
       );
       api.citiesResult = _networkFail();
-      final err = await appController.removeCartLine(productId: 1, variantId: 11);
+      final err = await appController.removeCartLine(
+        productId: 1,
+        variantId: 11,
+      );
       expect(err, isNull);
       expect(appController.guestCart, isEmpty);
     });
@@ -152,39 +185,49 @@ void main() {
     test('login offline returns sentinel and session stays empty', () async {
       final api = await _setup();
       api.loginResult = _networkFail();
-      final err =
-          await appController.login(mobile: '777000000', password: 'secret123');
+      final err = await appController.login(
+        mobile: '777000000',
+        password: 'secret123',
+      );
       expect(err, kRequiresInternet);
       expect(appController.token, isNull);
       expect(appController.user, isNull);
     });
 
-    test('login validation error passes message through (no false block)',
-        () async {
-      final api = await _setup();
-      api.loginResult = ApiResult({'status': 0, 'message': 'wrong password'});
-      final err = await appController.login(mobile: '777000000', password: 'no');
-      expect(err, 'wrong password');
-    });
+    test(
+      'login validation error passes message through (no false block)',
+      () async {
+        final api = await _setup();
+        api.loginResult = ApiResult({'status': 0, 'message': 'wrong password'});
+        final err = await appController.login(
+          mobile: '777000000',
+          password: 'no',
+        );
+        expect(err, 'wrong password');
+      },
+    );
 
-    test('hasInternetAccess: ok->true, server-fail->true, network->false',
-        () async {
-      final api = await _setup();
-      expect(await appController.hasInternetAccess(), isTrue);
-      api.citiesResult = _serverFail();
-      expect(await appController.hasInternetAccess(), isTrue);
-      api.citiesResult = _networkFail();
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      appController.injectForTest(prefs: prefs, testApi: api);
-      appController.city = {'id': 1, 'latitude': 15.0, 'longitude': 45.0};
-      expect(await appController.hasInternetAccess(), isFalse);
-    });
+    test(
+      'hasInternetAccess: ok->true, server-fail->true, network->false',
+      () async {
+        final api = await _setup();
+        expect(await appController.hasInternetAccess(), isTrue);
+        api.citiesResult = _serverFail();
+        expect(await appController.hasInternetAccess(), isTrue);
+        api.citiesResult = _networkFail();
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        appController.injectForTest(prefs: prefs, testApi: api);
+        appController.city = {'id': 1, 'latitude': 15.0, 'longitude': 45.0};
+        expect(await appController.hasInternetAccess(), isFalse);
+      },
+    );
   });
 
   group('stale checkout gate (widget)', () {
-    testWidgets('stale totals show warning and disable placing',
-        (tester) async {
+    testWidgets('stale totals show warning and disable placing', (
+      tester,
+    ) async {
       final api = await _setup();
       api.cartResult = _networkFail();
       appController.token = 'tok';
@@ -198,7 +241,7 @@ void main() {
             'qty': 1,
             'price': 100,
             'name': 'P',
-          }
+          },
         ],
         'sub_total': 100,
         'final_total': 120,
@@ -228,32 +271,38 @@ void main() {
   });
 
   group('convergent cart removal', () {
-    test('logged-in remove converges when server says already gone (Arabic)',
-        () async {
-      final api = await _setup();
-      appController.token = 'tok';
-      appController.user = {'id': 7, 'name': 'Tester'};
-      final line = {
-        'product_id': 1,
-        'product_variant_id': 11,
-        'qty': 1,
-        'price': 100,
-        'name': 'P',
-      };
-      appController.cartProducts = [Map<String, dynamic>.from(line)];
-      // Server claims the line does not exist, yet echoes it back on
-      // refresh (stale id): the line must still disappear, with no error.
-      api.removeResult = ApiResult(
-          {'status': 0, 'message': 'المنتج غير موجود في السلة'});
-      api.cartResult = _ok({
-        'cart': [line],
-        'sub_total': 100,
-      });
-      final err =
-          await appController.removeCartLine(productId: 1, variantId: 11);
-      expect(err, isNull);
-      expect(appController.cartProducts, isEmpty);
-    });
+    test(
+      'logged-in remove converges when server says already gone (Arabic)',
+      () async {
+        final api = await _setup();
+        appController.token = 'tok';
+        appController.user = {'id': 7, 'name': 'Tester'};
+        final line = {
+          'product_id': 1,
+          'product_variant_id': 11,
+          'qty': 1,
+          'price': 100,
+          'name': 'P',
+        };
+        appController.cartProducts = [Map<String, dynamic>.from(line)];
+        // Server claims the line does not exist, yet echoes it back on
+        // refresh (stale id): the line must still disappear, with no error.
+        api.removeResult = ApiResult({
+          'status': 0,
+          'message': 'المنتج غير موجود في السلة',
+        });
+        api.cartResult = _ok({
+          'cart': [line],
+          'sub_total': 100,
+        });
+        final err = await appController.removeCartLine(
+          productId: 1,
+          variantId: 11,
+        );
+        expect(err, isNull);
+        expect(appController.cartProducts, isEmpty);
+      },
+    );
 
     test('logged-in remove converges on empty-cart phrasing', () async {
       final api = await _setup();
@@ -267,14 +316,18 @@ void main() {
         'name': 'P',
       };
       appController.cartProducts = [Map<String, dynamic>.from(line)];
-      api.removeResult = ApiResult(
-          {'status': 0, 'message': 'لم يتم العثور على عناصر في عربة المستخدم'});
+      api.removeResult = ApiResult({
+        'status': 0,
+        'message': 'لم يتم العثور على عناصر في عربة المستخدم',
+      });
       api.cartResult = _ok({
         'cart': [line],
         'sub_total': 100,
       });
-      final err =
-          await appController.removeCartLine(productId: 1, variantId: 11);
+      final err = await appController.removeCartLine(
+        productId: 1,
+        variantId: 11,
+      );
       expect(err, isNull);
       expect(appController.cartProducts, isEmpty);
     });
@@ -290,20 +343,25 @@ void main() {
           'qty': 1,
           'price': 100,
           'name': 'P',
-        }
+        },
       ];
-      api.removeResult =
-          ApiResult({'status': 0, 'message': 'cannot_remove_stock_reserved'});
+      api.removeResult = ApiResult({
+        'status': 0,
+        'message': 'cannot_remove_stock_reserved',
+      });
       api.cartResult = _ok({'cart': [], 'sub_total': 0});
-      final err =
-          await appController.removeCartLine(productId: 1, variantId: 11);
+      final err = await appController.removeCartLine(
+        productId: 1,
+        variantId: 11,
+      );
       expect(err, 'cannot_remove_stock_reserved');
     });
   });
 
   group('checkout offline dialog (widget)', () {
-    testWidgets('empty checkout load failure offers the retry dialog',
-        (tester) async {
+    testWidgets('empty checkout load failure offers the retry dialog', (
+      tester,
+    ) async {
       final api = await _setup();
       api.cartResult = _networkFail();
       appController.token = 'tok';
@@ -319,11 +377,68 @@ void main() {
       expect(find.byIcon(Icons.wifi_off_rounded), findsNothing);
       expect(find.text('retry'), findsOneWidget);
     });
+
+    testWidgets(
+      'gateway init failure keeps session and draft for a safe retry',
+      (tester) async {
+        final api = await _setup();
+        api.cartResult = _ok({
+          'cart': [
+            {
+              'product_id': 11,
+              'product_variant_id': 11,
+              'qty': 1,
+              'price': 100,
+              'name': 'P11',
+              'seller_id': 5,
+            },
+          ],
+          'sub_total': 100,
+          'delivery_charge': 0,
+          'final_total': 100,
+        });
+        appController.token = 'tok';
+        appController.user = {'id': 7, 'name': 'Tester'};
+        appController.selectedAddress = {'id': 1, 'name': 'Home'};
+        appController.paymentSettings = {'stripe_payment_method': '1'};
+        appController.businessHours = BusinessHoursResult(
+          platform: BusinessHoursSlot(isOpen: true),
+        );
+
+        await tester.pumpWidget(const MaterialApp(home: CheckoutScreen()));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('Stripe'));
+        await tester.tap(find.text('Stripe'));
+        await tester.pump();
+        final place = find.byKey(const ValueKey('checkout-place-order'));
+        await tester.ensureVisible(place);
+        // Let the debounced draft write land before placing.
+        await tester.pump(const Duration(seconds: 1));
+        await tester.tap(place);
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(api.checkoutCalls, 1);
+        expect(api.lastCheckoutKey, isNotNull);
+        // C-10: the order exists but payment did not start. The same key must
+        // survive so a retry is deduplicated instead of creating a 2nd order.
+        expect(await appController.checkoutKey(), api.lastCheckoutKey);
+        final draft = appController.offline.readDraft(
+          appController.accountScope,
+          'checkout_form',
+        );
+        expect(draft, isNotNull, reason: 'gateway failure must keep the draft');
+        expect(
+          find.textContaining(appController.t('order_created_payment_pending')),
+          findsOneWidget,
+        );
+        expect(find.byType(CheckoutScreen), findsOneWidget);
+      },
+    );
   });
 
   group('offline cart UX (widget)', () {
-    testWidgets('offline + tap keeps cart without dialog',
-        (tester) async {
+    testWidgets('offline + tap keeps cart without dialog', (tester) async {
       final api = await _setup();
       api.citiesResult = _networkFail();
       appController.guestCart = [
@@ -335,7 +450,7 @@ void main() {
           'name': 'P',
           'image_url': '',
           'seller_id': 5,
-        }
+        },
       ];
       await tester.pumpWidget(
         const MaterialApp(home: Scaffold(body: CartScreen())),

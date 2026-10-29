@@ -4,9 +4,7 @@ import 'package:flutter_secure_storage/test/test_flutter_secure_storage_platform
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sareemart_customer/core/api/customer_api.dart';
 import 'package:sareemart_customer/core/app_controller.dart';
-import 'package:sareemart_customer/core/auth/token_vault.dart';
 import 'package:sareemart_customer/core/json_util.dart';
-import 'package:sareemart_customer/core/offline/local_store.dart';
 import 'package:sareemart_customer/core/offline/offline_cache.dart';
 import 'package:sareemart_customer/core/offline/pending_ops.dart';
 import 'package:sareemart_customer/core/offline/sync_engine.dart';
@@ -17,6 +15,11 @@ class _FakeApi extends CustomerApi {
   bool addFavoriteCalled = false;
   bool removeFavoriteCalled = false;
   bool bulkAddToCartCalled = false;
+  ApiResult cartResult = ApiResult({
+    'status': 1,
+    'data': {'cart': []},
+  });
+  void Function()? onBulkAdd;
   ApiResult addResult = ApiResult({'status': 0, 'message': 'network'});
   ApiResult removeResult = ApiResult({'status': 0, 'message': 'error'});
 
@@ -33,19 +36,31 @@ class _FakeApi extends CustomerApi {
   }
 
   @override
-  Future<ApiResult> bulkAddToCart({required String variantIds, required String quantities}) async {
+  Future<ApiResult> bulkAddToCart({
+    required String variantIds,
+    required String quantities,
+  }) async {
     bulkAddToCartCalled = true;
+    onBulkAdd?.call();
     return ApiResult({'status': 0, 'message': 'error'});
   }
+
+  @override
+  Future<ApiResult> cart({
+    required double latitude,
+    required double longitude,
+    int checkout = 0,
+  }) async => cartResult;
 
   ApiResult loginResult = ApiResult({'status': 0, 'message': 'invalid'});
 
   @override
-  Future<ApiResult> loginMobile(
-      {required String mobile,
-      required String password,
-      String fcm = '',
-      String countryCode = '967'}) async {
+  Future<ApiResult> loginMobile({
+    required String mobile,
+    required String password,
+    String fcm = '',
+    String countryCode = '967',
+  }) async {
     return loginResult;
   }
 }
@@ -57,9 +72,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final p = await SharedPreferences.getInstance();
     final c = AppController();
-    c.vault = TokenVault(prefs: p);
-    c.store = LocalStore(p);
-    c.api = _FakeApi();
+    c.injectForTest(prefs: p, testApi: _FakeApi());
     return c;
   }
 
@@ -80,12 +93,14 @@ void main() {
         'status': 0,
         'message': 'product already added as favorite',
       });
-      final done = await c.runPendingOp(PendingOp(
-        id: '1',
-        type: PendingOpType.favoriteAdd,
-        payload: {'product_id': '5'},
-        createdAt: DateTime.now(),
-      ));
+      final done = await c.runPendingOp(
+        PendingOp(
+          id: '1',
+          type: PendingOpType.favoriteAdd,
+          payload: {'product_id': '5'},
+          createdAt: DateTime.now(),
+        ),
+      );
       expect(done, isTrue);
       expect(fake.addFavoriteCalled, isTrue);
     });
@@ -96,14 +111,20 @@ void main() {
       fake.addResult = ApiResult({
         'status': 0,
         'message': 'timeout',
-        'error': {'code': 'TIMEOUT', 'httpStatus': 504, 'publicCode': 'TIMEOUT'},
+        'error': {
+          'code': 'TIMEOUT',
+          'httpStatus': 504,
+          'publicCode': 'TIMEOUT',
+        },
       });
-      final done = await c.runPendingOp(PendingOp(
-        id: '1',
-        type: PendingOpType.favoriteAdd,
-        payload: {'product_id': '5'},
-        createdAt: DateTime.now(),
-      ));
+      final done = await c.runPendingOp(
+        PendingOp(
+          id: '1',
+          type: PendingOpType.favoriteAdd,
+          payload: {'product_id': '5'},
+          createdAt: DateTime.now(),
+        ),
+      );
       expect(done, isFalse);
     });
 
@@ -111,12 +132,14 @@ void main() {
       final c = await freshController();
       final fake = c.api as _FakeApi;
       fake.removeResult = ApiResult({'status': 1, 'data': []});
-      final done = await c.runPendingOp(PendingOp(
-        id: '1',
-        type: PendingOpType.favoriteRemove,
-        payload: {'product_id': '5'},
-        createdAt: DateTime.now(),
-      ));
+      final done = await c.runPendingOp(
+        PendingOp(
+          id: '1',
+          type: PendingOpType.favoriteRemove,
+          payload: {'product_id': '5'},
+          createdAt: DateTime.now(),
+        ),
+      );
       expect(fake.removeFavoriteCalled, isTrue);
       expect(done, isTrue);
     });
@@ -124,14 +147,18 @@ void main() {
     test('favoriteRemove treats already-removed as converged', () async {
       final c = await freshController();
       final fake = c.api as _FakeApi;
-      fake.removeResult =
-          ApiResult({'status': 0, 'message': 'no_product_found'});
-      final done = await c.runPendingOp(PendingOp(
-        id: '1',
-        type: PendingOpType.favoriteRemove,
-        payload: {'product_id': '5'},
-        createdAt: DateTime.now(),
-      ));
+      fake.removeResult = ApiResult({
+        'status': 0,
+        'message': 'no_product_found',
+      });
+      final done = await c.runPendingOp(
+        PendingOp(
+          id: '1',
+          type: PendingOpType.favoriteRemove,
+          payload: {'product_id': '5'},
+          createdAt: DateTime.now(),
+        ),
+      );
       expect(fake.removeFavoriteCalled, isTrue);
       expect(done, isTrue);
     });
@@ -140,42 +167,50 @@ void main() {
       final c = await freshController();
       final fake = c.api as _FakeApi;
       fake.removeResult = ApiResult({'status': 0, 'message': 'timeout'});
-      final done = await c.runPendingOp(PendingOp(
-        id: '1',
-        type: PendingOpType.favoriteRemove,
-        payload: {'product_id': '5'},
-        createdAt: DateTime.now(),
-      ));
+      final done = await c.runPendingOp(
+        PendingOp(
+          id: '1',
+          type: PendingOpType.favoriteRemove,
+          payload: {'product_id': '5'},
+          createdAt: DateTime.now(),
+        ),
+      );
       expect(fake.removeFavoriteCalled, isTrue);
       expect(done, isFalse);
     });
 
-    test('favoriteRemove with empty product id is dropped, never executed',
-        () async {
-      final c = await freshController();
-      final fake = c.api as _FakeApi;
-      for (final bad in ['', 'null', null]) {
-        fake.removeFavoriteCalled = false;
-        final done = await c.runPendingOp(PendingOp(
-          id: '1',
-          type: PendingOpType.favoriteRemove,
-          payload: {'product_id': bad},
-          createdAt: DateTime.now(),
-        ));
-        expect(done, isTrue);
-        expect(fake.removeFavoriteCalled, isFalse);
-      }
-    });
+    test(
+      'favoriteRemove with empty product id is dropped, never executed',
+      () async {
+        final c = await freshController();
+        final fake = c.api as _FakeApi;
+        for (final bad in ['', 'null', null]) {
+          fake.removeFavoriteCalled = false;
+          final done = await c.runPendingOp(
+            PendingOp(
+              id: '1',
+              type: PendingOpType.favoriteRemove,
+              payload: {'product_id': bad},
+              createdAt: DateTime.now(),
+            ),
+          );
+          expect(done, isTrue);
+          expect(fake.removeFavoriteCalled, isFalse);
+        }
+      },
+    );
 
     test('favoriteRemove from another account scope is dropped', () async {
       final c = await freshController();
       final fake = c.api as _FakeApi;
-      final done = await c.runPendingOp(PendingOp(
-        id: '1',
-        type: PendingOpType.favoriteRemove,
-        payload: {'product_id': '5', 'account_scope': 'u:999'},
-        createdAt: DateTime.now(),
-      ));
+      final done = await c.runPendingOp(
+        PendingOp(
+          id: '1',
+          type: PendingOpType.favoriteRemove,
+          payload: {'product_id': '5', 'account_scope': 'u:999'},
+          createdAt: DateTime.now(),
+        ),
+      );
       // Controller scope here is guest; op belongs to u:999.
       expect(done, isTrue);
       expect(fake.removeFavoriteCalled, isFalse);
@@ -184,12 +219,14 @@ void main() {
     test('guestCartMerge is drained without calling bulkAddToCart', () async {
       final c = await freshController();
       final fake = c.api as _FakeApi;
-      final done = await c.runPendingOp(PendingOp(
-        id: '1',
-        type: PendingOpType.guestCartMerge,
-        payload: {'variant_ids': '1,2', 'quantities': '1,1'},
-        createdAt: DateTime.now(),
-      ));
+      final done = await c.runPendingOp(
+        PendingOp(
+          id: '1',
+          type: PendingOpType.guestCartMerge,
+          payload: {'variant_ids': '1,2', 'quantities': '1,1'},
+          createdAt: DateTime.now(),
+        ),
+      );
       expect(done, isTrue);
       expect(fake.bulkAddToCartCalled, isFalse);
     });
@@ -197,20 +234,21 @@ void main() {
 
   group('login completion (D1)', () {
     setUp(() {
-      FlutterSecureStoragePlatform.instance =
-          TestFlutterSecureStoragePlatform({});
+      FlutterSecureStoragePlatform.instance = TestFlutterSecureStoragePlatform(
+        {},
+      );
     });
 
     Map<String, dynamic> serverLoginShape() => {
-          'status': 1,
-          'message': 'ok',
-          'total': 1,
-          'data': {
-            'user': {'id': 81, 'name': 'T', 'mobile': '780000001'},
-            'access_token': 'jwt-for-tests',
-            'session_max_age': 3600,
-          },
-        };
+      'status': 1,
+      'message': 'ok',
+      'total': 1,
+      'data': {
+        'user': {'id': 81, 'name': 'T', 'mobile': '780000001'},
+        'access_token': 'jwt-for-tests',
+        'session_max_age': 3600,
+      },
+    };
 
     test('ApiResult.token reads nested data.access_token', () {
       final res = ApiResult(serverLoginShape());
@@ -218,43 +256,46 @@ void main() {
       expect(res.token, 'jwt-for-tests');
     });
 
-    test('successful login persists token, sets header, normalizes user id',
-        () async {
-      final c = await loginController();
-      final fake = c.api as _FakeApi;
-      fake.loginResult = ApiResult(serverLoginShape());
-      final message = await c.login(mobile: '780000001', password: 'x');
-      expect(message, isNull);
-      expect(c.token, 'jwt-for-tests');
-      expect(c.user?['id'], 81);
-      expect(c.accountScope, 'u:81');
-      expect(await c.vault.read(), 'jwt-for-tests');
-    });
+    test(
+      'successful login persists token, sets header, normalizes user id',
+      () async {
+        final c = await loginController();
+        final fake = c.api as _FakeApi;
+        fake.loginResult = ApiResult(serverLoginShape());
+        final message = await c.login(mobile: '780000001', password: 'x');
+        expect(message, isNull);
+        expect(c.token, 'jwt-for-tests');
+        expect(c.user?['id'], 81);
+        expect(c.accountScope, 'u:81');
+        expect(await c.vault.read(), 'jwt-for-tests');
+      },
+    );
 
-    test('invalid credentials return the message and set no session',
-        () async {
+    test('invalid credentials return the message and set no session', () async {
       final c = await loginController();
       final fake = c.api as _FakeApi;
-      fake.loginResult =
-          ApiResult({'status': 0, 'message': 'invalid_mobile_or_password'});
+      fake.loginResult = ApiResult({
+        'status': 0,
+        'message': 'invalid_mobile_or_password',
+      });
       final message = await c.login(mobile: '780000001', password: 'wrong');
       expect(message, 'invalid_mobile_or_password');
       expect(c.token, isNull);
       expect(c.isLoggedIn, isFalse);
     });
 
-    test('missing token surfaces StateError instead of half session',
-        () async {
+    test('missing token surfaces StateError instead of half session', () async {
       final c = await loginController();
       final fake = c.api as _FakeApi;
       fake.loginResult = ApiResult({'status': 1, 'data': {}});
-      expect(() => c.login(mobile: '780000001', password: 'x'),
-          throwsA(isA<StateError>()));
+      expect(
+        () => c.login(mobile: '780000001', password: 'x'),
+        throwsA(isA<StateError>()),
+      );
       expect(c.token, isNull);
     });
 
-    test('repeated logins each complete and keep the latest session',
-        () async {
+    test('repeated logins each complete and keep the latest session', () async {
       final c = await loginController();
       final fake = c.api as _FakeApi;
       fake.loginResult = ApiResult(serverLoginShape());
@@ -273,6 +314,41 @@ void main() {
       final c2 = await freshController();
       expect(await c2.vault.read(), 'jwt-for-tests');
     });
+  });
+
+  group('guest cart merge reconciliation', () {
+    test(
+      'lost bulk response is reconciled without a second submission',
+      () async {
+        final c = await freshController();
+        final fake = c.api as _FakeApi;
+        c.token = 'token';
+        c.user = {'id': 7};
+        c.city = {'id': 1, 'latitude': 15.3, 'longitude': 44.2};
+        c.guestCart = [
+          {'product_id': 10, 'product_variant_id': 101, 'qty': 2},
+        ];
+        fake.onBulkAdd = () {
+          // Simulate: backend committed, but the POST response was lost.
+          fake.cartResult = ApiResult({
+            'status': 1,
+            'data': {
+              'cart': [
+                {'product_id': 10, 'product_variant_id': 101, 'qty': 2},
+              ],
+            },
+          });
+        };
+
+        await c.mergeGuestCartForTest();
+        expect(fake.bulkAddToCartCalled, isTrue);
+        expect(c.guestCart, isEmpty);
+
+        fake.bulkAddToCartCalled = false;
+        await c.mergeGuestCartForTest();
+        expect(fake.bulkAddToCartCalled, isFalse);
+      },
+    );
   });
 
   group('favorite outbox last-writer-wins (D3)', () {

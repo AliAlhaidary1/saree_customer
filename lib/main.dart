@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -28,9 +30,7 @@ Future<void> main() async {
   // self-initializes Firebase from native files or cached backend options
   // and no-ops gracefully when no config exists yet (first install).
   try {
-    FirebaseMessaging.onBackgroundMessage(
-      firebaseMessagingBackgroundHandler,
-    );
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   } catch (_) {}
   // Best-effort Firebase init so background/terminated notifications can wake
   // the app. Uses native google-services files when present, otherwise the
@@ -50,7 +50,8 @@ class BootstrapApp extends StatefulWidget {
   State<BootstrapApp> createState() => _BootstrapAppState();
 }
 
-class _BootstrapAppState extends State<BootstrapApp> {
+class _BootstrapAppState extends State<BootstrapApp>
+    with WidgetsBindingObserver {
   GoRouter? router;
   final apiUrl = TextEditingController();
   bool _showSplash = true;
@@ -59,13 +60,22 @@ class _BootstrapAppState extends State<BootstrapApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _start();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     apiUrl.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _bootstrapDone) {
+      unawaited(appController.handleAppResumed());
+    }
   }
 
   Future<void> _start() async {

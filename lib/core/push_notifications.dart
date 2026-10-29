@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_controller.dart';
+import 'app_navigation.dart';
 
 /// Real push notifications (FCM) — parity with front `NotificationBootstrap.jsx`.
 ///
@@ -40,6 +41,8 @@ class PushNotifications {
 
   static bool enabled = false;
   static bool _listenersAttached = false;
+  static bool _localInitialized = false;
+  static Future<void>? _localInitFuture;
   static GoRouter? _router;
   static String? _pendingRoute;
 
@@ -80,7 +83,10 @@ class PushNotifications {
       'sender_id',
     ]);
     final projectId = _pick(settings, ['projectId', 'project_id']);
-    if (apiKey.isEmpty || appId.isEmpty || senderId.isEmpty || projectId.isEmpty) {
+    if (apiKey.isEmpty ||
+        appId.isEmpty ||
+        senderId.isEmpty ||
+        projectId.isEmpty) {
       return null;
     }
     return FirebaseOptions(
@@ -88,7 +94,8 @@ class PushNotifications {
       appId: appId,
       messagingSenderId: senderId,
       projectId: projectId,
-      storageBucket: _pick(settings, ['storageBucket', 'storage_bucket']).isNotEmpty
+      storageBucket:
+          _pick(settings, ['storageBucket', 'storage_bucket']).isNotEmpty
           ? _pick(settings, ['storageBucket', 'storage_bucket'])
           : null,
       authDomain: _pick(settings, ['authDomain', 'auth_domain']).isNotEmpty
@@ -107,7 +114,8 @@ class PushNotifications {
           'appId': options.appId,
           'messagingSenderId': options.messagingSenderId,
           'projectId': options.projectId,
-          if (options.storageBucket != null) 'storageBucket': options.storageBucket,
+          if (options.storageBucket != null)
+            'storageBucket': options.storageBucket,
           if (options.authDomain != null) 'authDomain': options.authDomain,
         }),
       );
@@ -128,7 +136,9 @@ class PushNotifications {
 
   /// Ensures Firebase is initialized. Safe to call from main() and from the
   /// background isolate. Returns false when no config is available at all.
-  static Future<bool> ensureInitialized({Map<String, dynamic>? settings}) async {
+  static Future<bool> ensureInitialized({
+    Map<String, dynamic>? settings,
+  }) async {
     try {
       if (Firebase.apps.isNotEmpty) return true;
       try {
@@ -143,6 +153,54 @@ class PushNotifications {
     } catch (_) {
       return false;
     }
+  }
+
+  /// Initializes local notifications on the current isolate. Required in the
+  /// FCM background isolate too: `show()` without `initialize` (and without a
+  /// channel) can silently drop data-only messages.
+  static Future<bool> _ensureLocal({bool attachCallback = true}) async {
+    if (_localInitialized) return true;
+    final ongoing = _localInitFuture;
+    if (ongoing != null) {
+      await ongoing;
+      return _localInitialized;
+    }
+    final future = () async {
+      const initSettings = InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/launcher_icon'),
+        iOS: DarwinInitializationSettings(),
+      );
+      await _local.initialize(
+        settings: initSettings,
+        onDidReceiveNotificationResponse: attachCallback
+            ? (response) => _go(_routeFromPayload(response.payload))
+            : null,
+      );
+      try {
+        await _local
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >()
+            ?.createNotificationChannel(
+              const AndroidNotificationChannel(
+                channelId,
+                channelName,
+                description: 'Order updates and store notifications',
+                importance: Importance.max,
+              ),
+            );
+      } catch (_) {}
+      _localInitialized = true;
+    }();
+    _localInitFuture = future;
+    try {
+      await future;
+    } catch (_) {
+      _localInitialized = false;
+    } finally {
+      _localInitFuture = null;
+    }
+    return _localInitialized;
   }
 
   // ---------- Full setup (call after appController.bootstrap) ----------
@@ -164,7 +222,11 @@ class PushNotifications {
 
       // iOS permission dialog.
       try {
-        await messaging.requestPermission(alert: true, badge: true, sound: true);
+        await messaging.requestPermission(
+          alert: true,
+          badge: true,
+          sound: true,
+        );
       } catch (_) {}
       // iOS: wait for APNs token (best effort).
       if (defaultTargetPlatform == TargetPlatform.iOS) {
@@ -174,40 +236,22 @@ class PushNotifications {
       }
 
       // Local notifications (foreground display + tap routing).
-      const initSettings = InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/launcher_icon'),
-        iOS: DarwinInitializationSettings(),
-      );
-      await _local.initialize(
-        settings: initSettings,
-        onDidReceiveNotificationResponse: (response) {
-          final route = _routeFromPayload(response.payload);
-          _go(route);
-        },
-      );
+      if (!await _ensureLocal()) {
+        enabled = false;
+        return false;
+      }
       try {
         await _local
             .resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin>()
+              AndroidFlutterLocalNotificationsPlugin
+            >()
             ?.requestNotificationsPermission();
       } catch (_) {}
       try {
         await _local
             .resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin>()
-            ?.createNotificationChannel(
-              const AndroidNotificationChannel(
-                channelId,
-                channelName,
-                description: 'Order updates and store notifications',
-                importance: Importance.max,
-              ),
-            );
-      } catch (_) {}
-      try {
-        await _local
-            .resolvePlatformSpecificImplementation<
-                IOSFlutterLocalNotificationsPlugin>()
+              IOSFlutterLocalNotificationsPlugin
+            >()
             ?.requestPermissions(alert: true, badge: true, sound: true);
       } catch (_) {}
 
@@ -222,6 +266,15 @@ class PushNotifications {
         messaging.onTokenRefresh.listen((token) {
           appController.setFcmToken(token);
         });
+      } catch (_) {}
+
+      // Tapping a locally-displayed (data-only) notification while the app
+      // was terminated does not go through FCM's getInitialMessage.
+      try {
+        final launch = await _local.getNotificationAppLaunchDetails();
+        if (launch?.didNotificationLaunchApp == true) {
+          _go(_routeFromPayload(launch?.notificationResponse?.payload));
+        }
       } catch (_) {}
 
       if (!_listenersAttached) {
@@ -255,7 +308,7 @@ class PushNotifications {
       final next = _pendingRoute!;
       _pendingRoute = null;
       try {
-        router.push(next);
+        openRouterLocation(router, next);
       } catch (_) {}
     }
   }
@@ -264,10 +317,12 @@ class PushNotifications {
 
   static Future<void> showFromMessage(RemoteMessage message) async {
     try {
-      final title = message.notification?.title ??
-          message.data['title'] ??
-          channelName;
-      final body = message.notification?.body ??
+      // Works in the main isolate and in FCM's background isolate.
+      if (!await _ensureLocal(attachCallback: false)) return;
+      final title =
+          message.notification?.title ?? message.data['title'] ?? channelName;
+      final body =
+          message.notification?.body ??
           message.data['body'] ??
           message.data['message'] ??
           '';
@@ -337,7 +392,8 @@ class PushNotifications {
       '/assistant',
     ];
     // The legacy catalog page no longer exists; its links open the home page.
-    if (link == '/products' || link.startsWith('/products?') ||
+    if (link == '/products' ||
+        link.startsWith('/products?') ||
         link.startsWith('/products/')) {
       return '/';
     }
@@ -368,7 +424,7 @@ class PushNotifications {
         _pendingRoute = route;
         return;
       }
-      router.push(route);
+      openRouterLocation(router, route);
     } catch (_) {
       _pendingRoute = route;
     }

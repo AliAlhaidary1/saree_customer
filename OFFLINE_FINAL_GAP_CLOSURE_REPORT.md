@@ -115,7 +115,7 @@ Commands actually executed (read-only, no install, no APK transfer):
   `APP_URL=http://127.0.0.1:8000`, `DB_HOST=mysql`,
   `DB_DATABASE=sql_laravel_marabmall_cloud` (shared dev database).
 - App default endpoint (`lib/core/config.dart:18-21`): `API_URL` defaults to
-  `https://admin.marabmall.cloud` (production). The codebase itself flags
+  `https://admin.sreamart.com` (production). The codebase itself flags
   loopback URLs as device-unreachable (`isUnreachableOnDevice`,
   `config.dart:23-28`).
 

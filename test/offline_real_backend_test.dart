@@ -169,6 +169,14 @@ class TestPrefetch extends ImagePrefetch {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  // This suite mutates a persistent Docker database. Never opt in merely
+  // because a server happens to be listening on localhost during unit tests.
+  if (!const bool.fromEnvironment('RUN_REAL_BACKEND_TESTS')) {
+    test('real backend integration requires explicit isolated-fixture opt-in',
+        () {}, skip: 'Requires a verified disposable database and '
+            '--dart-define=RUN_REAL_BACKEND_TESTS=true');
+    return;
+  }
   HttpOverrides.global = null; // real loopback HTTP (see harness file)
 
   group('real backend integration [real]', () {

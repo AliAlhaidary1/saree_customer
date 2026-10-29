@@ -20,7 +20,9 @@ class CustomerApi {
         receiveTimeout: const Duration(seconds: 15),
         sendTimeout: const Duration(seconds: 15),
         headers: {AppConfig.accessKeyHeader: AppConfig.accessKey},
-        validateStatus: (status) => status != null && status < 500,
+        // Treat every 4xx as a Dio error so 401/403 are classified as auth
+        // (and never recorded as a successful round-trip).
+        validateStatus: (status) => status != null && status < 400,
       ),
     );
     setToken(token);
@@ -87,7 +89,9 @@ class CustomerApi {
 
   Duration? _ttlFor(String path) {
     for (final e in _catalogTtls.entries) {
-      if (path == e.key || path.startsWith('${e.key}/') || path.startsWith('${e.key}?')) {
+      if (path == e.key ||
+          path.startsWith('${e.key}/') ||
+          path.startsWith('${e.key}?')) {
         return e.value;
       }
     }
@@ -96,7 +100,11 @@ class CustomerApi {
 
   String _cacheKey(String path, [Map<String, dynamic>? query]) {
     final q = _clean(query);
-    final parts = (q?.entries ?? <MapEntry<String, dynamic>>[]).map((e) => '${e.key}=${e.value}').toList()..sort();
+    final parts =
+        (q?.entries ?? <MapEntry<String, dynamic>>[])
+            .map((e) => '${e.key}=${e.value}')
+            .toList()
+          ..sort();
     return '$path|${parts.join('&')}';
   }
 
@@ -147,7 +155,7 @@ class CustomerApi {
           Diag.log(
             'api',
             '${response.requestOptions.path} ${response.requestOptions.method} '
-            '${sw.elapsedMilliseconds}ms status=${parsed.status}',
+                '${sw.elapsedMilliseconds}ms status=${parsed.status}',
           );
         }
         recordSuccess();
@@ -242,7 +250,11 @@ class CustomerApi {
 
   Future<ApiResult> _postJson(String path, Map<String, dynamic> json) {
     return _guard(
-      () => _dio.post(path, data: json, options: Options(contentType: Headers.jsonContentType)),
+      () => _dio.post(
+        path,
+        data: json,
+        options: Options(contentType: Headers.jsonContentType),
+      ),
       kind: inferRequestKind(path, method: 'POST'),
     );
   }
@@ -336,11 +348,10 @@ class CustomerApi {
   Future<ApiResult> deleteAccount({
     required String confirmation,
     String? password,
-  }) =>
-      _post('delete_account', {
-        'confirmation': confirmation,
-        if (password != null && password.isNotEmpty) 'password': password,
-      });
+  }) => _post('delete_account', {
+    'confirmation': confirmation,
+    if (password != null && password.isNotEmpty) 'password': password,
+  });
 
   Future<ApiResult> userDetails() => _get('user_details');
 
@@ -350,7 +361,11 @@ class CustomerApi {
     String mobile = '',
     MultipartFile? profile,
   }) {
-    final data = FormData.fromMap({'name': name, 'email': email, if (mobile.isNotEmpty) 'mobile': mobile});
+    final data = FormData.fromMap({
+      'name': name,
+      'email': email,
+      if (mobile.isNotEmpty) 'mobile': mobile,
+    });
     if (profile != null) data.files.add(MapEntry('profile', profile));
     return _postRaw('edit_profile', data);
   }
@@ -409,7 +424,11 @@ class CustomerApi {
     });
   }
 
-  Future<ApiResult> cityConfig({int? cityId, double? latitude, double? longitude}) {
+  Future<ApiResult> cityConfig({
+    int? cityId,
+    double? latitude,
+    double? longitude,
+  }) {
     return _get('city-config', {
       'city_id': ?cityId,
       'latitude': ?latitude,
@@ -577,7 +596,12 @@ class CustomerApi {
 
   Future<ApiResult> sellerBySlug(String slug) => _get('seller/by-slug/$slug');
   Future<ApiResult> sellerById(String id) => _get('seller/by-id/$id');
-  Future<ApiResult> publishedStorefront(String slug, {String? host, bool isSubdomain = false, String? customDomain}) {
+  Future<ApiResult> publishedStorefront(
+    String slug, {
+    String? host,
+    bool isSubdomain = false,
+    String? customDomain,
+  }) {
     return _get('storefront/published', {
       'slug': slug,
       'host': ?host,
@@ -763,7 +787,8 @@ class CustomerApi {
     return _postRaw('products/rating/update', data);
   }
 
-  Future<ApiResult> getProductRatingById(dynamic id) => _post('products/rating/edit', {'id': id});
+  Future<ApiResult> getProductRatingById(dynamic id) =>
+      _post('products/rating/edit', {'id': id});
 
   Future<ApiResult> rateSeller(Map<String, dynamic> fields) =>
       _post('seller_rating/add', fields);
@@ -873,9 +898,13 @@ class CustomerApi {
     });
   }
 
-  Future<ApiResult> checkoutGroups({int page = 1}) => _get('checkout-groups', {'page': page});
+  Future<ApiResult> checkoutGroups({int page = 1}) =>
+      _get('checkout-groups', {'page': page});
   Future<ApiResult> checkoutGroup(dynamic id) => _get('checkout-groups/$id');
-  Future<ApiResult> cancelCheckoutGroup(dynamic id, {String reason = ''}) => _post('checkout-groups/$id/cancel', {if (reason.isNotEmpty) 'reason': reason});
+  Future<ApiResult> cancelCheckoutGroup(dynamic id, {String reason = ''}) =>
+      _post('checkout-groups/$id/cancel', {
+        if (reason.isNotEmpty) 'reason': reason,
+      });
 
   Future<ApiResult> deleteOrder(dynamic orderId) =>
       _post('delete_order', {'order_id': orderId});
@@ -917,7 +946,10 @@ class CustomerApi {
 
   /// Parity with front `api.requestCommerceReturn(jwt, itemId, reason)`
   /// -> POST order-items/{id}/return {reason}
-  Future<ApiResult> requestCommerceReturn(dynamic itemId, {String reason = ''}) {
+  Future<ApiResult> requestCommerceReturn(
+    dynamic itemId, {
+    String reason = '',
+  }) {
     return _post('order-items/$itemId/return', {
       if (reason.isNotEmpty) 'reason': reason,
     });
@@ -929,7 +961,13 @@ class CustomerApi {
   /// into UserToken{type: customer} which order notifications are sent from).
   /// Requires login (api-customers guard); failures are ignored gracefully.
   Future<ApiResult> updateFcmToken(String fcmToken) async {
-    for (final path in ['add_fcm_token', 'update_fcm_token', 'update_fcm', 'user/update_fcm', 'users/update_fcm_token']) {
+    for (final path in [
+      'add_fcm_token',
+      'update_fcm_token',
+      'update_fcm',
+      'user/update_fcm',
+      'users/update_fcm_token',
+    ]) {
       try {
         final res = await _post(path, {
           'fcm_token': fcmToken,
@@ -940,6 +978,7 @@ class CustomerApi {
     }
     return ApiResult({'status': 0, 'message': 'fcm_sync_skipped'});
   }
+
   Future<ApiResult> initiateTransaction(Map<String, dynamic> fields) =>
       _post('initiate_transaction', fields);
   Future<ApiResult> initiateTransactionForCheckoutGroup({
@@ -952,7 +991,11 @@ class CustomerApi {
       'order_id': checkoutGroupId,
       'payment_method': method,
       'type': type,
-      if (method == 'Paypal' || method == 'Midtrans' || method == 'Phonepe' || method == 'Cashfree') 'request_from': 'website',
+      if (method == 'Paypal' ||
+          method == 'Midtrans' ||
+          method == 'Phonepe' ||
+          method == 'Cashfree')
+        'request_from': 'website',
     });
   }
 
@@ -986,7 +1029,8 @@ class CustomerApi {
       'device_type': 'web',
       'app_version': '1.0',
       if (razorpayOrderId.isNotEmpty) 'razorpay_order_id': razorpayOrderId,
-      if (razorpayPaymentId.isNotEmpty) 'razorpay_payment_id': razorpayPaymentId,
+      if (razorpayPaymentId.isNotEmpty)
+        'razorpay_payment_id': razorpayPaymentId,
       if (razorpaySignature.isNotEmpty) 'razorpay_signature': razorpaySignature,
     });
   }
@@ -1007,13 +1051,15 @@ class CustomerApi {
       _post('invoice_download', {'order_id': orderId});
 
   /// Raw PDF bytes for invoice_download (front getInvoice blob download).
-  Future<(bool ok, List<int>? bytes, String message)> invoiceBytes(dynamic orderId) async {
+  Future<(bool ok, List<int>? bytes, String message)> invoiceBytes(
+    dynamic orderId,
+  ) async {
     try {
       final res = await _dio.post(
         'invoice_download',
         data: FormData.fromMap({'order_id': '$orderId'}),
         options: Options(
-contentType: Headers.multipartFormDataContentType,
+          contentType: Headers.multipartFormDataContentType,
           responseType: ResponseType.bytes,
           validateStatus: (s) => s != null && s < 500,
         ),
@@ -1076,29 +1122,41 @@ contentType: Headers.multipartFormDataContentType,
   Future<ApiResult> harajDeleteImage(dynamic postId, dynamic imageId) =>
       _post('haraj/posts/$postId/images/$imageId/delete');
 
-  Future<ApiResult> harajComments(dynamic postId, [Map<String, dynamic>? params]) =>
-      _get('haraj/posts/$postId/comments', params);
-  Future<ApiResult> harajAddComment(dynamic postId, String comment, {dynamic parentId}) {
+  Future<ApiResult> harajComments(
+    dynamic postId, [
+    Map<String, dynamic>? params,
+  ]) => _get('haraj/posts/$postId/comments', params);
+  Future<ApiResult> harajAddComment(
+    dynamic postId,
+    String comment, {
+    dynamic parentId,
+  }) {
     return _post('haraj/posts/$postId/comments', {
       'comment': comment,
       'parent_id': ?parentId,
     });
   }
+
   Future<ApiResult> harajUpdateComment(dynamic commentId, String comment) =>
       _post('haraj/comments/$commentId/update', {'comment': comment});
   Future<ApiResult> harajDeleteComment(dynamic commentId) =>
       _post('haraj/comments/$commentId/delete');
 
-  Future<ApiResult> harajUserRatings(dynamic userId) => _get('haraj/users/$userId/ratings');
+  Future<ApiResult> harajUserRatings(dynamic userId) =>
+      _get('haraj/users/$userId/ratings');
   Future<ApiResult> harajRate(Map<String, dynamic> fields) =>
       _postJson('haraj/ratings', fields);
-  Future<ApiResult> harajReport(dynamic postId,
-      {required String reason, String? details}) {
+  Future<ApiResult> harajReport(
+    dynamic postId, {
+    required String reason,
+    String? details,
+  }) {
     return _post('haraj/posts/$postId/report', {
       'reason': reason,
       if (details != null && details.isNotEmpty) 'details': details,
     });
   }
+
   Future<ApiResult> harajBulkImport(List<Map<String, dynamic>> posts) =>
       _postJson('haraj/posts/bulk-import', {'posts': posts});
   Future<ApiResult> harajBlock(dynamic blockedId) =>
@@ -1115,22 +1173,29 @@ contentType: Headers.multipartFormDataContentType,
     return _postRaw('akhdimni/estimate', data);
   }
 
-  Future<ApiResult> akhdimniEstimateRaw(FormData data) => _postRaw('akhdimni/estimate', data);
+  Future<ApiResult> akhdimniEstimateRaw(FormData data) =>
+      _postRaw('akhdimni/estimate', data);
 
-  Future<ApiResult> akhdimniPlace(Map<String, dynamic> fields, {List<XFile>? images}) async {
+  Future<ApiResult> akhdimniPlace(
+    Map<String, dynamic> fields, {
+    List<XFile>? images,
+  }) async {
     final data = FormData.fromMap(_clean(fields) ?? {});
     if (images != null) {
       for (final img in images) {
-        data.files.add(MapEntry(
-          'images[]',
-          await MultipartFile.fromFile(img.path, filename: img.name),
-        ));
+        data.files.add(
+          MapEntry(
+            'images[]',
+            await MultipartFile.fromFile(img.path, filename: img.name),
+          ),
+        );
       }
     }
     return _postRaw('akhdimni/place', data);
   }
 
-  Future<ApiResult> akhdimniPlaceRaw(FormData data) => _postRaw('akhdimni/place', data);
+  Future<ApiResult> akhdimniPlaceRaw(FormData data) =>
+      _postRaw('akhdimni/place', data);
 
   Future<ApiResult> akhdimniOrders(Map<String, dynamic> params) =>
       _get('akhdimni/orders', params);
@@ -1144,7 +1209,9 @@ contentType: Headers.multipartFormDataContentType,
   }
 
   /// Raw PDF bytes for akhdimni/orders/{id}/invoice (Backend AkhdimniInvoiceService).
-  Future<(bool ok, List<int>? bytes, String message)> akhdimniInvoiceBytes(dynamic id) async {
+  Future<(bool ok, List<int>? bytes, String message)> akhdimniInvoiceBytes(
+    dynamic id,
+  ) async {
     try {
       final res = await _dio.get(
         'akhdimni/orders/$id/invoice',
@@ -1181,38 +1248,76 @@ contentType: Headers.multipartFormDataContentType,
     });
   }
 
-  Future<ApiResult> placeMultiSellerOrder(Map<String, dynamic> orderData) => _post('checkout/place_multi_seller_order', orderData);
+  Future<ApiResult> placeMultiSellerOrder(Map<String, dynamic> orderData) =>
+      _post('checkout/place_multi_seller_order', orderData);
 
   // ---- Admin ----
-  Future<ApiResult> adminCheckoutConfig() => _get('admin/settings/checkout_config');
-  Future<ApiResult> updateAdminCheckoutConfig(Map<String, dynamic> config) => _postJson('admin/settings/checkout_config', config);
-  Future<ApiResult> adminCouriers([Map<String, dynamic>? params]) => _get('admin/couriers', params);
-  Future<ApiResult> assignCourierToOrder({required dynamic orderId, required dynamic courierId}) => _postJson('admin/orders/$orderId/assign_courier', {'courier_id': courierId});
-  Future<ApiResult> adminSettlements([Map<String, dynamic>? params]) => _get('admin/settlements', params);
-  Future<ApiResult> recordSettlementBatch(Map<String, dynamic> batch) => _postJson('admin/settlements/batch', batch);
-  Future<ApiResult> adminAdjustments([Map<String, dynamic>? params]) => _get('admin/adjustments', params);
-  Future<ApiResult> adminRefunds([Map<String, dynamic>? params]) => _get('admin/refunds', params);
-  Future<ApiResult> adminCancellations([Map<String, dynamic>? params]) => _get('admin/cancellations', params);
-  Future<ApiResult> adminReturns([Map<String, dynamic>? params]) => _get('admin/returns', params);
-  Future<ApiResult> adminDispatch([Map<String, dynamic>? params]) => _get('admin/dispatch', params);
-  Future<ApiResult> adminCheckoutGroups({int page = 1}) => _get('admin/checkout-groups', {'page': page});
-  Future<ApiResult> adminCheckoutGroup(dynamic id) => _get('admin/checkout-groups/$id');
+  Future<ApiResult> adminCheckoutConfig() =>
+      _get('admin/settings/checkout_config');
+  Future<ApiResult> updateAdminCheckoutConfig(Map<String, dynamic> config) =>
+      _postJson('admin/settings/checkout_config', config);
+  Future<ApiResult> adminCouriers([Map<String, dynamic>? params]) =>
+      _get('admin/couriers', params);
+  Future<ApiResult> assignCourierToOrder({
+    required dynamic orderId,
+    required dynamic courierId,
+  }) => _postJson('admin/orders/$orderId/assign_courier', {
+    'courier_id': courierId,
+  });
+  Future<ApiResult> adminSettlements([Map<String, dynamic>? params]) =>
+      _get('admin/settlements', params);
+  Future<ApiResult> recordSettlementBatch(Map<String, dynamic> batch) =>
+      _postJson('admin/settlements/batch', batch);
+  Future<ApiResult> adminAdjustments([Map<String, dynamic>? params]) =>
+      _get('admin/adjustments', params);
+  Future<ApiResult> adminRefunds([Map<String, dynamic>? params]) =>
+      _get('admin/refunds', params);
+  Future<ApiResult> adminCancellations([Map<String, dynamic>? params]) =>
+      _get('admin/cancellations', params);
+  Future<ApiResult> adminReturns([Map<String, dynamic>? params]) =>
+      _get('admin/returns', params);
+  Future<ApiResult> adminDispatch([Map<String, dynamic>? params]) =>
+      _get('admin/dispatch', params);
+  Future<ApiResult> adminCheckoutGroups({int page = 1}) =>
+      _get('admin/checkout-groups', {'page': page});
+  Future<ApiResult> adminCheckoutGroup(dynamic id) =>
+      _get('admin/checkout-groups/$id');
 
   // ---- Seller ----
-  Future<ApiResult> sellerOrders([Map<String, dynamic>? params]) => _get('seller/orders', params);
-  Future<ApiResult> sellerOrderDetails(dynamic orderId) => _get('seller/orders/$orderId');
-  Future<ApiResult> sellerSettlement([Map<String, dynamic>? params]) => _get('seller/settlement', params);
+  Future<ApiResult> sellerOrders([Map<String, dynamic>? params]) =>
+      _get('seller/orders', params);
+  Future<ApiResult> sellerOrderDetails(dynamic orderId) =>
+      _get('seller/orders/$orderId');
+  Future<ApiResult> sellerSettlement([Map<String, dynamic>? params]) =>
+      _get('seller/settlement', params);
 
   // ---- Courier ----
-  Future<ApiResult> courierAssignments([Map<String, dynamic>? params]) => _get('courier/assignments', params);
-  Future<ApiResult> courierOrders([Map<String, dynamic>? params]) => _get('courier/orders', params);
-  Future<ApiResult> courierCollectFromSeller(dynamic orderId, Map<String, dynamic> data) => _postJson('courier/orders/$orderId/collect', data);
-  Future<ApiResult> courierRecordMissingProduct(dynamic orderId, Map<String, dynamic> data) => _postJson('courier/orders/$orderId/missing', data);
-  Future<ApiResult> courierDeliverToCustomer(dynamic orderId, Map<String, dynamic> data) => _postJson('courier/orders/$orderId/deliver', data);
-  Future<ApiResult> courierCollectCash(dynamic orderId, Map<String, dynamic> data) => _postJson('courier/orders/$orderId/collect_cash', data);
-  Future<ApiResult> courierSettlement([Map<String, dynamic>? params]) => _get('courier/settlement', params);
-  Future<ApiResult> submitCourierSettlementBatch(Map<String, dynamic> batch) => _postJson('courier/settlement/batch', batch);
-  Future<ApiResult> courierAssignmentDetails(dynamic id) => _get('courier/assignments/$id');
+  Future<ApiResult> courierAssignments([Map<String, dynamic>? params]) =>
+      _get('courier/assignments', params);
+  Future<ApiResult> courierOrders([Map<String, dynamic>? params]) =>
+      _get('courier/orders', params);
+  Future<ApiResult> courierCollectFromSeller(
+    dynamic orderId,
+    Map<String, dynamic> data,
+  ) => _postJson('courier/orders/$orderId/collect', data);
+  Future<ApiResult> courierRecordMissingProduct(
+    dynamic orderId,
+    Map<String, dynamic> data,
+  ) => _postJson('courier/orders/$orderId/missing', data);
+  Future<ApiResult> courierDeliverToCustomer(
+    dynamic orderId,
+    Map<String, dynamic> data,
+  ) => _postJson('courier/orders/$orderId/deliver', data);
+  Future<ApiResult> courierCollectCash(
+    dynamic orderId,
+    Map<String, dynamic> data,
+  ) => _postJson('courier/orders/$orderId/collect_cash', data);
+  Future<ApiResult> courierSettlement([Map<String, dynamic>? params]) =>
+      _get('courier/settlement', params);
+  Future<ApiResult> submitCourierSettlementBatch(Map<String, dynamic> batch) =>
+      _postJson('courier/settlement/batch', batch);
+  Future<ApiResult> courierAssignmentDetails(dynamic id) =>
+      _get('courier/assignments/$id');
 
   // ---- Home handle ----
   Future<ApiResult> shopBySellers({
@@ -1222,7 +1327,16 @@ contentType: Headers.multipartFormDataContentType,
     int offset = 0,
     String? search,
     String? sort,
-  }) => sellers(latitude: latitude, longitude: longitude, limit: limit, offset: offset, search: search, sort: sort);
-  Future<ApiResult> shopByCountries({int limit = 50, int offset = 0}) => countries(limit: limit, offset: offset);
-  Future<ApiResult> shopByBrands({int limit = 50, int offset = 0}) => brands(limit: limit, offset: offset);
+  }) => sellers(
+    latitude: latitude,
+    longitude: longitude,
+    limit: limit,
+    offset: offset,
+    search: search,
+    sort: sort,
+  );
+  Future<ApiResult> shopByCountries({int limit = 50, int offset = 0}) =>
+      countries(limit: limit, offset: offset);
+  Future<ApiResult> shopByBrands({int limit = 50, int offset = 0}) =>
+      brands(limit: limit, offset: offset);
 }

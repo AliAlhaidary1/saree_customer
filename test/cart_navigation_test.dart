@@ -5,6 +5,7 @@ import 'package:sareemart_customer/app.dart';
 import 'package:sareemart_customer/core/api/customer_api.dart';
 import 'package:sareemart_customer/core/app_controller.dart';
 import 'package:sareemart_customer/core/json_util.dart';
+import 'package:sareemart_customer/features/account/account_screens.dart';
 import 'package:sareemart_customer/features/cart/cart_screens.dart';
 
 /// Every API call fails fast: screens render empty/error states and route
@@ -108,35 +109,47 @@ void main() {
     expect(find.byType(CartScreen), findsWidgets);
   });
 
-  testWidgets('account opens from product detail via go (D4 fix)', (
+  testWidgets('tapping the account icon on cart does not throw', (
     tester,
   ) async {
     await _setup();
     final router = buildRouter();
-    // Scaffold above the router emulates the AppShell-provided Scaffold that
-    // AccountScreen relies on in production (it stays a shell-branch tab).
-    await tester.pumpWidget(
-      MaterialApp.router(
-        routerConfig: router,
-        builder: (context, child) => Scaffold(body: child!),
-      ),
-    );
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
     await tester.pump(const Duration(seconds: 1));
-    // Pop any existing route to ensure clean navigator state
-    if (router.canPop()) router.pop();
-    router.push('/product/some-slug');
+    await tester.pump(const Duration(seconds: 1));
+    router.push('/cart');
     await tester.pump(const Duration(seconds: 1));
     await tester.pump(const Duration(seconds: 1));
     expect(tester.takeException(), isNull);
-    // Pop the product detail route before going to account to avoid key reservation conflict
-    if (router.canPop()) router.pop();
-    router.go('/account');
+    await tester.tap(find.byIcon(Icons.person_outline_rounded).first);
     await tester.pump(const Duration(seconds: 1));
     await tester.pump(const Duration(seconds: 1));
     expect(
       tester.takeException(),
       isNull,
-      reason: 'navigating to account from detail threw',
+      reason: 'tapping the account icon from cart threw',
     );
+    expect(find.byType(BottomSheet), findsOneWidget);
+  });
+
+  testWidgets('account pushes from product detail (D4 fix)', (tester) async {
+    await _setup();
+    final router = buildRouter();
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    router.push('/product/some-slug');
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    expect(tester.takeException(), isNull);
+    router.push('/account');
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(seconds: 1));
+    expect(
+      tester.takeException(),
+      isNull,
+      reason: 'pushing account from detail threw',
+    );
+    expect(find.byType(AccountScreen), findsOneWidget);
   });
 }

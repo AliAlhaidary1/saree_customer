@@ -146,6 +146,13 @@ class _HarajListScreenState extends State<HarajListScreen> {
       if (!mounted || mySeq != _seq) return;
       if (!posts.ok) {
         setState(() {
+          if (reset && _hasActiveFilters) {
+            // Never present the previous filter's rows as the new filter's
+            // results when the network/local fallback produced nothing.
+            items = [];
+            page = 1;
+            lastPage = 1;
+          }
           loading = false;
         });
         return;

@@ -62,7 +62,7 @@ preserved; one pre-existing backend stash entry untouched.
   `build/app/outputs/flutter-apk/app-debug.apk` (199,573,396 bytes).
   Binary verification: the dev URL string is present in
   `assets/flutter_assets/kernel_blob.bin` (count 1); the production default
-  (`https://admin.marabmall.cloud`) remains only as the dead
+  (`https://admin.sreamart.com`) remains only as the dead
   `defaultValue` literal. Runtime proof: the installed app's More →
   server-address row displays `http://172.17.3.192:8000`, and the home feed
   renders dev-only rows (e.g. the `E2EOFFLINE` category).
@@ -205,7 +205,7 @@ city. No city rows were added, modified, or deleted.
 
 ## 10. Production and safety confirmation
 
-- Production (`https://admin.marabmall.cloud`) received zero requests: the
+- Production (`https://admin.sreamart.com`) received zero requests: the
   installed build targets `http://172.17.3.192:8000` (verified in binary
   and on-screen); all mutations went to the Docker-local MySQL dev
   database identified in §0.

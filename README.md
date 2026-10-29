@@ -26,7 +26,7 @@ flutter run --dart-define=API_URL=http://192.168.1.10:8000
 للإنتاج:
 
 ```bash
-flutter run --release --dart-define=API_URL=https://admin.marabmall.cloud
+flutter run --release --dart-define=API_URL=https://admin.sreamart.com
 ```
 
 تأكد أن الباكند يعمل وأن `x-access-key` هو `903361` كما في الفرونت.

@@ -40,25 +40,25 @@ class SyncStatus {
     int? blocked,
     DateTime? lastRun,
     String? lastError,
-  }) =>
-      SyncStatus(
-        state: state ?? this.state,
-        pending: pending ?? this.pending,
-        blocked: blocked ?? this.blocked,
-        lastRun: lastRun ?? this.lastRun,
-        lastError: lastError ?? this.lastError,
-      );
+  }) => SyncStatus(
+    state: state ?? this.state,
+    pending: pending ?? this.pending,
+    blocked: blocked ?? this.blocked,
+    lastRun: lastRun ?? this.lastRun,
+    lastError: lastError ?? this.lastError,
+  );
 }
 
 typedef OpExecutor = Future<bool> Function(PendingOp op);
 
 class SyncEngine extends ChangeNotifier {
-  SyncEngine({required this._outboxForCurrentScope});
+  SyncEngine({required this._outboxForCurrentScope, OpExecutor? executor})
+    : _defaultExecutor = executor;
 
   final PendingOutbox Function() _outboxForCurrentScope;
+  final OpExecutor? _defaultExecutor;
 
-  final ValueNotifier<SyncStatus> status =
-      ValueNotifier(SyncStatus());
+  final ValueNotifier<SyncStatus> status = ValueNotifier(SyncStatus());
 
   bool _running = false;
   bool _queued = false;
@@ -71,7 +71,7 @@ class SyncEngine extends ChangeNotifier {
       _queued = true;
       return;
     }
-    unawaited(run());
+    unawaited(run(executor: _defaultExecutor));
   }
 
   /// Deferred trigger used after a failure (backoff already encoded per-op,
@@ -90,7 +90,7 @@ class SyncEngine extends ChangeNotifier {
     try {
       do {
         _queued = false;
-        await _runOnce(executor);
+        await _runOnce(executor ?? _defaultExecutor);
       } while (_queued);
     } finally {
       _running = false;
@@ -98,13 +98,15 @@ class SyncEngine extends ChangeNotifier {
   }
 
   Future<void> _runOnce(OpExecutor? executor) async {
+    _deferred?.cancel();
+    _deferred = null;
     final outbox = _outboxForCurrentScope();
     final now = DateTime.now();
     final pending = outbox.load();
     var parts = outbox.dueOps(now);
     status.value = status.value.copyWith(
       state: SyncState.syncing,
-      pending: parts.due.length,
+      pending: pending.length - parts.blocked.length,
       blocked: parts.blocked.length,
     );
     if (executor == null || parts.due.isEmpty) {
@@ -112,15 +114,20 @@ class SyncEngine extends ChangeNotifier {
         state: parts.blocked.isNotEmpty
             ? SyncState.blocked
             : (parts.due.isEmpty && pending.isEmpty
-                ? SyncState.idle
-                : SyncState.waiting),
+                  ? SyncState.idle
+                  : SyncState.waiting),
         lastRun: now,
       );
       notifyListeners();
+      if (executor != null) _scheduleNextAttempt(outbox);
       return;
     }
     var firstFailure = '';
     for (final op in parts.due) {
+      // Credentials can change while the previous request is awaiting a
+      // response. Even legacy operations without payload account_scope must
+      // stay bound to the outbox owner selected at the start of this pass.
+      if (_outboxForCurrentScope().scope != outbox.scope) break;
       bool ok = false;
       try {
         ok = await executor(op);
@@ -132,27 +139,50 @@ class SyncEngine extends ChangeNotifier {
         await outbox.remove(op.id);
       } else {
         final next = now.add(PendingOutbox.backoffForAttempt(op.attempts));
-        await outbox.update(op.withRetry(
-          next,
-          firstFailure.isEmpty ? 'sync_failed' : firstFailure,
-        ));
+        await outbox.update(
+          op.withRetry(
+            next,
+            firstFailure.isEmpty ? 'sync_failed' : firstFailure,
+          ),
+        );
         if (firstFailure.isEmpty) firstFailure = 'sync_failed';
         // Stop the pass on first failure: likely offline — remaining ops
         // keep their schedule instead of burning attempts in a loop.
         break;
       }
     }
+    final remaining = outbox.load();
     parts = outbox.dueOps(DateTime.now());
     status.value = SyncStatus(
       state: parts.blocked.isNotEmpty
           ? SyncState.blocked
-          : (parts.due.isEmpty ? SyncState.idle : SyncState.waiting),
-      pending: parts.due.length,
+          : (remaining.isEmpty ? SyncState.idle : SyncState.waiting),
+      pending: remaining.length - parts.blocked.length,
       blocked: parts.blocked.length,
       lastRun: DateTime.now(),
       lastError: firstFailure,
     );
     notifyListeners();
+    _scheduleNextAttempt(outbox);
+  }
+
+  /// Arms exactly one timer for the earliest retry in the current outbox.
+  /// A resume/connectivity opportunity may call [requestSync] sooner; the
+  /// single-flight gate and per-op due time keep both paths safe.
+  void _scheduleNextAttempt(PendingOutbox outbox) {
+    DateTime? earliest;
+    for (final op in outbox.load()) {
+      if (op.attempts >= PendingOutbox.maxAttempts) continue;
+      final next = op.nextAttemptAt;
+      if (next == null) {
+        earliest = DateTime.now();
+        break;
+      }
+      if (earliest == null || next.isBefore(earliest)) earliest = next;
+    }
+    if (earliest == null) return;
+    final delay = earliest.difference(DateTime.now());
+    requestSyncDelayed(delay.isNegative ? Duration.zero : delay);
   }
 
   int pendingCount() {

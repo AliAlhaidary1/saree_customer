@@ -94,25 +94,25 @@ enum CatalogScopeStatus {
 }
 
 /// Resolved [CatalogScopeStatus] plus display hints. `stale` is advisory
-  /// (last full completion older than the product-list TTL); it never gates
-  /// behavior — prices/stock stay server-authoritative regardless.
-  class CatalogScopeState {
-    const CatalogScopeState({
-      required this.status,
-      this.lastSyncAt,
-      this.listedCount = 0,
-      this.stale = false,
-      this.sectionCount = 0,
-      this.harajCount = 0,
-    });
+/// (last full completion older than the product-list TTL); it never gates
+/// behavior — prices/stock stay server-authoritative regardless.
+class CatalogScopeState {
+  const CatalogScopeState({
+    required this.status,
+    this.lastSyncAt,
+    this.listedCount = 0,
+    this.stale = false,
+    this.sectionCount = 0,
+    this.harajCount = 0,
+  });
 
-    final CatalogScopeStatus status;
-    final DateTime? lastSyncAt;
-    final int listedCount;
-    final bool stale;
-    final int sectionCount;
-    final int harajCount;
-  }
+  final CatalogScopeStatus status;
+  final DateTime? lastSyncAt;
+  final int listedCount;
+  final bool stale;
+  final int sectionCount;
+  final int harajCount;
+}
 
 /// Empty-state copy for a scope [status]. Pure (takes the translator) so
 /// every branch is unit-testable; `ready` with zero items means the current
@@ -167,12 +167,15 @@ class CatalogSyncResult {
 bool isEmptyCatalogPage(ApiResult res) {
   if (res.ok || res.dataMaps.isNotEmpty) return false;
   final msg = res.message.toLowerCase();
-  return msg.contains('لم يتم العثور على') ||
+  // Match only the backend's explicit "empty listing" copy. Generic
+  // not-found/domain errors (missing city, wrong endpoint, 404 page) must stay
+  // failures: treating them as end-of-data would reconcile an empty catalog.
+  return msg.contains('لم يتم العثور على منتجات') ||
+      msg.contains('لم يتم العثور على فئات') ||
       msg.contains('no_products_found') ||
       msg.contains('no_categories_found') ||
       msg.contains('no products found') ||
       msg.contains('no categories found') ||
-      msg.contains('not found') ||
       msg == 'empty';
 }
 
@@ -362,11 +365,12 @@ class CatalogSyncService extends ChangeNotifier {
           );
         }
         pages++;
-        // End of data: short page AND (no known total OR checkpoint covers
-        // it). A short page with offset < knownTotal means the server paged
-        // smaller than requested (verified 48-cap) — keep walking.
+        // End of data only when a reported total is covered. Without a total,
+        // a short page cannot prove completeness (servers may cap below the
+        // requested size), so keep walking until an explicit empty page.
         if (page.rows.length < pageSize &&
-            (knownTotal < 0 || offset >= knownTotal)) {
+            knownTotal >= 0 &&
+            offset >= knownTotal) {
           break;
         }
         if (page.total >= 0 && offset >= page.total) break;
@@ -631,10 +635,11 @@ class CatalogSyncService extends ChangeNotifier {
       ids.addAll(applied.ids);
       offset += page.rows.length;
       pages++;
-      // Same short-page rule as products: a short page only ends the walk
-      // when no known total contradicts it (server may page below request).
+      // Same short-page rule as products: only a reported total can prove the
+      // end on a short page. Without a total, continue until an empty page.
       if (page.rows.length < pageSize &&
-          (knownTotal < 0 || offset >= knownTotal)) {
+          knownTotal >= 0 &&
+          offset >= knownTotal) {
         break;
       }
       if (page.total >= 0 && offset >= page.total) break;

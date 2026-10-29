@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_controller.dart';
+import '../../core/app_navigation.dart';
 import '../../core/json_util.dart';
 import '../../core/notification_read.dart';
 import '../../widgets/app_image.dart';
@@ -34,6 +35,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   // load-more continuations so stale pages can't append to the new list.
   int _seq = 0;
   int _autoSeq = -1;
+  bool markingAll = false;
 
   @override
   void initState() {
@@ -167,7 +169,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       '/assistant': '/assistant',
     };
     if (map.containsKey(raw)) {
-      context.push(map[raw]!);
+      openAppLocation(context, map[raw]!);
       return;
     }
     if (raw.startsWith('/policy/') ||
@@ -179,15 +181,15 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         raw.startsWith('/akhdimni/') ||
         raw.startsWith('/category/') ||
         raw.startsWith('/checkout-groups/')) {
-      context.push(raw);
+      openAppLocation(context, raw);
       return;
     }
     if (raw.startsWith('/store/')) {
-      context.push('/store/${raw.substring('/store/'.length)}');
+      openAppLocation(context, '/store/${raw.substring('/store/'.length)}');
       return;
     }
     if (raw.startsWith('http')) return;
-    context.push('/notifications');
+    openAppLocation(context, '/notifications');
   }
 
   @override
@@ -205,7 +207,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         actions: [
           if (items.any(_isUnread))
             TextButton.icon(
-              onPressed: _markAllRead,
+              onPressed: markingAll ? null : _markAllRead,
               icon: const Icon(Icons.done_all, size: 18),
               style: TextButton.styleFrom(foregroundColor: Colors.white),
               label: Text(app.t('mark_all_read')),
@@ -394,13 +396,47 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   }
 
   Future<void> _markAllRead() async {
+    if (markingAll) return;
     final uid = appController.user?['id'];
-    final ids = items
-        .map((e) => '${e['id']}')
-        .where((e) => e.isNotEmpty)
-        .toList();
-    final updated = await NotificationRead.markAsRead(uid, ids);
-    if (mounted) setState(() => readIds = updated);
+    final scope = appController.accountScope;
+    setState(() => markingAll = true);
+    try {
+      // There is no server-side "read all" endpoint: collect every page so the
+      // action covers notifications the user has not scrolled to yet, not just
+      // the currently loaded rows.
+      final ids = <String>{
+        ...items.map((e) => '${e['id']}').where((e) => e.isNotEmpty),
+      };
+      var offset = 0;
+      while (offset < total) {
+        final res = await appController.api.notifications(
+          limit: 100,
+          offset: offset,
+        );
+        if (!res.ok) break;
+        var rows = res.dataMaps;
+        final dataNode = res.raw['data'];
+        if (rows.isEmpty && dataNode is Map) {
+          rows = J.maps(dataNode['data']);
+        }
+        if (rows.isEmpty) break;
+        ids.addAll(rows.map((e) => '${e['id']}').where((e) => e.isNotEmpty));
+        offset += rows.length;
+        if (rows.length < 100) break;
+        if (!mounted) return;
+        if (!appController.isLoggedIn || appController.accountScope != scope) {
+          return;
+        }
+      }
+      final updated = await NotificationRead.markAsRead(uid, ids.toList());
+      if (!mounted) return;
+      if (!appController.isLoggedIn || appController.accountScope != scope) {
+        return;
+      }
+      setState(() => readIds = updated);
+    } finally {
+      if (mounted) setState(() => markingAll = false);
+    }
   }
 }
 
@@ -469,9 +505,13 @@ class _NotificationBellState extends State<NotificationBell>
     }
     try {
       final res = await appController.api.notifications(limit: 1, offset: 0);
-      var total = J.i(res.raw['total'] ?? res.dataMap['total']);
+      // A failed response has no reliable total (0), and prune(0) would erase
+      // every locally-read id. Only reconcile against a successful payload.
+      if (!res.ok) return;
+      var total = J.i(res.raw['total'] ?? res.dataMap['total'], -1);
       final dataNode = res.raw['data'];
-      if (total == 0 && dataNode is Map) total = J.i(dataNode['total']);
+      if (total < 0 && dataNode is Map) total = J.i(dataNode['total'], -1);
+      if (total < 0) return;
       final uid = appController.user?['id'];
       var reads = await NotificationRead.getReadIds(uid);
       reads = await NotificationRead.prune(uid, total);

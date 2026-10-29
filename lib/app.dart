@@ -226,6 +226,20 @@ GoRouter buildRouter() {
         ),
       ),
       GoRoute(
+        // Same reason as /cart: the header pushes /account from standalone
+        // pages, and a ShellRoute branch opened that way reused the shell's
+        // page key (duplicate-key assertion). Keeping it top-level gives it a
+        // path-based page key that is unique on every stack.
+        path: '/account',
+        pageBuilder: (_, state) => AppTheme.slidePage(
+          key: state.pageKey,
+          child: AppShell(
+            location: state.uri.path,
+            child: const AccountScreen(),
+          ),
+        ),
+      ),
+      GoRoute(
         path: '/checkout-groups',
         pageBuilder: (_, s) => AppTheme.slidePage(
           key: s.pageKey,
@@ -378,13 +392,6 @@ GoRouter buildRouter() {
               child: const AkhdimniHomeScreen(),
             ),
           ),
-          GoRoute(
-            path: '/account',
-            pageBuilder: (_, state) => AppTheme.slidePage(
-              key: state.pageKey,
-              child: const AccountScreen(),
-            ),
-          ),
         ],
       ),
     ],
@@ -417,6 +424,18 @@ class AppShell extends StatelessWidget {
         Icons.receipt_long,
       ),
     ];
+  }
+
+  bool get onTab {
+    final ts = tabs;
+    for (var i = 0; i < ts.length; i++) {
+      if (ts[i].path == '/') {
+        if (location == '/') return true;
+      } else if (location.startsWith(ts[i].path)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   int get index {
@@ -503,18 +522,20 @@ class AppShell extends StatelessWidget {
           onPressed: () => context.push('/assistant'),
           child: const Icon(Icons.smart_toy_outlined, color: Colors.white),
         ),
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: index,
-          onDestinationSelected: (i) => context.go(tabs[i].path),
-          destinations: [
-            for (final tab in tabs)
-              NavigationDestination(
-                icon: Icon(tab.icon),
-                selectedIcon: Icon(tab.selectedIcon),
-                label: app.t(tab.labelKey),
-              ),
-          ],
-        ),
+        bottomNavigationBar: onTab
+            ? NavigationBar(
+                selectedIndex: index,
+                onDestinationSelected: (i) => context.go(tabs[i].path),
+                destinations: [
+                  for (final tab in tabs)
+                    NavigationDestination(
+                      icon: Icon(tab.icon),
+                      selectedIcon: Icon(tab.selectedIcon),
+                      label: app.t(tab.labelKey),
+                    ),
+                ],
+              )
+            : null,
       ),
     );
   }

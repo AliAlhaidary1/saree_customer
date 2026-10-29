@@ -31,16 +31,18 @@ DisplayPrice variantDisplayPrice(Map<String, dynamic>? variant) {
   final flashPrice = double.tryParse('${variant['flash_price']}') ?? 0;
   final promoPrice = double.tryParse('${variant['promo_price']}') ?? 0;
   final discounted = double.tryParse('${variant['discounted_price']}') ?? 0;
+  final hasOriginal = original > 0;
 
   if ((variant['is_flash'] == true ||
           variant['is_flash'] == 1 ||
           variant['is_flash'] == '1') &&
-      flashPrice > 0) {
+      flashPrice > 0 &&
+      (!hasOriginal || flashPrice < original)) {
     finalPrice = flashPrice;
     isFlash = true;
-  } else if (promoPrice > 0 && promoPrice < original) {
+  } else if (promoPrice > 0 && hasOriginal && promoPrice < original) {
     finalPrice = promoPrice;
-  } else if (discounted > 0) {
+  } else if (discounted > 0 && hasOriginal && discounted < original) {
     finalPrice = discounted;
   }
 

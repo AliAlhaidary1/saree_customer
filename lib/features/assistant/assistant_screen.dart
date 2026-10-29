@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/app_controller.dart';
+import '../../core/app_navigation.dart';
 import '../../core/json_util.dart';
 import '../../core/offline/operation_policy.dart';
 import '../../widgets/app_image.dart';
@@ -65,21 +66,19 @@ class _FaqScreenState extends State<FaqScreen> {
           : ListView(
               padding: const EdgeInsets.all(12),
               children: [
-                ...items
-                    .map(
-                      (f) => Card(
-                        child: ExpansionTile(
-                          title: Text(J.str(f['question'])),
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                              child: Text(J.str(f['answer'])),
-                            ),
-                          ],
+                ...items.map(
+                  (f) => Card(
+                    child: ExpansionTile(
+                      title: Text(J.str(f['question'])),
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                          child: Text(J.str(f['answer'])),
                         ),
-                      ),
-                    )
-                    ,
+                      ],
+                    ),
+                  ),
+                ),
               ],
             ),
     );
@@ -399,10 +398,9 @@ class _AssistantScreenState extends State<AssistantScreen> {
                             ),
                             onTap: () {
                               final path = J.str(product['path']);
-                              context.push(
-                                path.isNotEmpty
-                                    ? path
-                                    : '/product/${product['slug'] ?? product['id']}',
+                              openAppLocation(
+                                context,
+                                path.isNotEmpty ? path : J.productPath(product),
                               );
                             },
                           ),
@@ -410,7 +408,8 @@ class _AssistantScreenState extends State<AssistantScreen> {
                           TextButton(
                             onPressed: () {
                               final slug = J.str(seller['slug']);
-                              context.push(
+                              openAppLocation(
+                                context,
                                 slug.isNotEmpty
                                     ? '/store/$slug'
                                     : '/seller/${seller['id']}',
@@ -428,7 +427,8 @@ class _AssistantScreenState extends State<AssistantScreen> {
                           Padding(
                             padding: const EdgeInsets.only(top: 8),
                             child: FilledButton(
-                              onPressed: () => context.push(
+                              onPressed: () => openAppLocation(
+                                context,
                                 _assistantPath(J.str(link['path'])),
                               ),
                               child: Text(J.str(link['title'])),
@@ -523,7 +523,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: FilledButton.tonal(
-        onPressed: () => context.push(_assistantPath(url)),
+        onPressed: () => openAppLocation(context, _assistantPath(url)),
         child: Text(
           J.str(action['label']).isNotEmpty
               ? J.str(action['label'])
@@ -651,7 +651,7 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
                 fontSize: 12,
               ),
             ),
-            onTap: () => context.push(url),
+            onTap: () => openAppLocation(context, url),
           ),
           Row(
             children: [

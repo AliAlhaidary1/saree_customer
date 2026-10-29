@@ -25,7 +25,7 @@ stale-session redelivery gap are documented below.
   `APP_URL=http://127.0.0.1:8000`, `DB_CONNECTION=mysql`, `DB_HOST=mysql`,
   `DB_DATABASE=sql_laravel_marabmall_cloud`, root/empty-password, data volume
   `saree_back_mysql_data`. Nothing points to production (production host would
-  be `marabmall.cloud`; all endpoints here are container-local). Secrets in
+  be `sreamart.com`; all endpoints here are container-local). Secrets in
   `.env`/compose output are not reproduced in this report.
 - Effective check: `artisan migrate:status` all `Yes`; `tinker` read-only
   counts users=78, products=288→(fixtures), sellers=26, categories=40,

@@ -82,22 +82,38 @@ void main() {
   });
 
   group('PendingOutbox', () {
+    test('unknown persisted operation types are quarantined', () {
+      expect(
+        PendingOp.fromJson({
+          'id': 'future-op',
+          'type': 'unknownFutureType',
+          'payload': {'product_id': '7'},
+          'createdAt': DateTime.now().millisecondsSinceEpoch,
+        }),
+        isNull,
+      );
+    });
+
     test('coalesces favorite ops by product id', () async {
       final s = await freshStore();
       final out = PendingOutbox(s, 'u:1');
       final pid = '42';
-      await out.enqueue(PendingOp(
-        id: 'a',
-        type: PendingOpType.favoriteAdd,
-        payload: {'product_id': pid},
-        createdAt: DateTime.now(),
-      ));
-      await out.enqueue(PendingOp(
-        id: 'b',
-        type: PendingOpType.favoriteRemove,
-        payload: {'product_id': pid},
-        createdAt: DateTime.now(),
-      ));
+      await out.enqueue(
+        PendingOp(
+          id: 'a',
+          type: PendingOpType.favoriteAdd,
+          payload: {'product_id': pid},
+          createdAt: DateTime.now(),
+        ),
+      );
+      await out.enqueue(
+        PendingOp(
+          id: 'b',
+          type: PendingOpType.favoriteRemove,
+          payload: {'product_id': pid},
+          createdAt: DateTime.now(),
+        ),
+      );
       final ops = out.load();
       expect(ops.length, 1);
       expect(ops.first.type, PendingOpType.favoriteRemove);
@@ -109,18 +125,103 @@ void main() {
       final big = PendingOutbox.backoffForAttempt(20);
       expect(big.inSeconds, lessThanOrEqualTo(600));
     });
+
+    test('full queue rejects new intent without dropping the oldest', () async {
+      final s = await freshStore();
+      final out = PendingOutbox(s, 'u:1');
+      for (var i = 0; i < PendingOutbox.maxOps; i++) {
+        expect(
+          await out.enqueue(
+            PendingOp(
+              id: 'op-$i',
+              type: PendingOpType.favoriteAdd,
+              payload: {'product_id': '$i'},
+              createdAt: DateTime.now(),
+            ),
+          ),
+          isTrue,
+        );
+      }
+      expect(
+        await out.enqueue(
+          PendingOp(
+            id: 'overflow',
+            type: PendingOpType.favoriteAdd,
+            payload: {'product_id': 'overflow'},
+            createdAt: DateTime.now(),
+          ),
+        ),
+        isFalse,
+      );
+      final ops = out.load();
+      expect(ops, hasLength(PendingOutbox.maxOps));
+      expect(ops.first.id, 'op-0');
+      expect(ops.any((op) => op.id == 'overflow'), isFalse);
+    });
   });
 
   group('SyncEngine', () {
+    test('requestSync uses the configured executor', () async {
+      final s = await freshStore();
+      final out = PendingOutbox(s, 'u:1');
+      await out.enqueue(
+        PendingOp(
+          id: 'configured',
+          type: PendingOpType.favoriteAdd,
+          payload: {'product_id': '1'},
+          createdAt: DateTime.now(),
+        ),
+      );
+      var calls = 0;
+      final engine = SyncEngine(
+        outboxForCurrentScope: () => out,
+        executor: (_) async {
+          calls++;
+          return true;
+        },
+      );
+      engine.requestSync();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(calls, 1);
+      expect(out.load(), isEmpty);
+      engine.dispose();
+    });
+
+    test(
+      'failed operation is reported waiting with its true pending count',
+      () async {
+        final s = await freshStore();
+        final out = PendingOutbox(s, 'u:1');
+        await out.enqueue(
+          PendingOp(
+            id: 'retry',
+            type: PendingOpType.favoriteAdd,
+            payload: {'product_id': '1'},
+            createdAt: DateTime.now(),
+          ),
+        );
+        final engine = SyncEngine(
+          outboxForCurrentScope: () => out,
+          executor: (_) async => false,
+        );
+        await engine.run();
+        expect(engine.status.value.state, SyncState.waiting);
+        expect(engine.status.value.pending, 1);
+        engine.dispose();
+      },
+    );
+
     test('single-flight: concurrent runs collapse', () async {
       final s = await freshStore();
       final out = PendingOutbox(s, 'u:1');
-      await out.enqueue(PendingOp(
-        id: 'op',
-        type: PendingOpType.favoriteAdd,
-        payload: {'product_id': '1'},
-        createdAt: DateTime.now(),
-      ));
+      await out.enqueue(
+        PendingOp(
+          id: 'op',
+          type: PendingOpType.favoriteAdd,
+          payload: {'product_id': '1'},
+          createdAt: DateTime.now(),
+        ),
+      );
       var calls = 0;
       Future<bool> slowExec(PendingOp op) async {
         calls++;

@@ -79,11 +79,23 @@ class J {
     return out;
   }
 
+  /// Product route that never degenerates to `/product/` when the backend
+  /// returns an empty slug. Prefer the slug, then the numeric id, then the
+  /// product list as a safe fallback.
+  static String productPath(Map<String, dynamic> product) {
+    final slug = str(product['slug']).trim();
+    if (slug.isNotEmpty) return '/product/$slug';
+    final id = i(product['id'] ?? product['product_id']);
+    return id > 0 ? '/product/$id' : '/products';
+  }
+
   static String html(dynamic value) {
     if (value == null) return '';
     if (value is String) {
       final text = value.trim();
-      if (text.isEmpty || text == 'null' || text == '[]' || text == '{}') return '';
+      if (text.isEmpty || text == 'null' || text == '[]' || text == '{}') {
+        return '';
+      }
       if ((text.startsWith('{') && text.endsWith('}')) ||
           (text.startsWith('[') && text.endsWith(']'))) {
         try {
@@ -126,7 +138,8 @@ class ApiResult {
     // Login/register responses nest the bearer token as data.access_token
     // (see CustomerAuthController::issueTokenResponse); top-level and
     // data.token shapes are kept for older/alternate endpoints.
-    final value = raw['token'] ??
+    final value =
+        raw['token'] ??
         raw['access_token'] ??
         dataMap['token'] ??
         dataMap['access_token'];

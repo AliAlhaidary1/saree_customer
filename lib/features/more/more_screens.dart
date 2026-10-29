@@ -223,11 +223,16 @@ class _SellersScreenState extends State<SellersScreen> {
         return;
       }
       setState(() {
-        if (filtered.isNotEmpty) {
-          items = more && search.trim().isEmpty
-              ? J.appendUnique(items, filtered)
-              : filtered;
-          total = items.length;
+        if (more) {
+          if (filtered.isNotEmpty) {
+            items = J.appendUnique(items, filtered);
+            total = items.length;
+          }
+        } else if (_activeFilterCount > 0 || filtered.isNotEmpty) {
+          // A filter reset must never keep rows from the previous filter:
+          // offline fallback may legitimately return an empty local set.
+          items = filtered;
+          total = filtered.length;
         }
         loading = false;
         loadingMore = false;
@@ -1850,9 +1855,7 @@ class _OffersScreenState extends State<OffersScreen> {
                         itemCount: products.length,
                         itemBuilder: (_, i) => ProductCard(
                           product: products[i],
-                          onTap: () => context.push(
-                            '/product/${products[i]['slug'] ?? products[i]['id']}',
-                          ),
+                          onTap: () => context.push(J.productPath(products[i])),
                           onAdd: () =>
                               addProductFromCatalog(context, products[i]),
                         ),
@@ -1895,6 +1898,12 @@ class _SearchScreenState extends State<SearchScreen> {
   /// query's late response overwrite the latest query's results.
   int _seq = 0;
 
+  void _useRecentSearch(String q) {
+    controller.text = q;
+    controller.selection = TextSelection.collapsed(offset: q.length);
+    _search(q);
+  }
+
   Future<void> _search(String q) async {
     final mySeq = ++_seq;
     if (q.trim().isEmpty) {
@@ -1902,10 +1911,14 @@ class _SearchScreenState extends State<SearchScreen> {
         items = [];
         searched = false;
         _hasMore = false;
+        _loadingMore = false;
       });
       return;
     }
-    setState(() => loading = true);
+    setState(() {
+      loading = true;
+      _loadingMore = false;
+    });
     // Local FTS first: instant offline results over synchronized rows.
     final local = await appController.catalogProductsLocal(
       search: q.trim(),
@@ -1972,7 +1985,11 @@ class _SearchScreenState extends State<SearchScreen> {
           onTimeout: () => ApiResult({'status': 0}),
         )
         .catchError((_) => ApiResult({'status': 0}));
-    if (!mounted || mySeq != _seq) return;
+    if (!mounted) return;
+    if (mySeq != _seq) {
+      setState(() => _loadingMore = false);
+      return;
+    }
     setState(() {
       if (result.ok) {
         items = J.appendUnique(items, result.dataMaps);
@@ -2034,7 +2051,7 @@ class _SearchScreenState extends State<SearchScreen> {
       body: loading
           ? const Center(child: CircularProgressIndicator())
           : !searched
-          ? _RecentSearches(onTap: _search)
+          ? _RecentSearches(onTap: _useRecentSearch)
           : items.isEmpty
           ? EmptyState(
               message: app.t(
@@ -2095,8 +2112,7 @@ class _SearchScreenState extends State<SearchScreen> {
                         fontWeight: FontWeight.w700,
                       ),
                     ),
-                    onTap: () =>
-                        context.push('/product/${item['slug'] ?? item['id']}'),
+                    onTap: () => context.push(J.productPath(item)),
                   ),
                 ),
               ],

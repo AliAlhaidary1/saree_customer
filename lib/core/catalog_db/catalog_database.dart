@@ -389,13 +389,12 @@ class CatalogDao {
         // cannot be distinguished from "variants omitted", so it prunes
         // nothing (and avoids `NOT IN ()` edge semantics).
         if (freshVariantIds.isNotEmpty) {
-          await (_db.delete(_db.productVariants)
-                ..where(
-                  (v) =>
-                      v.scope.equals(scope) &
-                      v.productId.equals(r.serverId) &
-                      v.serverId.isNotIn(freshVariantIds),
-                ))
+          await (_db.delete(_db.productVariants)..where(
+                (v) =>
+                    v.scope.equals(scope) &
+                    v.productId.equals(r.serverId) &
+                    v.serverId.isNotIn(freshVariantIds),
+              ))
               .go();
         }
         await _db.customStatement(
@@ -538,9 +537,7 @@ class CatalogDao {
   /// All scoped stores without paging. The stores table is small and always
   /// fully walked, so offline callers page/filter/sort it in memory.
   Future<List<Store>> allStores(String scope) {
-    return (_db.select(
-      _db.stores,
-    )..where((s) => s.scope.equals(scope))).get();
+    return (_db.select(_db.stores)..where((s) => s.scope.equals(scope))).get();
   }
 
   /// Store ids having at least one listed product in [categoryId]. Mirrors the
@@ -559,7 +556,8 @@ class CatalogDao {
     return rows.map((r) => r.read(expr)).whereType<int>().toSet();
   }
 
-  Future<Store?> getStoreById(String scope, int serverId) {    return (_db.select(_db.stores)
+  Future<Store?> getStoreById(String scope, int serverId) {
+    return (_db.select(_db.stores)
           ..where((s) => s.scope.equals(scope) & s.serverId.equals(serverId)))
         .getSingleOrNull();
   }
@@ -685,7 +683,7 @@ class CatalogDao {
     };
     final from = search.trim().isNotEmpty
         ? 'products_fts AS f JOIN products AS p '
-            'ON p.scope = f.scope AND p.server_id = f.server_id '
+              'ON p.scope = f.scope AND p.server_id = f.server_id '
         : 'products AS p ';
     vars.add(Variable.withInt(limit));
     vars.add(Variable.withInt(offset));
@@ -703,10 +701,10 @@ class CatalogDao {
   /// Count sections or haraj rows for the given scope.
   Future<int> sectionHarajCount(String scope, String type) async {
     final expr = _db.categories.serverId.count();
-    final q = _db.selectOnly(_db.categories)..addColumns([expr])
+    final q = _db.selectOnly(_db.categories)
+      ..addColumns([expr])
       ..where(
-        _db.categories.scope.equals(scope) &
-            _db.categories.type.equals(type),
+        _db.categories.scope.equals(scope) & _db.categories.type.equals(type),
       );
     final row = await q.getSingle();
     return row.read(expr) ?? 0;
@@ -781,7 +779,7 @@ class CatalogDao {
     }
     final from = search.trim().isNotEmpty
         ? 'products_fts AS f JOIN products AS p '
-            'ON p.scope = f.scope AND p.server_id = f.server_id '
+              'ON p.scope = f.scope AND p.server_id = f.server_id '
         : 'products AS p ';
     final row = await _db
         .customSelect(
@@ -816,15 +814,23 @@ class CatalogDao {
         );
         return;
       }
+      // Invert the predicate: clear the whole scope once, then re-list the
+      // ids observed in the walk. Chunked `NOT IN` would clear rows present in
+      // a later chunk (each chunk only protects its own ids).
+      await _db.customStatement(
+        'UPDATE products SET is_listed = 0 WHERE scope = ?;',
+        [scope],
+      );
       var offset = 0;
       while (offset < ids.length) {
-        final end =
-            offset + chunkSize > ids.length ? ids.length : offset + chunkSize;
+        final end = offset + chunkSize > ids.length
+            ? ids.length
+            : offset + chunkSize;
         final chunk = ids.sublist(offset, end);
         final ph = List.filled(chunk.length, '?').join(', ');
         await _db.customStatement(
-          'UPDATE products SET is_listed = 0 WHERE scope = ? '
-          'AND server_id NOT IN ($ph);',
+          'UPDATE products SET is_listed = 1 WHERE scope = ? '
+          'AND server_id IN ($ph);',
           [scope, ...chunk],
         );
         offset = end;
@@ -860,17 +866,34 @@ class CatalogDao {
         ]);
         return;
       }
-      var offset = 0;
-      while (offset < ids.length) {
-        final end =
-            offset + chunkSize > ids.length ? ids.length : offset + chunkSize;
-        final chunk = ids.sublist(offset, end);
-        final ph = List.filled(chunk.length, '?').join(', ');
+      // Keep every observed id in one temp set, then delete in a single
+      // statement. Chunked `NOT IN` would delete rows kept by a later chunk.
+      const keepTable = 'catalog_missing_keep_ids';
+      await _db.customStatement('DROP TABLE IF EXISTS temp.$keepTable;');
+      await _db.customStatement(
+        'CREATE TEMP TABLE $keepTable (id INTEGER PRIMARY KEY);',
+      );
+      try {
+        var offset = 0;
+        while (offset < ids.length) {
+          final end = offset + chunkSize > ids.length
+              ? ids.length
+              : offset + chunkSize;
+          final chunk = ids.sublist(offset, end);
+          final values = List.filled(chunk.length, '(?)').join(', ');
+          await _db.customStatement(
+            'INSERT OR IGNORE INTO $keepTable (id) VALUES $values;',
+            chunk,
+          );
+          offset = end;
+        }
         await _db.customStatement(
-          'DELETE FROM $table WHERE scope = ? AND server_id NOT IN ($ph);',
-          [scope, ...chunk],
+          'DELETE FROM $table WHERE scope = ? '
+          'AND server_id NOT IN (SELECT id FROM $keepTable);',
+          [scope],
         );
-        offset = end;
+      } finally {
+        await _db.customStatement('DROP TABLE IF EXISTS temp.$keepTable;');
       }
     });
   }

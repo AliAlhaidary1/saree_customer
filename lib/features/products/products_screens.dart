@@ -315,9 +315,11 @@ class _ProductsScreenState extends State<ProductsScreen> {
         }
         setState(() {
           // Dedupe by stable server id: offset pages over live backend data
-          // can repeat rows when items are inserted between requests.
+          // can repeat rows when items are inserted between requests. The
+          // cursor must advance by the RAW page size, never by the deduped
+          // list length (that repeated/looped over the same page).
           items = reset ? next : J.appendUnique(items, next);
-          offset = items.length;
+          offset = reset ? next.length : offset + next.length;
           hasMore = next.length >= AppConfig.productPageSize;
           loading = false;
           loadingMore = false;
@@ -357,13 +359,13 @@ class _ProductsScreenState extends State<ProductsScreen> {
                 canDeliver: canDeliver,
                 isReturnable: isReturnable,
                 limit: AppConfig.productPageSize,
-                offset: items.length,
+                offset: offset,
               );
         if (!mounted || mySeq != _seq) return;
         setState(() {
           if (local.isNotEmpty) {
             items = reset ? local : J.appendUnique(items, local);
-            offset = items.length;
+            offset = reset ? local.length : offset + local.length;
             hasMore = local.length >= AppConfig.productPageSize;
             loading = false;
           } else {
@@ -392,13 +394,13 @@ class _ProductsScreenState extends State<ProductsScreen> {
         canDeliver: canDeliver,
         isReturnable: isReturnable,
         limit: AppConfig.productPageSize,
-        offset: reset ? 0 : items.length,
+        offset: reset ? 0 : offset,
       );
       if (!mounted || mySeq != _seq) return;
       setState(() {
         if (local.isNotEmpty) {
           items = reset ? local : J.appendUnique(items, local);
-          offset = items.length;
+          offset = reset ? local.length : offset + local.length;
           hasMore = local.length >= AppConfig.productPageSize;
           loading = false;
         } else {
