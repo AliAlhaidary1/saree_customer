@@ -8,6 +8,7 @@ import '../../core/offline/operation_policy.dart';
 import '../../widgets/app_image.dart';
 import '../../widgets/requires_internet_dialog.dart';
 import '../../widgets/ui_helpers.dart';
+import 'assistant_contract.dart';
 
 class FaqScreen extends StatefulWidget {
   const FaqScreen({super.key});
@@ -98,9 +99,11 @@ class _AssistantScreenState extends State<AssistantScreen> {
   final messages = <Map<String, dynamic>>[];
   bool loading = false;
   bool confirming = false;
+  String? conversationId;
 
   /// Thread history is local-only (last 30 text turns, no auto-send).
   static const _threadKey = 'assistant_thread';
+  static const _conversationKey = 'assistant_conversation_id';
 
   @override
   void initState() {
@@ -110,6 +113,10 @@ class _AssistantScreenState extends State<AssistantScreen> {
       if (snap is List && snap.isNotEmpty) {
         messages.addAll(J.maps(snap).take(30));
       }
+      final savedConversation = J.str(
+        appController.readAccountSnapshot(_conversationKey),
+      );
+      if (savedConversation.isNotEmpty) conversationId = savedConversation;
     } catch (_) {}
   }
 
@@ -122,6 +129,12 @@ class _AssistantScreenState extends State<AssistantScreen> {
       final tail = slim.length > 30 ? slim.sublist(slim.length - 30) : slim;
       await appController.cacheAccountSnapshot(_threadKey, tail);
     } catch (_) {}
+  }
+
+  Future<void> _persistConversation() async {
+    final id = conversationId?.trim() ?? '';
+    if (id.isEmpty) return;
+    await appController.cacheAccountSnapshot(_conversationKey, id);
   }
 
   @override
@@ -209,6 +222,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
       final result = await appController.api.assistantChat(
         text,
         history: history,
+        conversationId: conversationId,
       );
       if (!mounted) return;
       final data = result.dataMap;
@@ -216,6 +230,11 @@ class _AssistantScreenState extends State<AssistantScreen> {
           ? J.map(data['action'])
           : <String, dynamic>{};
       final products = J.maps(data['products']);
+      final nextConversationId = J.str(J.map(data['meta'])['conversation_id']);
+      if (nextConversationId.isNotEmpty) {
+        conversationId = nextConversationId;
+        _persistConversation();
+      }
       if (!mounted) return;
       setState(() {
         loading = false;
@@ -275,41 +294,6 @@ class _AssistantScreenState extends State<AssistantScreen> {
     }
   }
 
-  /// Web parity with AssistantChat.jsx PATH_MAP (web path → flutter path).
-  String _assistantPath(String path) {
-    const map = {
-      '/login': '/login',
-      '/forgot-password': '/login',
-      '/faqs': '/faq',
-      '/faq': '/faq',
-      '/privacy-policy': '/privacy',
-      '/returns': '/policy/ReturnsAndExchangesPolicy',
-      '/shipping': '/policy/Shipping_Policy',
-      '/cancellation': '/policy/Cancellation_Policy',
-      '/favorites': '/wishlist',
-      '/orders': '/orders',
-      '/profile/orders': '/orders',
-      '/addresses': '/addresses',
-      '/profile/address': '/addresses',
-      '/wallet': '/wallet',
-      '/profile/wallet-transaction': '/wallet',
-      '/seller/register': '/register',
-      '/register/customer': '/register',
-      '/register/seller': '/register',
-      '/register/delivery': '/register',
-      '/categories': '/',
-      '/flash-sales': '/offers',
-      '/profile/wishlist': '/wishlist',
-    };
-    final raw = path.trim();
-    if (raw.isEmpty || raw == '#') return '/';
-    if (map.containsKey(raw)) return map[raw]!;
-    if (raw.startsWith('/store/')) {
-      return '/store/${raw.substring('/store/'.length)}';
-    }
-    return raw;
-  }
-
   @override
   Widget build(BuildContext context) {
     final app = appController;
@@ -329,7 +313,9 @@ class _AssistantScreenState extends State<AssistantScreen> {
                 // the next cold start restores the "deleted" history.
                 try {
                   appController.removeAccountSnapshot(_threadKey);
+                  appController.removeAccountSnapshot(_conversationKey);
                 } catch (_) {}
+                conversationId = null;
               },
               icon: const Icon(Icons.add_comment_outlined),
               tooltip: app.t('new_chat'),
@@ -368,41 +354,12 @@ class _AssistantScreenState extends State<AssistantScreen> {
                       children: [
                         Text(J.str(item['text'])),
                         _actionWidget(J.map(item['action'])),
-                        for (final product in J.maps(item['products']))
-                          ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: SizedBox(
-                              width: 48,
-                              height: 48,
-                              child: AppImage(
-                                J.str(product['image_url']),
-                                placeholder: app.placeholder,
-                              ),
-                            ),
-                            title: Text(J.str(product['name'])),
-                            subtitle: Text(
-                              [
-                                if (J.str(product['seller_name']).isNotEmpty)
-                                  J.str(product['seller_name']),
-                                if (J.str(product['price_text']).isNotEmpty)
-                                  J.str(product['price_text']),
-                              ].join(' · '),
-                            ),
-                            trailing: Text(
-                              app.t('assistant_open_product'),
-                              style: TextStyle(
-                                color: app.accentColor,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 12,
-                              ),
-                            ),
-                            onTap: () {
-                              final path = J.str(product['path']);
-                              openAppLocation(
-                                context,
-                                path.isNotEmpty ? path : J.productPath(product),
-                              );
-                            },
+                        for (final product in assistantProductActions(
+                          item['products'],
+                        ))
+                          _AssistantProductCard(
+                            action: product,
+                            pushBot: (text) => _pushBot(text),
                           ),
                         for (final seller in J.maps(item['sellers']))
                           TextButton(
@@ -429,7 +386,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
                             child: FilledButton(
                               onPressed: () => openAppLocation(
                                 context,
-                                _assistantPath(J.str(link['path'])),
+                                assistantAppPath(J.str(link['path'])),
                               ),
                               child: Text(J.str(link['title'])),
                             ),
@@ -523,7 +480,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: FilledButton.tonal(
-        onPressed: () => openAppLocation(context, _assistantPath(url)),
+        onPressed: () => openAppLocation(context, assistantAppPath(url)),
         child: Text(
           J.str(action['label']).isNotEmpty
               ? J.str(action['label'])

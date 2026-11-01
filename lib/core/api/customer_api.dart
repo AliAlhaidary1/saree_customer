@@ -241,6 +241,24 @@ class CustomerApi {
     );
   }
 
+  Future<ApiResult> _postWithReceiveTimeout(
+    String path,
+    Map<String, dynamic>? fields,
+    Duration receiveTimeout,
+  ) {
+    return _guard(
+      () => _dio.post(
+        path,
+        data: FormData.fromMap(_clean(fields) ?? {}),
+        options: Options(
+          contentType: Headers.multipartFormDataContentType,
+          receiveTimeout: receiveTimeout,
+        ),
+      ),
+      kind: inferRequestKind(path, method: 'POST'),
+    );
+  }
+
   Future<ApiResult> _postRaw(String path, FormData data) {
     return _guard(
       () => _dio.post(path, data: data, options: _form),
@@ -621,11 +639,14 @@ class CustomerApi {
   Future<ApiResult> assistantChat(
     String message, {
     List<Map<String, String>> history = const [],
+    String? conversationId,
   }) {
-    return _post('assistant/ask', {
+    return _postWithReceiveTimeout('assistant/ask', {
       'question': message,
       if (history.isNotEmpty) 'history': jsonEncode(history),
-    });
+      if (conversationId != null && conversationId.trim().isNotEmpty)
+        'conversation_id': conversationId.trim(),
+    }, const Duration(seconds: 95));
   }
 
   Future<ApiResult> assistantSearch(String query, {int limit = 10}) {
