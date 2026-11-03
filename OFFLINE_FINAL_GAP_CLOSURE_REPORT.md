@@ -113,7 +113,7 @@ Commands actually executed (read-only, no install, no APK transfer):
   PATH (used full SDK path `D:\Android\Sdk\platform-tools\adb.exe`).
 - Backend `.env` (read-only): `APP_ENV=local`,
   `APP_URL=http://127.0.0.1:8000`, `DB_HOST=mysql`,
-  `DB_DATABASE=sql_laravel_marabmall_cloud` (shared dev database).
+  `DB_DATABASE=sql_laravel_sreamart_com` (shared dev database).
 - App default endpoint (`lib/core/config.dart:18-21`): `API_URL` defaults to
   `https://admin.sreamart.com` (production). The codebase itself flags
   loopback URLs as device-unreachable (`isUnreachableOnDevice`,
@@ -145,7 +145,7 @@ non-production infrastructure.
 ## 4. Multi-city integration status: BLOCKED (unchanged, evidence restated)
 
 No genuine multi-city test can run safely: the only reachable database is the
-shared single-city dev database (`DB_DATABASE=sql_laravel_marabmall_cloud`);
+shared single-city dev database (`DB_DATABASE=sql_laravel_sreamart_com`);
 creating a second city row would alter shared single-city-mode behavior for
 all consumers. No query was issued against it in this session (not even
 read-only, to avoid any doubt about contact with shared state). DAO- and

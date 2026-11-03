@@ -17,6 +17,7 @@ import 'features/haraj/haraj_screens.dart';
 import 'features/home/home_screen.dart';
 import 'features/more/more_screens.dart';
 import 'features/notifications/notifications_screen.dart';
+import 'features/onboarding/app_tutorial.dart';
 import 'features/products/categories_screen.dart';
 import 'features/products/products_screens.dart';
 import 'widgets/brand_header.dart';
@@ -464,7 +465,9 @@ class AppShell extends StatelessWidget {
 
   /// Search exists only on searchable pages (home, products, haraj).
   Widget? _headerSearchFor(String location) {
-    if (location == '/') return const HeaderSearchBar();
+    if (location == '/') {
+      return HeaderSearchBar(key: AppTutorialKeys.search);
+    }
     if (location == '/haraj') return const HeaderSearchBar(onHaraj: true);
     return null;
   }
@@ -472,6 +475,7 @@ class AppShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = appController;
+    final isHome = location == '/';
     if (app.maintenance) {
       return Scaffold(
         body: EmptyState(
@@ -480,62 +484,68 @@ class AppShell extends StatelessWidget {
         ),
       );
     }
-    return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: const SystemUiOverlayStyle(
-        statusBarColor: Colors.transparent,
-        statusBarIconBrightness: Brightness.light,
-        statusBarBrightness: Brightness.dark,
-      ),
-      child: Scaffold(
-        backgroundColor: AppTheme.primaryNavy,
-        body: Column(
-          children: [
-            BrandHeader(
-              app: app,
-              title: _headerTitle(),
-              searchChild: _headerSearchFor(location),
-            ),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: ClipRRect(
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(32),
+    return AppTutorial(
+      enabled: isHome && app.onboardingCompleted && !app.appTutorialCompleted,
+      child: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.light,
+          statusBarBrightness: Brightness.dark,
+        ),
+        child: Scaffold(
+          backgroundColor: AppTheme.primaryNavy,
+          body: Column(
+            children: [
+              BrandHeader(
+                app: app,
+                title: _headerTitle(),
+                searchChild: _headerSearchFor(location),
+                cartKey: isHome ? AppTutorialKeys.cart : null,
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: ClipRRect(
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(32),
+                    ),
+                    // Material (not Container): ListTile paints background/ink
+                    // on the nearest Material ancestor; a bare ColoredBox would
+                    // hide those and trips a framework assertion.
+                    child: Material(color: AppTheme.surfaceGrey, child: child),
                   ),
-                  // Material (not Container): ListTile paints background/ink
-                  // on the nearest Material ancestor; a bare ColoredBox would
-                  // hide those and trips a framework assertion.
-                  child: Material(color: AppTheme.surfaceGrey, child: child),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
+          floatingActionButton: FloatingActionButton(
+            key: isHome ? AppTutorialKeys.assistant : null,
+            // Unique per shell instance: /cart is now rendered in its own
+            // AppShell above the tab shell, and two visible FABs sharing one
+            // hero tag trip the Hero duplicate-tag assertion.
+            heroTag: 'assistant_fab_$location',
+            mini: true,
+            backgroundColor: AppTheme.accentOrange,
+            tooltip: app.t('assistant_title'),
+            onPressed: () => showAssistantSheet(context),
+            child: const Icon(Icons.smart_toy_outlined, color: Colors.white),
+          ),
+          bottomNavigationBar: onTab
+              ? NavigationBar(
+                  selectedIndex: index,
+                  onDestinationSelected: (i) => context.go(tabs[i].path),
+                  destinations: [
+                    for (final tab in tabs)
+                      NavigationDestination(
+                        key: isHome ? AppTutorialKeys.forTab(tab.path) : null,
+                        icon: Icon(tab.icon),
+                        selectedIcon: Icon(tab.selectedIcon),
+                        label: app.t(tab.labelKey),
+                      ),
+                  ],
+                )
+              : null,
         ),
-        floatingActionButton: FloatingActionButton(
-          // Unique per shell instance: /cart is now rendered in its own
-          // AppShell above the tab shell, and two visible FABs sharing one
-          // hero tag trip the Hero duplicate-tag assertion.
-          heroTag: 'assistant_fab_$location',
-          mini: true,
-          backgroundColor: AppTheme.accentOrange,
-          tooltip: app.t('assistant_title'),
-          onPressed: () => context.push('/assistant'),
-          child: const Icon(Icons.smart_toy_outlined, color: Colors.white),
-        ),
-        bottomNavigationBar: onTab
-            ? NavigationBar(
-                selectedIndex: index,
-                onDestinationSelected: (i) => context.go(tabs[i].path),
-                destinations: [
-                  for (final tab in tabs)
-                    NavigationDestination(
-                      icon: Icon(tab.icon),
-                      selectedIcon: Icon(tab.selectedIcon),
-                      label: app.t(tab.labelKey),
-                    ),
-                ],
-              )
-            : null,
       ),
     );
   }

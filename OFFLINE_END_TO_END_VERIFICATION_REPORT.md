@@ -31,7 +31,7 @@ controlled internal testing.
 - Configured API base in setup: `http://127.0.0.1:8000/customer/`.
   Effective backend `.env`: `APP_ENV=local`,
   `DB_CONNECTION=mysql`, `DB_HOST=mysql` (Docker service),
-  `DB_DATABASE=sql_laravel_marabmall_cloud`. Secrets present in `.env`
+  `DB_DATABASE=sql_laravel_sreamart_com`. Secrets present in `.env`
   (mail/Stripe-test/Twilio/LLM keys) are NOT reproduced here.
 - Toolchain: Flutter 3.47.1, Dart 3.13.1, Windows x64.
 - Limiting facts: no PHP runtime in PATH, Docker daemon down

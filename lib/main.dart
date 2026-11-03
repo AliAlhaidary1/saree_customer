@@ -13,6 +13,7 @@ import 'core/app_controller.dart';
 import 'core/app_theme.dart';
 import 'core/diag.dart';
 import 'core/push_notifications.dart';
+import 'features/onboarding/onboarding_screen.dart';
 import 'widgets/splash_screen.dart';
 
 Future<void> main() async {
@@ -56,6 +57,7 @@ class _BootstrapAppState extends State<BootstrapApp>
   final apiUrl = TextEditingController();
   bool _showSplash = true;
   bool _bootstrapDone = false;
+  bool _showOnboarding = false;
 
   @override
   void initState() {
@@ -103,6 +105,7 @@ class _BootstrapAppState extends State<BootstrapApp>
     final failed =
         appController.bootstrapError != null && appController.cities.isEmpty;
     _bootstrapDone = true;
+    _showOnboarding = !failed && !appController.onboardingCompleted;
     if (!failed) {
       final swRouter = Stopwatch()..start();
       router = buildRouter();
@@ -238,6 +241,31 @@ class _BootstrapAppState extends State<BootstrapApp>
               ],
             ),
           ),
+        ),
+      );
+    }
+    if (_showOnboarding) {
+      final locale = appController.i18n.locale;
+      return MaterialApp(
+        key: const ValueKey('onboarding'),
+        debugShowCheckedModeBanner: false,
+        locale: locale,
+        supportedLocales: const [Locale('ar'), Locale('en')],
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        theme: AppTheme.build(locale: locale, brand: appController.brand),
+        builder: (context, child) => Directionality(
+          textDirection: appController.i18n.direction,
+          child: child ?? const SizedBox.shrink(),
+        ),
+        home: OnboardingScreen(
+          onComplete: () async {
+            await appController.completeOnboarding();
+            if (mounted) setState(() => _showOnboarding = false);
+          },
         ),
       );
     }

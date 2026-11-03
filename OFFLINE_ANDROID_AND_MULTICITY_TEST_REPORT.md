@@ -16,19 +16,19 @@ backend branch `main` HEAD `d1d26b2`. All staged/unstaged/untracked entries
 preserved; one pre-existing backend stash entry untouched.
 
 - Docker Compose (`saree_back/docker-compose.yml`): `app` serves port 8000
-  with `DB_HOST=mysql`, `DB_DATABASE=sql_laravel_marabmall_cloud`;
+  with `DB_HOST=mysql`, `DB_DATABASE=sql_laravel_sreamart_com`;
   `mysql` is `mysql:8.0` with `MYSQL_ALLOW_EMPTY_PASSWORD=yes` and a Docker
   volume (`mysql_data`), port-mapped `3307:3306`. Host listeners confirmed:
   `0.0.0.0:8000` and `0.0.0.0:3307` owned by the Docker backend proxy.
 - Laravel `.env` (keys only, no values printed): `APP_ENV=local`,
   `APP_DEBUG=true`, `APP_URL=http://127.0.0.1:8000`, `DB_CONNECTION=mysql`,
-  `DB_HOST=mysql`, `DB_PORT=3306`, `DB_DATABASE=sql_laravel_marabmall_cloud`,
+  `DB_HOST=mysql`, `DB_PORT=3306`, `DB_DATABASE=sql_laravel_sreamart_com`,
   `DB_USERNAME=root`, `QUEUE_CONNECTION=sync`, `SESSION_DRIVER=file`,
   `DEMO_MODE=0`, `DEV_MODE=0`, `WHATSAPP_OTP_ENABLED=true`.
 - Actual database identity (queried over `127.0.0.1:3307`): server
   `@@hostname=39658ae75a9b` (a Docker container id, not a cloud host),
   port 3306-in-container, `MySQL 8.0.46`, database
-  `sql_laravel_marabmall_cloud`, 149 tables. Verdict: genuinely local
+  `sql_laravel_sreamart_com`, 149 tables. Verdict: genuinely local
   development infrastructure — `APP_ENV=local` was NOT the sole evidence.
 - External side effects: Stripe secret/public keys are empty and
   `stripe_payment_method=0` (only `cod_payment_method=1`); PayPal/Razorpay/

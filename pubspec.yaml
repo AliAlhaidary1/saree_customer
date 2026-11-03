@@ -33,6 +33,7 @@ dependencies:
   sqlite3_flutter_libs: ^0.6.0+eol
   sqlite3: ^3.7.1
   image: ^4.12.0
+  tutorial_coach_mark: ^1.3.4
 
 dev_dependencies:
   flutter_test:
@@ -51,11 +52,13 @@ flutter:
 flutter_launcher_icons:
   android: launcher_icon
   ios: true
-  image_path: assets/brand/sareemart-mark.png
-  adaptive_icon_background: '#0A2540'
-  adaptive_icon_foreground: assets/brand/sareemart-mark.png
+  image_path: assets/brand/sareemart-launcher.png
+  image_path_ios: assets/brand/sareemart-launcher-ios.png
+  remove_alpha_ios: true
+  adaptive_icon_background: '#FFFFFF'
+  adaptive_icon_foreground: assets/brand/sareemart-launcher.png
   web:
     generate: true
-    image_path: assets/brand/sareemart-favicon.png
-    background_color: '#0A2540'
+    image_path: assets/brand/sareemart-launcher.png
+    background_color: '#FFFFFF'
     theme_color: '#0A2540'

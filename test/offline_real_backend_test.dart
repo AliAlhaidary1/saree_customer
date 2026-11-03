@@ -1,7 +1,7 @@
 // Real Laravel/MySQL integration tests (tag: [real]).
 //
 // Every test here exercises the REAL local backend
-// (http://127.0.0.1:8000, Docker MySQL `sql_laravel_marabmall_cloud`)
+// (http://127.0.0.1:8000, Docker MySQL `sql_laravel_sreamart_com`)
 // through the REAL production Flutter stack (CustomerApi/Dio,
 // CatalogSyncService, CatalogDao, OfflineCache, PendingOutbox,
 // AppController.runPendingOp, ImagePrefetch).
@@ -74,9 +74,9 @@ CustomerApi realApi() => CustomerApi(baseUrl: _base);
 /// the in-stock hard filter); RB renames product 289 and reprices the
 /// variant. Cheap and idempotent.
 Future<void> ensureFixtureVisible() async {
-  await mysql('UPDATE sql_laravel_marabmall_cloud.product_variants SET '
+  await mysql('UPDATE sql_laravel_sreamart_com.product_variants SET '
       'stock=10, status=1, price=100.0 WHERE id=357;');
-  await mysql('UPDATE sql_laravel_marabmall_cloud.products SET '
+  await mysql('UPDATE sql_laravel_sreamart_com.products SET '
       'name=\'E2EOFFLINE Product\', deleted_at=NULL, status=1, '
       'is_approved=1 WHERE id=289;');
 }
@@ -267,38 +267,38 @@ void main() {
       const slugAppend = 'e2eoffline-rb-append';
       const slugDelete = 'e2eoffline-rb-deleteme';
       // Idempotent setup: drop prior-run marker rows first.
-      await mysql('DELETE FROM sql_laravel_marabmall_cloud.product_variants '
+      await mysql('DELETE FROM sql_laravel_sreamart_com.product_variants '
           'WHERE product_id IN (SELECT id FROM '
-          '(SELECT id FROM sql_laravel_marabmall_cloud.products WHERE '
+          '(SELECT id FROM sql_laravel_sreamart_com.products WHERE '
           'slug IN (\'$slugAppend\', \'$slugDelete\')) AS t);');
-      await mysql('DELETE FROM sql_laravel_marabmall_cloud.products WHERE '
+      await mysql('DELETE FROM sql_laravel_sreamart_com.products WHERE '
           'slug IN (\'$slugAppend\', \'$slugDelete\');');
       // Reset shared-server state mutated by prior runs (deterministic
       // baseline: the rename/price change must land AFTER this sync).
-      await mysql('UPDATE sql_laravel_marabmall_cloud.products SET '
+      await mysql('UPDATE sql_laravel_sreamart_com.products SET '
           'name=\'E2EOFFLINE Product\', deleted_at=NULL WHERE id=289;');
-      await mysql('UPDATE sql_laravel_marabmall_cloud.product_variants SET '
+      await mysql('UPDATE sql_laravel_sreamart_com.product_variants SET '
           'price=100.0 WHERE id=357;');
       // Extra fixtures for this scenario (marker-scoped).
-      await mysql('INSERT INTO sql_laravel_marabmall_cloud.products '
+      await mysql('INSERT INTO sql_laravel_sreamart_com.products '
           '(name, slug, category_id, seller_id, image, description, status, '
           'is_approved, return_status, return_days, created_at, updated_at) '
           'SELECT \'E2EOFFLINE RB Append\', \'$slugAppend\', category_id, '
           'seller_id, \'\', \'rb\', 1, 1, 1, 7, NOW(), NOW() FROM '
-          'sql_laravel_marabmall_cloud.products WHERE id=289 LIMIT 1;');
-      await mysql('INSERT INTO sql_laravel_marabmall_cloud.product_variants '
+          'sql_laravel_sreamart_com.products WHERE id=289 LIMIT 1;');
+      await mysql('INSERT INTO sql_laravel_sreamart_com.product_variants '
           '(product_id, type, status, measurement, price, discounted_price, '
-          'stock) SELECT (SELECT id FROM sql_laravel_marabmall_cloud.products '
+          'stock) SELECT (SELECT id FROM sql_laravel_sreamart_com.products '
           'WHERE slug=\'$slugAppend\'), \'packet\', 1, 1, 100.0, 0.0, 10;');
-      await mysql('INSERT INTO sql_laravel_marabmall_cloud.products '
+      await mysql('INSERT INTO sql_laravel_sreamart_com.products '
           '(name, slug, category_id, seller_id, image, description, status, '
           'is_approved, return_status, return_days, created_at, updated_at) '
           'SELECT \'E2EOFFLINE RB DeleteMe\', \'$slugDelete\', category_id, '
           'seller_id, \'\', \'rb\', 1, 1, 1, 7, NOW(), NOW() FROM '
-          'sql_laravel_marabmall_cloud.products WHERE id=289 LIMIT 1;');
-      await mysql('INSERT INTO sql_laravel_marabmall_cloud.product_variants '
+          'sql_laravel_sreamart_com.products WHERE id=289 LIMIT 1;');
+      await mysql('INSERT INTO sql_laravel_sreamart_com.product_variants '
           '(product_id, type, status, measurement, price, discounted_price, '
-          'stock) SELECT (SELECT id FROM sql_laravel_marabmall_cloud.products '
+          'stock) SELECT (SELECT id FROM sql_laravel_sreamart_com.products '
           'WHERE slug=\'$slugDelete\'), \'packet\', 1, 1, 100.0, 0.0, 10;');
 
       final api = realApi();
@@ -323,17 +323,17 @@ void main() {
       final baseCount = await dao.productCount('city:1');
       final beforePrice = jsonDecode((await dao.getProductBySlug(
               'city:1', (await mysql('SELECT slug FROM '
-                  'sql_laravel_marabmall_cloud.products WHERE id=289;'))))!
+                  'sql_laravel_sreamart_com.products WHERE id=289;'))))!
           .payload);
       expect(beforePrice['name'], contains('E2EOFFLINE'));
 
       // Disconnect (dead port) + mutate the REAL database.
       final offlineApi = CustomerApi(baseUrl: 'http://127.0.0.1:9');
-      await mysql('UPDATE sql_laravel_marabmall_cloud.product_variants '
+      await mysql('UPDATE sql_laravel_sreamart_com.product_variants '
           'SET price=150.0 WHERE id=357;');
-      await mysql('UPDATE sql_laravel_marabmall_cloud.products '
+      await mysql('UPDATE sql_laravel_sreamart_com.products '
           'SET name=\'E2EOFFLINE Product RENAMED\' WHERE id=289;');
-      await mysql('UPDATE sql_laravel_marabmall_cloud.products '
+      await mysql('UPDATE sql_laravel_sreamart_com.products '
           'SET deleted_at=NOW() WHERE slug=\'$slugDelete\';');
       // Offline attempt fails closed, preserves everything.
       final off = await sync(offlineApi);
@@ -386,7 +386,7 @@ void main() {
           (await dao.searchProducts('city:1', 'E2EOFFLINE Product')).length,
           greaterThanOrEqualTo(1));
       // Stock-out: the listing hard-filter drops the row server-side.
-      await mysql('UPDATE sql_laravel_marabmall_cloud.product_variants SET '
+      await mysql('UPDATE sql_laravel_sreamart_com.product_variants SET '
           'stock=0 WHERE id=357;');
       try {
         expect((await sync()).complete, isTrue);
@@ -394,14 +394,14 @@ void main() {
             await dao.searchProducts('city:1', 'E2EOFFLINE Product'), isEmpty);
         expect((await dao.getProductById('city:1', 289))!.isListed, isFalse);
         // Restock: the row returns to browse on the next walk.
-        await mysql('UPDATE sql_laravel_marabmall_cloud.product_variants SET '
+        await mysql('UPDATE sql_laravel_sreamart_com.product_variants SET '
             'stock=10 WHERE id=357;');
         expect((await sync()).complete, isTrue);
         expect(
             (await dao.searchProducts('city:1', 'E2EOFFLINE Product')).length,
             greaterThanOrEqualTo(1));
       } finally {
-        await mysql('UPDATE sql_laravel_marabmall_cloud.product_variants SET '
+        await mysql('UPDATE sql_laravel_sreamart_com.product_variants SET '
             'stock=10, status=1 WHERE id=357;');
       }
     });
@@ -411,11 +411,11 @@ void main() {
         markTestSkipped('real backend unreachable');
       }
       const slug = 'e2eoffline-rc-backdate';
-      await mysql('DELETE FROM sql_laravel_marabmall_cloud.product_variants '
+      await mysql('DELETE FROM sql_laravel_sreamart_com.product_variants '
           'WHERE product_id IN (SELECT id FROM '
-          '(SELECT id FROM sql_laravel_marabmall_cloud.products WHERE '
+          '(SELECT id FROM sql_laravel_sreamart_com.products WHERE '
           'slug=\'$slug\') AS t);');
-      await mysql('DELETE FROM sql_laravel_marabmall_cloud.products WHERE '
+      await mysql('DELETE FROM sql_laravel_sreamart_com.products WHERE '
           'slug=\'$slug\';');
       final api = realApi();
       await ensureFixtureVisible();
@@ -435,16 +435,16 @@ void main() {
       expect((await sync(api)).complete, isTrue);
       // Backdated insert: created_at 2020 → first position under sort=old.
       // (With a variant: variant-less rows never enter the listing at all.)
-      await mysql('INSERT INTO sql_laravel_marabmall_cloud.products '
+      await mysql('INSERT INTO sql_laravel_sreamart_com.products '
           '(name, slug, category_id, seller_id, image, description, status, '
           'is_approved, return_status, return_days, created_at, updated_at) '
           'SELECT \'E2EOFFLINE RC Backdate\', \'$slug\', category_id, '
           'seller_id, \'\', \'rc\', 1, 1, 1, 7, \'2020-01-01 00:00:00\', '
-          '\'2020-01-01 00:00:00\' FROM sql_laravel_marabmall_cloud.products '
+          '\'2020-01-01 00:00:00\' FROM sql_laravel_sreamart_com.products '
           'WHERE id=289 LIMIT 1;');
-      await mysql('INSERT INTO sql_laravel_marabmall_cloud.product_variants '
+      await mysql('INSERT INTO sql_laravel_sreamart_com.product_variants '
           '(product_id, type, status, measurement, price, discounted_price, '
-          'stock) SELECT (SELECT id FROM sql_laravel_marabmall_cloud.products '
+          'stock) SELECT (SELECT id FROM sql_laravel_sreamart_com.products '
           'WHERE slug=\'$slug\'), \'packet\', 1, 1, 100.0, 0.0, 10;');
       final head = await api.products(
           latitude: 15.4624,
@@ -471,15 +471,15 @@ void main() {
       // payments share the key family). Deleting groups without sessions
       // leaves a stale completed session whose redelivery 500s server-side
       // (documented residual backend gap, §9) — clean all three here.
-      await mysql('DELETE FROM sql_laravel_marabmall_cloud.checkout_groups '
+      await mysql('DELETE FROM sql_laravel_sreamart_com.checkout_groups '
           'WHERE idempotency_key=\'$key\';');
-      await mysql('DELETE FROM sql_laravel_marabmall_cloud.checkout_sessions '
+      await mysql('DELETE FROM sql_laravel_sreamart_com.checkout_sessions '
           'WHERE user_id=79 AND idempotency_key=\'$key\';');
-      await mysql('DELETE FROM sql_laravel_marabmall_cloud.checkout_payments '
+      await mysql('DELETE FROM sql_laravel_sreamart_com.checkout_payments '
           'WHERE idempotency_key=\'payment-$key\';');
-      await mysql('DELETE FROM sql_laravel_marabmall_cloud.carts WHERE '
+      await mysql('DELETE FROM sql_laravel_sreamart_com.carts WHERE '
           'user_id=79;');
-      await mysql('INSERT INTO sql_laravel_marabmall_cloud.carts (user_id, '
+      await mysql('INSERT INTO sql_laravel_sreamart_com.carts (user_id, '
           'product_id, product_variant_id, qty, save_for_later, created_at, '
           'updated_at) VALUES (79, 289, 357, 1, 0, NOW(), NOW());');
       final a = await api.checkout(
@@ -502,11 +502,11 @@ void main() {
           (b.dataMap['checkout_group'] as Map)['id']);
       expect(gid2, gid);
       final n = await mysql('SELECT COUNT(*) FROM '
-          'sql_laravel_marabmall_cloud.checkout_groups WHERE '
+          'sql_laravel_sreamart_com.checkout_groups WHERE '
           'idempotency_key=\'$key\';');
       expect(n, '1');
       final pay = await mysql('SELECT COUNT(*) FROM '
-          'sql_laravel_marabmall_cloud.checkout_payments WHERE '
+          'sql_laravel_sreamart_com.checkout_payments WHERE '
           'checkout_group_id=$gid;');
       expect(pay, '1');
       // Offline checkout fails closed and creates nothing.
@@ -518,7 +518,7 @@ void main() {
       expect(off.ok, isFalse);
       expect(
           await mysql('SELECT COUNT(*) FROM '
-              'sql_laravel_marabmall_cloud.checkout_groups WHERE '
+              'sql_laravel_sreamart_com.checkout_groups WHERE '
               'idempotency_key=\'$keyOff\';'),
           '0');
     });
@@ -537,13 +537,13 @@ void main() {
       expect((await api.addFavorite(289)).ok, isTrue);
       expect(
           await mysql('SELECT COUNT(*) FROM '
-              'sql_laravel_marabmall_cloud.favorites WHERE user_id=79 AND '
+              'sql_laravel_sreamart_com.favorites WHERE user_id=79 AND '
               'product_id=289;'),
           '1');
       expect((await api.removeFavorite(289)).ok, isTrue);
       expect(
           await mysql('SELECT COUNT(*) FROM '
-              'sql_laravel_marabmall_cloud.favorites WHERE user_id=79 AND '
+              'sql_laravel_sreamart_com.favorites WHERE user_id=79 AND '
               'product_id=289;'),
           '0');
       // Real production queue path: toggle while offline queues a stamped op.
@@ -561,7 +561,7 @@ void main() {
       await PendingOutbox(c.store, 'u:79').remove(queued.first.id);
       expect(
           await mysql('SELECT COUNT(*) FROM '
-              'sql_laravel_marabmall_cloud.favorites WHERE user_id=79 AND '
+              'sql_laravel_sreamart_com.favorites WHERE user_id=79 AND '
               'product_id=289;'),
           '1');
       // Account switch: u:79-stamped op dropped under u:80, server untouched.
@@ -569,12 +569,12 @@ void main() {
       expect(await c.runPendingOp(queued.first), isTrue);
       expect(
           await mysql('SELECT COUNT(*) FROM '
-              'sql_laravel_marabmall_cloud.favorites WHERE user_id=80 AND '
+              'sql_laravel_sreamart_com.favorites WHERE user_id=80 AND '
               'product_id=289;'),
           '0');
       expect(
           await mysql('SELECT COUNT(*) FROM '
-              'sql_laravel_marabmall_cloud.favorites WHERE user_id=79 AND '
+              'sql_laravel_sreamart_com.favorites WHERE user_id=79 AND '
               'product_id=289;'),
           '1');
       await api.removeFavorite(289); // restore toggle state
@@ -682,7 +682,7 @@ void main() {
       expect(await sellerName(), 'E2EOFFLINE Store');
       // Server-side change (search bypasses the server 60s sellers cache,
       // so any staleness observed below is the client's own TTL window).
-      await mysql('UPDATE sql_laravel_marabmall_cloud.sellers SET '
+      await mysql('UPDATE sql_laravel_sreamart_com.sellers SET '
           'store_name=\'E2EOFFLINE Store RENAMED\' WHERE id=27;');
       try {
         // Same instance + same query: client TTL serves the stale snapshot.
@@ -691,7 +691,7 @@ void main() {
         api.invalidateCatalog();
         expect(await sellerName(), 'E2EOFFLINE Store RENAMED');
       } finally {
-        await mysql('UPDATE sql_laravel_marabmall_cloud.sellers SET '
+        await mysql('UPDATE sql_laravel_sreamart_com.sellers SET '
             'store_name=\'E2EOFFLINE Store\' WHERE id=27;');
         api.invalidateCatalog();
       }

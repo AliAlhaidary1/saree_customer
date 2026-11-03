@@ -28,6 +28,7 @@ class BrandHeader extends StatelessWidget {
     this.subtitle,
     this.onBack,
     this.searchChild,
+    this.cartKey,
   });
 
   final AppController app;
@@ -41,6 +42,7 @@ class BrandHeader extends StatelessWidget {
 
   /// Optional widget rendered below the top row (e.g. a search field).
   final Widget? searchChild;
+  final Key? cartKey;
 
   @override
   Widget build(BuildContext context) {
@@ -71,7 +73,7 @@ class BrandHeader extends StatelessWidget {
                     const SizedBox(width: 10),
                     Expanded(child: _titleBlock()),
                     const NotificationBell(),
-                    _CartButton(app: app),
+                    _CartButton(key: cartKey, app: app),
                     _AccountHeaderButton(app: app),
                   ],
                 ),
@@ -216,7 +218,7 @@ class BrandLogo extends StatelessWidget {
 }
 
 class _CartButton extends StatelessWidget {
-  const _CartButton({required this.app});
+  const _CartButton({super.key, required this.app});
   final AppController app;
 
   @override

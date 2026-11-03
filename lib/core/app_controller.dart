@@ -40,6 +40,16 @@ class AppController extends ChangeNotifier {
   late CustomerApi api;
   final i18n = I18n();
 
+  bool get onboardingCompleted =>
+      _prefs.getBool('first_run_onboarding_v1') ?? false;
+  bool get appTutorialCompleted =>
+      _prefs.getBool('first_run_tutorial_v1') ?? false;
+
+  Future<void> completeOnboarding() =>
+      _prefs.setBool('first_run_onboarding_v1', true);
+  Future<void> completeAppTutorial() =>
+      _prefs.setBool('first_run_tutorial_v1', true);
+
   // ---- Offline-first infrastructure (testable, no new native deps) ----
   late TokenVault vault;
   late LocalStore store;

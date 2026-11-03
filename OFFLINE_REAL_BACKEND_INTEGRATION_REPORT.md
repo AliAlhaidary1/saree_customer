@@ -23,7 +23,7 @@ stale-session redelivery gap are documented below.
   `saree_back-app-1` (`0.0.0.0:8000→8000`), assistant/qdrant/meilisearch/
   evolution stack. `docker compose config` confirms `APP_ENV=local`,
   `APP_URL=http://127.0.0.1:8000`, `DB_CONNECTION=mysql`, `DB_HOST=mysql`,
-  `DB_DATABASE=sql_laravel_marabmall_cloud`, root/empty-password, data volume
+  `DB_DATABASE=sql_laravel_sreamart_com`, root/empty-password, data volume
   `saree_back_mysql_data`. Nothing points to production (production host would
   be `sreamart.com`; all endpoints here are container-local). Secrets in
   `.env`/compose output are not reproduced in this report.
