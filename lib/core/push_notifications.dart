@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_controller.dart';
 import 'app_navigation.dart';
+import 'firebase_config.dart';
 
 /// Real push notifications (FCM) — parity with front `NotificationBootstrap.jsx`.
 ///
@@ -36,7 +37,7 @@ class PushNotifications {
   PushNotifications._();
 
   static const channelId = 'sreamart_high_importance';
-  static const channelName = 'تنبيهات سريع MART';
+  static const channelName = 'تنبيهات سريع مارت';
   static const _optionsCacheKey = 'sreamart_firebase_options';
 
   static bool enabled = false;
@@ -61,7 +62,7 @@ class PushNotifications {
 
   static FirebaseOptions? optionsFromSettings(Map<String, dynamic>? settings) {
     if (settings == null || settings.isEmpty) return null;
-    final apiKey = _pick(settings, ['apiKey', 'api_key']);
+    final apiKey = _pick(settings, ['androidApiKey', 'android_api_key', 'apiKey', 'api_key']);
     // Android needs its own appId (1:...:android:...). The shared web `appId`
     // does NOT work on Android — it is kept last and fails closed (disabled
     // gracefully) when no Android key exists. Per-app keys are served by the
@@ -145,8 +146,9 @@ class PushNotifications {
         await Firebase.initializeApp();
         return true;
       } catch (_) {}
-      final opts = optionsFromSettings(settings) ?? await _cachedOptions();
-      if (opts == null) return false;
+      final opts = optionsFromSettings(settings) ??
+          await _cachedOptions() ??
+          FirebaseConfig.options;
       await Firebase.initializeApp(options: opts);
       await _cacheOptions(opts);
       return true;
