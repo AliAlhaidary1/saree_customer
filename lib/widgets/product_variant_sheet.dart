@@ -233,7 +233,7 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
         // Silent success.
         setState(() => _optimistic.remove(key));
       }
-    } catch (_) {
+    } catch (e, st) {
       if (mySeq != _seq || !mounted) return;
       setState(() => _optimistic.remove(key));
       ScaffoldMessenger.of(context).showSnackBar(
@@ -245,7 +245,7 @@ class _ProductVariantSheetState extends State<ProductVariantSheet> {
   int _qtyFor(Map<String, dynamic> variant) {
     final app = appController;
     final key = '${variant['id']}';
-    final lines = app.isLoggedIn ? app.cartProducts : app.guestCart;
+    final lines = app.isLoggedIn ? app.cartProducts : app.visibleGuestCart;
     for (final item in lines) {
       if ('${item['product_variant_id'] ?? item['id']}' == key) {
         return J.i(item['qty'] ?? item['quantity'], 1);

@@ -161,6 +161,15 @@ class _CartScreenState extends State<CartScreen> {
     // screens, background reconciles). _mutateLine also setStates for the
     // busy flag; this only covers external updates.
     appController.addListener(_onCartTick);
+    // Heal silently when connectivity returns while the user sits on this
+    // screen: flush durable offline ops + refetch so lines/badges never lag
+    // behind reality (the app-level heal in AppController already covers
+    // reconcile; this pins the visible cart to the fresh server state).
+    _connListener = () {
+      if (!mounted || !appController.isOnline) return;
+      unawaited(appController.refreshCart());
+    };
+    appController.connectivity.addListener(_connListener!);
     // Cached lines render instantly; the network refresh runs silently
     // in the background so an empty cart never waits on the network.
     if (lines.isNotEmpty) {
@@ -171,12 +180,18 @@ class _CartScreenState extends State<CartScreen> {
     }
   }
 
+  VoidCallback? _connListener;
+
   void _onCartTick() {
     if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    final connListener = _connListener;
+    if (connListener != null) {
+      appController.connectivity.removeListener(connListener);
+    }
     try {
       appController.removeListener(_onCartTick);
     } catch (_) {}
@@ -238,7 +253,7 @@ class _CartScreenState extends State<CartScreen> {
 
   List<Map<String, dynamic>> get lines => appController.isLoggedIn
       ? appController.cartProducts
-      : appController.guestCart;
+      : appController.visibleGuestCart;
 
   bool _lineOutOfStock(Map<String, dynamic> e) {
     final unlimited =
@@ -603,6 +618,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   bool loadingCheckout = true;
   String? loadError;
   bool _staleCheckout = false;
+  String? _staleReason;
   bool _draftRestored = false;
 
   /// Local checkout draft id. The draft is NEVER auto-submitted and NEVER
@@ -615,8 +631,37 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     super.initState();
     _restoreDraft();
     note.addListener(_saveDraftSoon);
+    // Heal automatically when the link comes back: revalidate prices/stock —
+    // the stale banner disappears, totals refresh, and the place-order button
+    // re-enables WITHOUT the user tapping retry. Ignoring this event is what
+    // made the checkout look "stuck on an offline screen after the wifi
+    // returns".
+    // Also re-render instantly whenever the cart truth changes from another
+    // screen (e.g. deleting a line in CartScreen): the rows shown must always
+    // match the live controller list, never the stale snapshot that was
+    // stored when this screen opened.
+    _connListener = () {
+      if (!mounted || !appController.isOnline) return;
+      if (_staleCheckout || loadError != null) {
+        unawaited(_load());
+      }
+    };
+    appController.connectivity.addListener(_connListener!);
+    appController.addListener(_onCartTick);
     _load();
   }
+
+  void _onCartTick() {
+    if (!mounted) return;
+    // The items list reads `appController.cartProducts` LIVE, so any cart
+    // mutation on this screen or another screen is reflected for free.
+    // No extra server refresh needed here: the app-level connectivity heal
+    // and the checkout screen's `_connListener` both revalidate as soon as
+    // the network comes back.
+    setState(() {});
+  }
+
+  VoidCallback? _connListener;
 
   @override
   void setState(VoidCallback fn) {
@@ -681,6 +726,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   @override
   void dispose() {
+    final connListener = _connListener;
+    if (connListener != null) {
+      appController.connectivity.removeListener(connListener);
+    }
+    appController.removeListener(_onCartTick);
     _draftDeb?.cancel();
     note.dispose();
     promo.dispose();
@@ -693,7 +743,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   /// English). Business errors keep their plain retry screen.
   bool _looksOffline(ApiResult result) {
     if (result.ok) return false;
-    if (appController.api.likelyOffline) return true;
+    if (appController.looksOffline) return true;
     return RegExp(
       r'timeout|timed out|network|unreachable|unavailable|تعذر الاتصال|انتهت مهلة|الإنترنت|تحقق من الإنترنت',
       caseSensitive: false,
@@ -714,6 +764,31 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     return false;
   }
 
+  /// A reachable SERVER answer that means "no items in the cart" — either a
+  /// business status:0 with the empty-cart phrasing (anything else must NOT
+  /// be mistaken for emptiness, otherwise a transient failure wipes the
+  /// visible cart), or a status:1 ok with genuinely empty data.
+  bool _looksEmptyCartAnswer(ApiResult result) {
+    if (result.ok) return result.dataMap.isEmpty;
+    if (result.classifiedError?.category == ApiErrorCategory.network) {
+      return false;
+    }
+    final m = result.message.toLowerCase();
+    if (m.isEmpty) return false;
+    return m.contains('no_item') ||
+        m.contains('no item') ||
+        m.contains('no_product') ||
+        m.contains('no product') ||
+        m.contains('empty cart') ||
+        m.contains('cart is empty') ||
+        m.contains('cart empty') ||
+        m.contains('no_items_found') ||
+        m.contains('لا توجد') ||
+        m.contains('السلة فارغة') ||
+        m.contains('سلة فارغة') ||
+        m.contains('عربة فارغة');
+  }
+
   Future<void> _load() async {
     // Same guard as the cart: never leave the spinner stuck on failure.
     if (mounted) {
@@ -723,9 +798,20 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       });
     }
     try {
+      // Checkout must refresh the customer's addresses as well as the cart.
+      // At cold start these are normally loaded by bootstrap, but when that
+      // request happened offline the list stayed empty until the customer
+      // visited the address-management screen.  Running both reads here makes
+      // the checkout retry converge as soon as connectivity returns and also
+      // selects the saved/default address through loadAddresses().
+      final addressesFuture = appController.loadAddresses().timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {},
+      );
       final result = await appController
           .refreshCart(checkout: 1)
           .timeout(const Duration(seconds: 30));
+      await addressesFuture;
       // also load multi seller if needed
       if (appController.sellerGroups.length > 1) {
         await appController.loadMultiSellerCheckout().timeout(
@@ -734,8 +820,18 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       }
       if (!mounted) return;
       Map<String, dynamic>? next;
+      // REACHABLE SERVER ANSWER with the cart simply empty. This MUST become a
+      // fresh, honest empty checkout — never the stale-forever fallback (the
+      // server cart is the sole source of what can actually be ordered, so
+      // a forced-empty answer here is authoritative for this screen).
+      final freshEmpty =
+          !result.ok && _looksEmptyCartAnswer(result);
       if (result.ok && result.dataMap.isNotEmpty) {
         next = result.dataMap;
+      } else if (result.ok) {
+        next = {'cart': <Map<String, dynamic>>[], 'sub_total': 0};
+      } else if (freshEmpty) {
+        next = {'cart': <Map<String, dynamic>>[], 'sub_total': 0};
       } else {
         next = appController.cart;
         if (next == null || next.isEmpty) {
@@ -750,11 +846,22 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (!mounted) return;
       setState(() {
         checkout = next;
-        _staleCheckout = !result.ok;
+        _staleCheckout = !result.ok && !freshEmpty;
+        // Surface the server's own message when it is NOT a connectivity
+        // failure — so "you cannot place this order because …" is explained
+        // in one glance instead of a mystery disabled button.
+        _staleReason = !result.ok &&
+                !freshEmpty &&
+                result.message.isNotEmpty &&
+                !_looksOffline(result)
+            ? result.message
+            : null;
         if (!result.ok && (checkout == null || checkout!.isEmpty)) {
           loadError = result.message.isNotEmpty
               ? result.message
               : appController.t('checkout_load_failed');
+        } else {
+          loadError = null;
         }
       });
     } catch (_) {
@@ -773,6 +880,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       setState(() {
         checkout = fallback;
         _staleCheckout = fallback != null && fallback.isNotEmpty;
+        _staleReason = null;
         if (!_staleCheckout) {
           loadError = appController.t('checkout_load_failed');
         }
@@ -823,17 +931,21 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         ),
       );
     }
-    final items = J.maps(
-      checkout?['cart'] ?? checkout?['items'] ?? app.cartProducts,
-    );
-    final subTotal = J.d(checkout?['sub_total'] ?? app.cartSubTotal);
+    // Read the live controller list, never the stale `checkout` snapshot —
+    // after a delete in CartScreen, the controller's list updates instantly
+    // and this screen must reflect it instead of showing removed lines.
+    final items = appController.cartProducts;
+    // Derived totals must follow the live list as well, so the checkout page
+    // doesn't show a stale subtotal after a cart mutation while it's open.
+    final subTotal = J.d(app.cartSubTotal);
     final deliveryNode = checkout?['delivery_charge'];
     final delivery = J.d(
       deliveryNode is Map
           ? deliveryNode['total_delivery_charge'] ?? deliveryNode['total']
           : (deliveryNode ??
                 checkout?['delivery_fee'] ??
-                app.multiSellerCheckout?.deliveryTotal),
+                app.multiSellerCheckout?.deliveryTotal ??
+                0),
     );
     final freeDelivery =
         J.str(deliveryNode is Map ? deliveryNode['is_free_delivery'] : null) ==
@@ -1637,6 +1749,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     color: Colors.orange,
                   ),
                   title: Text(app.t('checkout_stale_totals')),
+          subtitle: _staleReason == null
+              ? null
+              : Text(
+                  _staleReason!,
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    color: Colors.orange,
+                  ),
+                ),
                   trailing: TextButton(
                     onPressed: loadingCheckout ? null : _load,
                     child: Text(app.t('retry')),
@@ -1752,6 +1873,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       await showRequiresInternetDialog(context);
       return;
     }
+    // Push any pending offline cart ops (e.g. a deletion made without
+    // connectivity) before the server computes the order. Otherwise the
+    // order could commit an intentionally removed line.
+    await app.reconcilePendingCartOps();
+    if (!mounted) return;
     // Stable session key: identical across retries of this logical order so
     // the backend can deduplicate. Fresh-timestamp-per-tap would not.
     final payMethod = (walletUsed && finalTotal == 0) ? 'Wallet' : method;
@@ -1801,7 +1927,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           result.classifiedError?.category == ApiErrorCategory.network ||
           checkoutErrorCode == 'CHECKOUT_IN_PROGRESS' ||
           checkoutErrorCode == 'CHECKOUT_REVIEW_REQUIRED' ||
-          app.api.likelyOffline ||
+          app.looksOffline ||
           result.message.isEmpty ||
           RegExp(
             r'timeout|timed out|network|unreachable|try again|unavailable|تعذر الاتصال|انتهت مهلة|الإنترنت',
@@ -1843,7 +1969,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       // kept, never reported as success). Other failures keep the backend's
       // message so validation errors stay actionable.
       final offline =
-          app.api.likelyOffline ||
+          app.looksOffline ||
           RegExp(
             r'timeout|timed out|network|unreachable|unavailable',
             caseSensitive: false,

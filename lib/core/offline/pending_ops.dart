@@ -7,12 +7,13 @@ import 'local_store.dart';
 /// Only idempotent, non-financial operations are queued here:
 /// * favorite add/remove (stable product ids, server reconciles by id)
 /// * guest-cart merge intent (replayed once after login; cleared on success)
+/// * cartSetQty — absolute desired quantity for a variant (0 = remove the line)
 ///
 /// CHECKOUT AND PAYMENT ARE NEVER QUEUED. Order placement stays online-only
 /// and server-authoritative; an uncertain checkout must reconcile against
 /// `orders` before any resubmission (see `CheckoutSession`).
 
-enum PendingOpType { favoriteAdd, favoriteRemove, guestCartMerge }
+enum PendingOpType { favoriteAdd, favoriteRemove, guestCartMerge, cartSetQty }
 
 class PendingOp {
   PendingOp({
@@ -115,8 +116,9 @@ class PendingOutbox {
     );
   }
 
-  /// Enqueues [op], coalescing duplicate favorite ops for the same product so
-  /// repeated taps never create duplicate server requests on replay.
+  /// Enqueues [op], coalescing duplicate favorite ops and same-variant
+  /// cartSetQty ops so repeated taps never accumulate server requests on
+  /// replay.
   /// Returns false (without persisting) when the payload exceeds
   /// [maxPayloadBytes]; oversized ops must never bloat the queue.
   Future<bool> enqueue(PendingOp op) async {
@@ -132,6 +134,19 @@ class PendingOutbox {
                 e.type == PendingOpType.favoriteRemove) &&
             '${e.payload['product_id']}' == pid,
       );
+    }
+    if (op.type == PendingOpType.cartSetQty) {
+      final scope = '${op.payload['account_scope'] ?? ''}';
+      final vid = '${op.payload['product_variant_id'] ?? ''}';
+      if (vid.isNotEmpty) {
+        // Latest quantity wins: keep only the newest intent for a variant.
+        ops.removeWhere(
+          (e) =>
+              e.type == PendingOpType.cartSetQty &&
+              '${e.payload['account_scope'] ?? ''}' == scope &&
+              '${e.payload['product_variant_id'] ?? ''}' == vid,
+        );
+      }
     }
     // Never discard an older acknowledged local intent to make room. The
     // caller can revert the optimistic UI when the bounded durable queue is

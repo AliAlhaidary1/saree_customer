@@ -7,6 +7,7 @@ import 'core/app_controller.dart';
 import 'core/app_theme.dart';
 import 'core/json_util.dart';
 import 'features/account/account_screens.dart';
+import 'features/account/notification_preferences_screen.dart';
 import 'features/akhdimni/akhdimni_screens.dart';
 import 'features/assistant/assistant_screen.dart';
 import 'features/auth/auth_screens.dart';
@@ -42,6 +43,13 @@ GoRouter buildRouter() {
         pageBuilder: (_, state) => AppTheme.slidePage(
           key: state.pageKey,
           child: const ChangePasswordScreen(),
+        ),
+      ),
+      GoRoute(
+        path: '/notification_preferences',
+        pageBuilder: (_, state) => AppTheme.slidePage(
+          key: state.pageKey,
+          child: const NotificationPreferencesScreen(),
         ),
       ),
       GoRoute(

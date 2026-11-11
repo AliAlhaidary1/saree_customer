@@ -34,6 +34,7 @@ class _ScenarioApi extends CustomerApi {
     'user': {'id': 7, 'name': 'Tester', 'mobile': '777000000'},
   });
   ApiResult cartResult = _ok({'cart': [], 'sub_total': 0});
+  ApiResult addressesResult = _ok(<Map<String, dynamic>>[]);
   ApiResult removeResult = _ok({});
   ApiResult checkoutResult = _ok({'checkout_group_id': 9001});
   ApiResult initResult = _serverFail();
@@ -67,6 +68,9 @@ class _ScenarioApi extends CustomerApi {
   }) async {
     return cartResult;
   }
+
+  @override
+  Future<ApiResult> addresses() async => addressesResult;
 
   @override
   Future<ApiResult> removeFromCart({
@@ -364,6 +368,7 @@ void main() {
     ) async {
       final api = await _setup();
       api.cartResult = _networkFail();
+      api.citiesResult = _networkFail();
       appController.token = 'tok';
       appController.user = {'id': 7, 'name': 'Tester'};
       await tester.pumpWidget(const MaterialApp(home: CheckoutScreen()));
@@ -377,6 +382,50 @@ void main() {
       expect(find.byIcon(Icons.wifi_off_rounded), findsNothing);
       expect(find.text('retry'), findsOneWidget);
     });
+
+    testWidgets(
+      'reconnect is detected automatically and checkout restores saved address',
+      (tester) async {
+        final api = await _setup();
+        api.cartResult = _networkFail();
+        api.citiesResult = _networkFail();
+        appController.token = 'tok';
+        appController.user = {'id': 7, 'name': 'Tester'};
+
+        await tester.pumpWidget(const MaterialApp(home: CheckoutScreen()));
+        await tester.pump(const Duration(seconds: 1));
+        expect(find.byIcon(Icons.wifi_off_rounded), findsOneWidget);
+
+        api.citiesResult = _ok([
+          {'id': 1, 'name': 'Test City'},
+        ]);
+        api.cartResult = _ok({
+          'cart': [
+            {
+              'product_id': 11,
+              'product_variant_id': 11,
+              'qty': 1,
+              'price': 100,
+              'name': 'P11',
+            },
+          ],
+          'sub_total': 100,
+          'final_total': 100,
+        });
+        api.addressesResult = _ok([
+          {'id': 44, 'address': 'Saved home', 'is_default': 1},
+        ]);
+
+        // The dialog checks the backend every two seconds. A successful
+        // probe closes it and reruns the checkout load without an app restart.
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(find.byIcon(Icons.wifi_off_rounded), findsNothing);
+        expect(appController.selectedAddress?['id'], 44);
+      },
+    );
 
     testWidgets(
       'gateway init failure keeps session and draft for a safe retry',

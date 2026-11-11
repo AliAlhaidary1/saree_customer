@@ -1,4 +1,4 @@
-# تقرير التحقق النهائي من عقد الواجهة الخلفية — SareeMart Customer
+# تقرير التحقق النهائي من عقد الواجهة الخلفية — Sarea Mart Customer
 
 > **دور:** مراجع هندسي مستقل (Frontend/Backend Contract & Mobile Reliability).
 > **تاريخ التحقق:** 2026-10-14

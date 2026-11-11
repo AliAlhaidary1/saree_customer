@@ -1,4 +1,4 @@
-# SareeMart Customer — Offline-First Implementation Report
+# Sarea Mart Customer — Offline-First Implementation Report
 
 Branch: `prod/offline-reliability` · Date: 2026-10-14 · Scope: customer Flutter app only.
 No commit/push/deploy was performed. No backend file was changed.

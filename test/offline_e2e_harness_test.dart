@@ -815,7 +815,22 @@ void main() {
             PendingOpType.favoriteRemove,
           ]),
         );
-        expect(PendingOpType.values.length, 3); // + guestCartMerge only
+        // Safe ops only: favorites, guest merge, and absolute cart-set-qty
+        // intents (idempotent, never financial). Checkout/payment do NOT
+        // exist here.
+        expect(
+          PendingOpType.values.map((e) => e.name).toSet(),
+          {
+            PendingOpType.favoriteAdd.name,
+            PendingOpType.favoriteRemove.name,
+            PendingOpType.guestCartMerge.name,
+            PendingOpType.cartSetQty.name,
+          },
+        );
+        expect(
+          PendingOpType.values.map((e) => e.name),
+          isNot(containsAll(['checkout', 'placeOrder', 'payment', 'wallet'])),
+        );
       },
     );
 

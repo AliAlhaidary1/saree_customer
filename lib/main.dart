@@ -82,8 +82,8 @@ class _BootstrapAppState extends State<BootstrapApp>
 
   Future<void> _start() async {
     final splashMin = Future<void>.delayed(
-      // مدة أنيميشن السبلاش المبسط (1400ms) — سريع بدون انتظار زائد
-      const Duration(milliseconds: 1500),
+      // مدة أنيميشن السبلاش المبسط (700ms) — سريعة بدون انتظار زائد
+      const Duration(milliseconds: 700),
     );
     final swBoot = Stopwatch()..start();
     await appController.bootstrap();

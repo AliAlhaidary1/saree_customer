@@ -13,6 +13,7 @@ import '../../core/diag.dart';
 import '../../core/json_util.dart';
 import '../../core/promo_price.dart';
 import '../../widgets/app_image.dart';
+import '../../widgets/connectivity_badge.dart';
 import '../../widgets/product_card.dart';
 import '../../widgets/product_filter_drawer.dart';
 import '../../widgets/product_variant_sheet.dart';
@@ -225,44 +226,62 @@ class _HomeScreenState extends State<HomeScreen> {
           : null;
       var local = <Map<String, dynamic>>[];
       var localTotal = 0;
-      if (_view == 'stores') {
-        local = await appController.catalogStoresLocal(
-          limit: _pageSize,
-          type: _filter.categoryId ?? '',
-          minRating: _filter.minRating,
-          sort: (_sort == 'nearest' || _sort == 'rating') ? _sort : 'rating',
-        );
-        localTotal = local.length >= _pageSize ? _pageSize + 1 : local.length;
-      } else {
-        final results = await Future.wait([
-          appController.catalogProductsLocal(
-            categoryId: catId,
-            search: '',
-            sort: _sort,
-            priceMin: _filter.priceMin,
-            priceMax: _filter.priceMax,
-            minRating: _filter.minRating,
-            inStock: _filter.inStock,
-            onlyOffers: _filter.onlyOffers,
-            isReturnable: _filter.isReturnable,
+      // Network-first painting:
+      //  - likelyOnline: the network call below IS the truth. Painting Drift
+      //    first would flash stale rows; a direct network-first render is
+      //    preferable. Drift is kept as the offline fallback.
+      //  - likelyOffline: Drift paints instantly and persists through the
+      //    whole session while the network remains dark.
+      final likelyOnline = !appController.looksOffline;
+      if (!likelyOnline) {
+        if (_view == 'stores') {
+          local = await appController.catalogStoresLocal(
             limit: _pageSize,
-          ),
-          appController.catalogFilteredCountLocal(
-            categoryId: catId,
-            search: '',
-            priceMin: _filter.priceMin,
-            priceMax: _filter.priceMax,
+            type: _filter.categoryId ?? '',
             minRating: _filter.minRating,
-            inStock: _filter.inStock,
-            onlyOffers: _filter.onlyOffers,
-            isReturnable: _filter.isReturnable,
-          ),
-        ]);
-        local = results[0] as List<Map<String, dynamic>>;
-        localTotal = results[1] as int;
+            sort: (_sort == 'nearest' || _sort == 'rating') ? _sort : 'rating',
+          );
+          localTotal = local.length >= _pageSize ? _pageSize + 1 : local.length;
+        } else {
+          final results = await Future.wait([
+            appController.catalogProductsLocal(
+              categoryId: catId,
+              search: '',
+              sort: _sort,
+              priceMin: _filter.priceMin,
+              priceMax: _filter.priceMax,
+              minRating: _filter.minRating,
+              inStock: _filter.inStock,
+              onlyOffers: _filter.onlyOffers,
+              isReturnable: _filter.isReturnable,
+              limit: _pageSize,
+            ),
+            appController.catalogFilteredCountLocal(
+              categoryId: catId,
+              search: '',
+              priceMin: _filter.priceMin,
+              priceMax: _filter.priceMax,
+              minRating: _filter.minRating,
+              inStock: _filter.inStock,
+              onlyOffers: _filter.onlyOffers,
+              isReturnable: _filter.isReturnable,
+            ),
+          ]);
+          local = results[0] as List<Map<String, dynamic>>;
+          localTotal = results[1] as int;
+        }
       }
       if (!mounted || mySeq != _seq) return;
-      if (local.isNotEmpty) {
+      // When likelyOnline we keep the loading spinner — the network below
+      // paints fresh rows within one frame budget. When offline with a warm
+      // cache we show it immediately instead.
+      if (likelyOnline) {
+        if (!mounted || mySeq != _seq) return;
+        setState(() {
+          _catalog = const [];
+          _catalogLoading = true;
+        });
+      } else if (local.isNotEmpty) {
         setState(() {
           _catalog = local;
           // Local preview only: the network fetch below still starts at
@@ -841,6 +860,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                       color: AppTheme.primaryNavy,
                                     ),
                                   ),
+                                  const SizedBox(width: 6),
+                                  const ConnectivityBadge(),
                                 ],
                               ),
                             ),

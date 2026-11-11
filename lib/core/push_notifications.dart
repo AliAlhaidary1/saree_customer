@@ -237,6 +237,12 @@ class PushNotifications {
         } catch (_) {}
       }
 
+      // Anonymous broadcast topic — subscribed even before sign-in so guests
+      // receive broadcasts too. Token-free: works without login.
+      try {
+        await messaging.subscribeToTopic('saree_all');
+      } catch (_) {}
+
       // Local notifications (foreground display + tap routing).
       if (!await _ensureLocal()) {
         enabled = false;

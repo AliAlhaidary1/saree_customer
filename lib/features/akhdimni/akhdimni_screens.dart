@@ -653,7 +653,7 @@ class _AkhdimniCreateScreenState extends State<AkhdimniCreateScreen> {
       });
       return;
     }
-    if (appController.api.likelyOffline) {
+    if (appController.looksOffline) {
       setState(() {
         pricePreview = null;
         previewLoading = false;

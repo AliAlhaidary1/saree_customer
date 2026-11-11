@@ -1,4 +1,4 @@
-# SareeMart Customer — Offline/Online End-to-End Verification Report
+# Sarea Mart Customer — Offline/Online End-to-End Verification Report
 
 Date (UTC): 2026-10-14. Branch (customer app): `prod/offline-reliability`.
 New file; no existing report was overwritten. No commit/push/deploy performed.

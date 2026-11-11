@@ -61,8 +61,8 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     if (more && mounted) setState(() => loadingMore = true);
     // Owning account: late responses after logout/switch are dropped.
     final scope = appController.accountScope;
-    // Offline-first: paint the last known page instantly (account-scoped).
-    if (!more && items.isEmpty) {
+    // Offline: paint cached notifications first so the list is never empty.
+    if (!more && items.isEmpty && appController.looksOffline) {
       final cached = appController.readCachedNotifications();
       if (cached.isNotEmpty && mounted) {
         setState(() {
@@ -97,6 +97,19 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       serverTotal = J.i(dataNode['total'] ?? serverTotal);
     }
     var reads = await NotificationRead.getReadIds(uid);
+    // Merge server-side read state (broadcast_reads) into the local cache so
+    // a fresh device/logout doesn't forget what was already read.
+    final serverRead = rows
+        .where((r) => J.flag(r['is_read']))
+        .map((r) => '${r['id']}')
+        .where((id) => id.isNotEmpty)
+        .toList();
+    if (serverRead.isNotEmpty) {
+      reads = [...reads.toSet().union(serverRead.toSet())];
+      try {
+        await NotificationRead.markAsRead(uid, reads);
+      } catch (_) {}
+    }
     reads = await NotificationRead.prune(
       uid,
       serverTotal > 0 ? serverTotal : reads.length,
@@ -126,6 +139,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           .where((e) => e.isNotEmpty)
           .toList();
       final updated = await NotificationRead.markAsRead(uid, ids);
+      // Persist server-side read state so other devices see the same badge.
+      try {
+        await appController.api.markNotificationBroadcastsRead(ids);
+      } catch (_) {}
       if (mounted) setState(() => readIds = updated);
     });
   }

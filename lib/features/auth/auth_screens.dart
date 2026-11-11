@@ -64,7 +64,7 @@ class AuthNavyHeader extends StatelessWidget {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             const Text(
-                              'SAREE MART',
+                              'Sarea Mart',
                               style: TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w700,
@@ -764,17 +764,8 @@ class _LoginScreenState extends State<LoginScreen> {
           }
         } else {
           if (!mounted) return;
-          // GoRouter refreshListenable سيعيد البناء؛ نستخدم post-frame لتجنب
-          // "deactivated widget / Dirty widget in wrong build scope"
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            if (GoRouter.of(
-                  context,
-                ).routerDelegate.currentConfiguration.uri.path !=
-                _next) {
-              context.go(_next);
-            }
-          });
+          // Navigation directa después del login exitoso.
+          context.go(_next);
         }
       } else if (view == 'forgot') {
         final number = mobile.text.trim();

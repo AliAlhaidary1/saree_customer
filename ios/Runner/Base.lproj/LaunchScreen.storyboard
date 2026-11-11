@@ -14,7 +14,7 @@
                         <viewControllerLayoutGuide type="bottom" id="xbc-2k-c8Z"/>
                     </layoutGuides>
                     <!-- خلفية كحلية سادة فقط — بدون صورة، شاشة بداية واحدة
-                         (شعار سريع MART المتحرك في شاشة Flutter) -->
+                         (شعار سريع مارت المتحرك في شاشة Flutter) -->
                     <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                         <color key="backgroundColor" red="0.0392156862745098" green="0.1450980392156863" blue="0.2509803921568627" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>

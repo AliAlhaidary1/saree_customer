@@ -198,7 +198,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
     controller.clear();
     // Honest offline guard: recent failures prove the backend unreachable —
     // explain instead of spinning, and never auto-send later.
-    if (appController.api.likelyOffline) {
+    if (appController.looksOffline) {
       if (!mounted) return;
       setState(() {
         messages.add({'role': 'user', 'text': text});
@@ -926,7 +926,7 @@ class _AssistantProductCard extends StatefulWidget {
 }
 
 class _AssistantProductCardState extends State<_AssistantProductCard> {
-  int qty = 1;
+  int qty = 0;
   bool adding = false;
   bool added = false;
 
@@ -960,7 +960,7 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
       final error = await app.addToCart(
         productId: product['id'],
         variantId: variantId,
-        qty: qty,
+        qty: 1,
         sellerId: J.sellerId(product),
         storeName: app.storeNameOf(product),
       );
@@ -971,13 +971,11 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
           widget.pushBot('${app.t('assistant_add_failed')}: $error');
         }
       } else {
-        setState(() => added = true);
-        widget.pushBot(
-          '${app.t('assistant_added_to_cart')} (${J.str(product['name'])} × $qty)',
-        );
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted) setState(() => added = false);
+        setState(() {
+          added = true;
+          qty = 1;
         });
+        // لا نرسل رسالة بوت عند الإضافة — يكفي تغيير الزر.
       }
     } catch (_) {
       if (mounted) widget.pushBot(appController.t('assistant_add_failed'));
@@ -1067,82 +1065,35 @@ class _AssistantProductCardState extends State<_AssistantProductCard> {
             ),
           ),
           const SizedBox(height: 8),
-          Row(
-            children: [
-              Container(
-                decoration: BoxDecoration(
-                  color: AppTheme.backgroundWhite,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: AppTheme.primaryNavy.withValues(alpha: 0.08),
-                  ),
+          Expanded(
+            child: FilledButton(
+              onPressed: adding ? null : _add,
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(0, 40),
+                textStyle: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
                 ),
-                child: Row(
-                  children: [
-                    _stepButton(Icons.remove, () {
-                      if (!adding) setState(() => qty = qty > 1 ? qty - 1 : 1);
-                    }),
-                    SizedBox(
-                      width: 20,
-                      child: Text(
-                        '$qty',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
-                        ),
+              ),
+              child: adding
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
                       ),
+                    )
+                  : Text(
+                      added ? '+1' : app.t('add_to_cart'),
                     ),
-                    _stepButton(Icons.add, () {
-                      if (!adding) {
-                        setState(() => qty = qty >= 99 ? 99 : qty + 1);
-                      }
-                    }),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: FilledButton(
-                  onPressed: adding ? null : _add,
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size(0, 40),
-                    textStyle: const TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  child: adding
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : Text(
-                          added
-                              ? '✓ ${app.t('assistant_added_to_cart')}'
-                              : app.t('add_to_cart'),
-                        ),
-                ),
-              ),
-            ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _stepButton(IconData icon, VoidCallback onTap) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(20),
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.all(7),
-        child: Icon(icon, size: 16, color: AppTheme.primaryNavy),
-      ),
-    );
-  }
+  // The old stepper UI was removed: the product card now starts at qty=0
+  // and simply shows "Add to cart" → "+1" after tapping.
 }

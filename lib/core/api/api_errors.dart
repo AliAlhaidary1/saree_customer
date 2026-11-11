@@ -87,10 +87,22 @@ class ClassifiedApiError {
         },
       };
     }
+    // Release: do not leak original messages / sensitive details, but DO
+    // keep the HTTP status and an enum-ish category so the app's internal
+    // routing (_isUnavailableResult, _looksEmptyCartAnswer, ...) works the
+    // same way in release as it does in debug — otherwise every network
+    // failure fell through the "unreachable" branch and the customer saw
+    // the raw Arabic "تعذر الاتصال بالخادم. تحقق من الإنترنت." text instead
+    // of a silent stepper update.
     return {
       'status': 0,
       'message': userMessage,
-      'error': {'code': publicCode},
+      'error': {
+        'code': publicCode,
+        'httpStatus': httpStatus,
+        'cat': category.name,
+        if (retryAfter != null) 'retryAfter': retryAfter,
+      },
     };
   }
 }
@@ -101,6 +113,30 @@ extension ApiResultErrorX on ApiResult {
     final err = raw['error'];
     if (err is! Map) return null;
     final httpStatus = err['httpStatus'] is int ? err['httpStatus'] as int : null;
+    final retryAfter = err['retryAfter'] is int ? err['retryAfter'] as int : null;
+    final catName = err['cat'] is String ? err['cat'] as String : null;
+    // Prefer the explicit category from the release map (stable, no leakage).
+    if (catName != null) {
+      final category = ApiErrorCategory.values.firstWhere(
+        (e) => e.name == catName,
+        orElse: () => _categoryFor(
+          code: '${err['code'] ?? 'UNKNOWN'}',
+          httpStatus: httpStatus,
+        ),
+      );
+      return ClassifiedApiError(
+        code: '${err['code'] ?? 'UNKNOWN'}',
+        publicCode:
+            '${err['publicCode'] ?? _publicCodes[err['code']] ?? err['code'] ?? 'UNAVAILABLE'}',
+        originalMessage: '${raw['message'] ?? ''}',
+        userMessage: '${raw['message'] ?? ''}',
+        release: true,
+        category: category,
+        httpStatus: httpStatus,
+        retryAfter: retryAfter,
+      );
+    }
+    // Legacy / debug shape: derive from code + httpStatus.
     final code = '${err['code'] ?? 'UNKNOWN'}';
     return ClassifiedApiError(
       code: code,
@@ -111,7 +147,7 @@ extension ApiResultErrorX on ApiResult {
       category: _categoryFor(code: code, httpStatus: httpStatus),
       httpStatus: httpStatus,
       details: err['details'],
-      retryAfter: err['retryAfter'] is int ? err['retryAfter'] as int : null,
+      retryAfter: retryAfter,
     );
   }
 }

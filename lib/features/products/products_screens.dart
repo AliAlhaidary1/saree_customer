@@ -253,44 +253,46 @@ class _ProductsScreenState extends State<ProductsScreen> {
     if (reset) {
       _catalogStatus = (await appController.catalogScopeState()).status;
       if (!mounted || mySeq != _seq) return;
-      // Local-first: paint cached page instantly (offline-capable), then
-      // refresh from network. Stale rows stay visible on refresh failure.
-      final cached = appController.readCachedProductPage(_filters);
-      if (cached.isNotEmpty) {
-        setState(() {
-          items = cached;
-          offset = items.length;
-          loading = false;
-        });
-      } else {
-        // Synchronized catalog covers queries never visited (full local
-        // browsing, not just the last visited page).
-        final local = await appController.catalogProductsLocal(
-          categoryId: int.tryParse(categoryId ?? ''),
-          storeId: int.tryParse(widget.sellerId ?? ''),
-          sectionId: widget.sectionId ?? '',
-          sellerSectionId: widget.sellerSectionId ?? '',
-          search: _search.text.trim(),
-          sort: sort,
-          priceMin: priceMin,
-          priceMax: priceMax,
-          minRating: minRating,
-          inStock: inStock,
-          onlyOffers: widget.hasOffer || onlyOffers,
-          canDeliver: canDeliver,
-          isReturnable: isReturnable,
-          limit: AppConfig.productPageSize,
-        );
-        if (!mounted || mySeq != _seq) return;
-        if (local.isNotEmpty) {
+      // Online: skip local cache — the user gets fresh rows fastest; Drift
+      // still backs the offline fallback. Offline: serve Drift as before.
+      if (appController.looksOffline) {
+        final cached = appController.readCachedProductPage(_filters);
+        if (cached.isNotEmpty) {
           setState(() {
-            items = local;
+            items = cached;
             offset = items.length;
             loading = false;
-            hasMore = local.length >= AppConfig.productPageSize;
           });
         } else {
-          setState(() => loading = true);
+          // Synchronized catalog covers queries never visited (full local
+          // browsing, not just the last visited page).
+          final local = await appController.catalogProductsLocal(
+            categoryId: int.tryParse(categoryId ?? ''),
+            storeId: int.tryParse(widget.sellerId ?? ''),
+            sectionId: widget.sectionId ?? '',
+            sellerSectionId: widget.sellerSectionId ?? '',
+            search: _search.text.trim(),
+            sort: sort,
+            priceMin: priceMin,
+            priceMax: priceMax,
+            minRating: minRating,
+            inStock: inStock,
+            onlyOffers: widget.hasOffer || onlyOffers,
+            canDeliver: canDeliver,
+            isReturnable: isReturnable,
+            limit: AppConfig.productPageSize,
+          );
+          if (!mounted || mySeq != _seq) return;
+          if (local.isNotEmpty) {
+            setState(() {
+              items = local;
+              offset = items.length;
+              loading = false;
+              hasMore = local.length >= AppConfig.productPageSize;
+            });
+          } else {
+            setState(() => loading = true);
+          }
         }
       }
     } else {
@@ -532,30 +534,33 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     final point = appController.browseCoords;
     final id = int.tryParse(widget.slug);
 
-    // Local-first: paint cached details instantly, then refresh. The
-    // synchronized catalog covers products never opened before (unlike the
-    // visit-scoped JSON cache); the network refresh below still revalidates.
+    // Network-first with graceful fallback. When online, skip the local paint
+    // so fresh data lands as fast as possible; when offline (or online but
+    // refresh fails), the local row paints so the user still has a page.
     if (product == null) {
-      final cached = appController.readCachedProductDetails(widget.slug);
-      if (cached != null) {
-        final variants = J.maps(cached['variants']);
-        setState(() {
-          product = cached;
-          variant = variants.isNotEmpty ? variants.first : cached;
-          loading = false;
-        });
-      } else {
-        final local = await appController.catalogProductLocal(
-          id: id,
-          slug: id == null ? widget.slug : '',
-        );
-        if (local != null && mounted) {
-          final variants = J.maps(local['variants']);
+      final likelyOnline = !appController.looksOffline;
+      if (!likelyOnline) {
+        final cached = appController.readCachedProductDetails(widget.slug);
+        if (cached != null) {
+          final variants = J.maps(cached['variants']);
           setState(() {
-            product = local;
-            variant = variants.isNotEmpty ? variants.first : local;
+            product = cached;
+            variant = variants.isNotEmpty ? variants.first : cached;
             loading = false;
           });
+        } else {
+          final local = await appController.catalogProductLocal(
+            id: id,
+            slug: id == null ? widget.slug : '',
+          );
+          if (local != null && mounted) {
+            final variants = J.maps(local['variants']);
+            setState(() {
+              product = local;
+              variant = variants.isNotEmpty ? variants.first : local;
+              loading = false;
+            });
+          }
         }
       }
     }
@@ -577,9 +582,39 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     if (!result.ok) {
       if (!mounted) return;
       // Keep cached row if available; show a retry button when nothing cached.
+      // Painting the cache here — even with likelyOnline = true — preserves the
+      // graceful-degradation policy (no network == no fresh page, but at least
+      // an informative cached one, never a blank error).
+      final fallbackCached = appController.readCachedProductDetails(widget.slug);
+      if (fallbackCached != null) {
+        final variants = J.maps(fallbackCached['variants']);
+        setState(() {
+          product = fallbackCached;
+          variant = variants.isNotEmpty ? variants.first : fallbackCached;
+          loading = false;
+          error = null;
+        });
+        return;
+      }
+      if (product == null || product!.isEmpty) {
+        final fallbackLocal = await appController.catalogProductLocal(
+          id: id,
+          slug: id == null ? widget.slug : '',
+        );
+        if (fallbackLocal != null && mounted) {
+          final variants = J.maps(fallbackLocal['variants']);
+          setState(() {
+            product = fallbackLocal;
+            variant = variants.isNotEmpty ? variants.first : fallbackLocal;
+            loading = false;
+            error = null;
+          });
+          return;
+        }
+      }
       setState(() {
-        loading = product == null;
-        error = product == null ? result.message : null;
+        loading = product == null || product!.isEmpty;
+        error = product == null || product!.isEmpty ? result.message : null;
       });
       return;
     }

@@ -1000,6 +1000,23 @@ class CustomerApi {
     return ApiResult({'status': 0, 'message': 'fcm_sync_skipped'});
   }
 
+  /// Backend routes: GET/POST /customer/notification_preferences
+  /// (PushPreferenceController — after-login guard: auth:api-customers)
+  Future<ApiResult> getNotificationPreferences() =>
+      _get('notification_preferences');
+  Future<ApiResult> saveNotificationPreferences({
+    bool? pushMarketing,
+    bool? pushTransactional,
+  }) {
+    final body = <String, dynamic>{};
+    if (pushMarketing != null) body['push_marketing'] = pushMarketing;
+    if (pushTransactional != null) body['push_transactional'] = pushTransactional;
+    return _post('notification_preferences', body);
+  }
+  /// Backend routes: POST /customer/notifications/mark_read {ids:[...]}
+  Future<ApiResult> markNotificationBroadcastsRead(List<dynamic> ids) =>
+      _post('notifications/mark_read', {'ids': ids});
+
   Future<ApiResult> initiateTransaction(Map<String, dynamic> fields) =>
       _post('initiate_transaction', fields);
   Future<ApiResult> initiateTransactionForCheckoutGroup({

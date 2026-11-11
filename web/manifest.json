@@ -1,11 +1,11 @@
 {
     "background_color": "#FFFFFF",
-    "description": "سريع MART - سوق إلكتروني متعدد البائعين",
+    "description": "سريع مارت - سوق إلكتروني متعدد البائعين",
     "display": "standalone",
-    "name": "سريع",
+    "name": "سريع مارت",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
-    "short_name": "سريع",
+    "short_name": "سريع مارت",
     "start_url": ".",
     "theme_color": "#0A2540",
     "icons": [

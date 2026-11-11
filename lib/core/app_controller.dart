@@ -24,6 +24,7 @@ import 'auth/token_vault.dart';
 import 'brand/brand_config.dart';
 import 'brand/brand_service.dart';
 import 'offline/cache_policy.dart';
+import 'offline/connectivity_service.dart';
 import 'offline/operation_policy.dart';
 import 'offline/checkout_session.dart';
 import 'offline/local_cart.dart' as local_cart;
@@ -33,7 +34,33 @@ import 'offline/pending_ops.dart';
 import 'offline/sync_engine.dart';
 
 class AppController extends ChangeNotifier {
-  AppController();
+  /// Connectivity changes repaint everything that listens to this controller
+  /// (the product catalog sliver, badges, checkout state …). Rare event — a
+  /// device goes offline/online — so this stays cheap.
+  AppController() {
+    connectivity.addListener(notifyListeners);
+    connectivity.addListener(_onConnectivityChanged);
+  }
+
+  /// Replay the outbox whenever connectivity flips online. The replay must
+  /// NOT be delayed by 500ms — that delay let every screen render stale
+  /// pre-reconciliation state (and check out with placeholder totals).
+  /// An epoch comparison still prevents the wrong (stale) call from
+  /// running after an off→on→off flap.
+  void _onConnectivityChanged() {
+    if (!connectivity.isOnline) return;
+    final seq = ++_restoreSeq;
+    unawaited(() async {
+      if (seq != _restoreSeq) return;
+      try {
+        await reconcilePendingCartOps();
+      } catch (_) {}
+      if (seq != _restoreSeq) return;
+      try {
+        await syncCatalogSoon();
+      } catch (_) {}
+    }());
+  }
 
   late SharedPreferences _prefs;
   SharedPreferences get prefs => _prefs;
@@ -68,6 +95,20 @@ class AppController extends ChangeNotifier {
 
   /// Bounded opt-in thumbnail prefetch (default OFF — mobile-data safety).
   final ImagePrefetch imagePrefetch = ImagePrefetch();
+
+  /// Live internet reachability monitor (internet_connection_checker_plus +
+  /// connectivity_plus as the interface trigger). Construction is pure — no
+  /// network happens until [ConnectivityService.init] runs inside bootstrap.
+  final ConnectivityService connectivity = ConnectivityService();
+
+  /// Monotonic counter for connection-restored heal scheduling (see
+  /// [_onConnectivityChanged]). Using an epoch instead of a boolean gate
+  /// means the safe scheduling can ALWAYS complete — a "busy" flag would
+  /// risk getting stuck forever if the delayed body were ever orphaned
+  /// (FakeAsync test zones discard timers; an app killed at the wrong
+  /// moment would hit the same in production). Only the LAST scheduled
+  /// heal executes, which is the desired debounce behavior.
+  int _restoreSeq = 0;
 
   /// True when a previous checkout session could not be reconciled against
   /// order history at startup. The UI should block new checkout attempts until
@@ -112,6 +153,7 @@ class AppController extends ChangeNotifier {
     _cartWaiters.clear();
     _cartGen = 0;
     _refreshInFlight = null;
+    _deletedCartRows.clear();
   }
 
   void _bumpNav() => navTick.value++;
@@ -209,6 +251,18 @@ class AppController extends ChangeNotifier {
     guestCartTotal = _guestCartLocalTotal();
     try {
       await store.writeJson('guest_cart', guestCart);
+      // Sidecar of scope stamps: Drift rows have no merge_scope column, so a
+      // prefs-only or Drift-only restore must still know which account each
+      // parked line belongs to (otherwise foreign lines become anonymous and
+      // merge into the next login on a shared device).
+      final scopes = <String, String>{};
+      for (final item in guestCart) {
+        final stamp = '${item['merge_scope'] ?? ''}'.trim();
+        if (stamp.isEmpty) continue;
+        final key = '${item['product_variant_id'] ?? item['id']}';
+        if (key.isNotEmpty && key != 'null') scopes[key] = stamp;
+      }
+      await store.writeJson('guest_cart_scopes', scopes);
     } catch (_) {}
     // Keep the Drift mirror in sync (best-effort, never blocks the UI).
     try {
@@ -222,9 +276,210 @@ class AppController extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Re-attaches variant scope stamps from the sidecar document (Drift rows do
+  /// not carry merge_scope). Called after either restore source at cold start
+  /// so foreign-account parked lines stay hidden from this device.
+  void _applyGuestCartScopes() {
+    try {
+      final scopes = store.readJson('guest_cart_scopes');
+      if (scopes is! Map) return;
+      for (final item in guestCart) {
+        final stamp = '${scopes['${item['product_variant_id'] ?? item['id']}'] ?? ''}';
+        if (stamp.isNotEmpty && '${item['merge_scope'] ?? ''}'.isEmpty) {
+          item['merge_scope'] = stamp;
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// Enqueues a durable offline cart intent for THIS account scope. Used when
+  /// the server could not be reached: the desired state (absolute quantity,
+  /// 0 = remove) is replayed by the outbox engine once connectivity returns,
+  /// and is also applied locally onto every server read in the meantime.
+  Future<bool> _enqueueCartSetQty({
+    required dynamic productId,
+    required dynamic variantId,
+    required int qty,
+    String? variantLabel,
+    double? price,
+    dynamic sellerId,
+    String? storeName,
+    String? imageUrl,
+    String? productName,
+  }) async {
+    final payload = <String, dynamic>{
+      'account_scope': accountScope,
+      'product_id': productId,
+      'product_variant_id': variantId,
+      'qty': qty,
+      // ignore: use_null_aware_elements
+      if (variantLabel != null && variantLabel.isNotEmpty)
+        'variant_label': variantLabel,
+      // ignore: use_null_aware_elements
+      if (price != null) 'price': price,
+      // ignore: use_null_aware_elements
+      if (sellerId != null) 'seller_id': sellerId,
+      // ignore: use_null_aware_elements
+      if (storeName != null && storeName.isNotEmpty) 'store_name': storeName,
+      if (imageUrl != null && imageUrl.isNotEmpty) 'image_url': imageUrl,
+      if (productName != null && productName.isNotEmpty) 'name': productName,
+    };
+    try {
+      return await PendingOutbox(store, accountScope).enqueue(
+        PendingOp(
+          id: PendingOutbox.newId('cart'),
+          type: PendingOpType.cartSetQty,
+          payload: payload,
+          createdAt: DateTime.now(),
+        ),
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Pending offline cart intents for the CURRENT scope, ordered by creation.
+  List<PendingOp> _pendingCartSetQtyOps() {
+    try {
+      final ops = PendingOutbox(store, accountScope)
+          .load()
+          .where((o) => o.type == PendingOpType.cartSetQty)
+          .toList()
+        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      return ops;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Drops pending cart-set-qty intents for [variantId] in this account's
+  /// scope. Called when any authoritative server operation supersedes the
+  /// intent (server confirmed removal/add, clear-all, …).
+  Future<void> _dropPendingSetQtyOps(dynamic variantId) async {
+    if (variantId == null) return;
+    final key = '$variantId';
+    try {
+      final outbox = PendingOutbox(store, accountScope);
+      final stale = outbox
+          .load()
+          .where(
+            (o) =>
+                o.type == PendingOpType.cartSetQty &&
+                '${o.payload['product_variant_id'] ?? ''}' == key,
+          )
+          .toList();
+      for (final o in stale) {
+        await outbox.remove(o.id);
+      }
+    } catch (_) {}
+  }
+
+  /// Drops ALL pending cart-set-qty intents for this scope (cart cleared).
+  Future<void> _dropAllPendingSetQtyOps() async {
+    try {
+      final outbox = PendingOutbox(store, accountScope);
+      final stale = outbox
+          .load()
+          .where((o) => o.type == PendingOpType.cartSetQty)
+          .toList();
+      for (final o in stale) {
+        await outbox.remove(o.id);
+      }
+    } catch (_) {}
+  }
+
+  /// Applies pending offline intents on top of server-confirmed (or restored)
+  /// rows, absolute semantics: 0 removes a line, n>0 sets the line's qty
+  /// (synthesize it when the server does not hold it).
+  /// Returns true when at least one row was added/changed/removed.
+  /// Single source of truth for the on-disk cart snapshot. Every time the
+  /// in-memory [cartProducts] is mutated in a way worth remembering offline
+  /// (pending intents applied on refresh, optimistic restore from cache, …)
+  /// this is rewritten so a fresh cold start reads the EXACT same list the
+  /// user just saw — no stale or resurrected rows.
+  Future<void> _persistCartSnapshot() async {
+    final scope = accountScope;
+    if (scope.isEmpty) return;
+    try {
+      // Pending rows are diagnostic markers that have NOT been server-confirmed.
+      // Keep them in memory for the session but persist only confirmed state;
+      // pending intents live in the outbox (cartSetQty), from which they are
+      // reapplied on every refresh. Persisting them doubles the state.
+      final products = cartProducts
+          .where((r) => r['pending_guest'] != 1)
+          .toList(growable: false);
+      await offline.writeDoc(
+        OfflineCache.snapshotKey('cart::$scope'),
+        {'products': products, 'subTotal': cartSubTotal},
+        scope: scope,
+      );
+    } catch (_) {}
+  }
+
+  bool _applyPendingCartSetQty(List<Map<String, dynamic>> rows) {
+    final ops = _pendingCartSetQtyOps();
+    if (ops.isEmpty) return false;
+    var changed = false;
+    for (final op in ops) {
+      final id = '${op.payload['product_variant_id'] ?? ''}';
+      if (id.isEmpty) continue;
+      final qty = J.i(op.payload['qty'], 0);
+      final i = rows.indexWhere(
+        (e) => '${e['product_variant_id'] ?? e['id']}' == id,
+      );
+      if (qty > 0) {
+        // Re-adding intent: rows must stay visible — drop any delete tombstone.
+        _deletedCartRows.remove(_tombstoneKey(id));
+      }
+      if (qty <= 0) {
+        if (i >= 0) {
+          rows.removeAt(i);
+          changed = true;
+        }
+        continue;
+      }
+      if (i >= 0) {
+        if (J.i(rows[i]['qty'] ?? rows[i]['quantity']) != qty) {
+          rows[i] = {...rows[i], 'qty': qty};
+          changed = true;
+        }
+      } else {
+        final row = <String, dynamic>{...op.payload};
+        row.remove('account_scope');
+        row['qty'] = qty;
+        row['pending_cart_op'] = 1; // marker: not confirmed by the server yet
+        rows.add(row);
+        changed = true;
+      }
+    }
+    if (changed) {
+      // Keep disk consistent with memory — survives cold restart.
+      _persistCartSnapshot();
+    }
+    return changed;
+  }
+
+  void _recomputeCartSubTotal() {
+    var total = 0.0;
+    for (final p in cartProducts) {
+      final price = J.d(
+        p['price'] ??
+            p['final_price'] ??
+            p['productPrice'] ??
+            p['sale_price'],
+      );
+      if (price > 0) total += price * J.i(p['qty'] ?? p['quantity'], 1);
+    }
+    cartSubTotal = total;
+    final cartMap = cart;
+    if (cartMap != null) {
+      cart = {...cartMap, 'cart': cartProducts, 'sub_total': cartSubTotal};
+    }
+  }
+
   double _guestCartLocalTotal() {
     var total = 0.0;
-    for (final item in guestCart) {
+    for (final item in visibleGuestCart) {
       final unit = J.d(
         item['price'] ??
             item['final_price'] ??
@@ -297,7 +552,16 @@ class AppController extends ChangeNotifier {
   }
 
   int _cartGen = 0;
-  Future<void>? _refreshInFlight;
+  // NOTE (cart restauration):
+  // A failed refresh tries to restore the last-good snapshot (if any) so the
+  // user still sees known lines while offline. Pending offline intents stored
+  // in the outbox (qty<=0 = delete) are applied by `_applyPendingCartSetQty`,
+  // which filters the corresponding rows out right after a snapshot/restore.
+  // The separation ensures a delete intent is honored even across app restarts.
+
+  // A full clear-all in progress: regular refreshes must NOT re-fold pending
+  // guest imports back into cartProducts (the user just asked for zero).
+  bool _clearingInFlight = false;
   List<TimeSlot> timeSlots = [];
   List<Map<String, dynamic>> checkoutGroups = [];
   List<Map<String, dynamic>> sellerGroups = [];
@@ -371,10 +635,26 @@ class AppController extends ChangeNotifier {
   int get decimals => J.i(settings['decimal_point'], 2);
   String get placeholder => J.str(webSettings['placeholder_image']);
 
+  /// A guest line is *visible in this account's cart* when it was queued
+  /// before any logged-in merge (unstamped — the classic anonymous offline
+  /// cart) or explicitly stamped with the current account's scope. Lines
+  /// stamped with a DIFFERENT account's scope are that account's undelivered
+  /// offline intent: they stay parked on this device, hidden here, and are
+  /// never merged into a different account (cross-account cart leak).
+  bool _guestLineVisibleHere(Map<String, dynamic> line) {
+    final stamp = '${line['merge_scope'] ?? ''}'.trim();
+    return stamp.isEmpty || stamp == accountScope;
+  }
+
+  /// Guest lines visible to the current identity. Foreign-stamped pending
+  /// lines are delivered only to the account that queued them.
+  List<Map<String, dynamic>> get visibleGuestCart =>
+      guestCart.where(_guestLineVisibleHere).toList();
+
   /// Total units in cart (sum of quantities), so the badge moves with every
   /// +/- tap — not just when a new line appears.
   int get cartCount {
-    final lines = isLoggedIn ? cartProducts : guestCart;
+    final lines = isLoggedIn ? cartProducts : visibleGuestCart;
     var total = 0;
     for (final item in lines) {
       total += J.i(item['qty'] ?? item['quantity']);
@@ -408,6 +688,11 @@ class AppController extends ChangeNotifier {
     vault = TokenVault(prefs: _prefs);
     store = LocalStore(_prefs);
     offline = OfflineCache(store);
+    // Fire-and-forget reachability probe (library-backed): the probe overlaps
+    // the catalog/cart network burst below, so by the time the UI settles
+    // the badge + the `looksOffline` fallbacks see reality instead of the
+    // optimistic default. Never throws; never blocks startup.
+    unawaited(connectivity.init());
     sync = SyncEngine(
       outboxForCurrentScope: () => PendingOutbox(store, accountScope),
       executor: runPendingOp,
@@ -457,6 +742,7 @@ class AppController extends ChangeNotifier {
       final guestRaw = _prefs.getString('guest_cart');
       if (guestRaw != null && guestRaw.isNotEmpty) {
         guestCart = J.maps(jsonDecode(guestRaw));
+        _applyGuestCartScopes();
       }
     } catch (_) {
       guestCart = [];
@@ -507,6 +793,7 @@ class AppController extends ChangeNotifier {
         } catch (_) {}
       } else if (_localCart!.items.isNotEmpty) {
         guestCart = _localCart!.items.map((c) => c.toMap()).toList();
+        _applyGuestCartScopes();
         _attachVariantLabels(guestCart);
         try {
           await store.writeJson('guest_cart', guestCart);
@@ -617,12 +904,53 @@ class AppController extends ChangeNotifier {
   /// Runs the outbox with the safe executor (favorites/cart-merge only).
   Future<void> kickSync() => sync.run(executor: runPendingOp);
 
+  /// Force-replays this account's pending offline cart intents and then
+  /// refreshes the cart.
+  ///
+  /// The regular outbox engine honors per-op backoff (avoids hammering a dead
+  /// link), but the user-visible cart is money-relevant state: tapping ONLINE
+  /// or resuming the app should not leave a just-deleted line sitting in the
+  /// server basket for 2s/4s/8s more. This function is called by the checkout
+  /// placement path and by [handleAppResumed].
+  Future<void> reconcilePendingCartOps() async {
+    final scope = accountScope;
+    if (!isLoggedIn) return;
+    final outbox = PendingOutbox(store, scope);
+    final ops = _pendingCartSetQtyOps();
+    for (final op in ops) {
+      // Ops that already burned their retry budget in a previous life stay
+      // parked instead of replaying on every resume; a "clear cart" drops
+      // them for good.
+      if (op.attempts >= PendingOutbox.maxAttempts) continue;
+      final ok = await runPendingOp(op);
+      if (ok) {
+        try {
+          await outbox.remove(op.id);
+        } catch (_) {}
+        continue;
+      }
+      // First failure usually means the link is still down — stop here, the
+      // engine's backoff schedule covers the rest.
+      break;
+    }
+    try {
+      await refreshCart();
+    } catch (_) {}
+  }
+
   /// Resumes durable best-effort work when the app returns to foreground.
   Future<void> handleAppResumed() async {
+    // Cart ops must be replayed BEFORE anything else so the visible cart is
+    // always reconciled with the server before it paints. kickSync is
+    // backoff-aware so the ops are usually not yet due — explicitly run the
+    // forced reconcile here instead of racing kickSync in parallel with it.
+    // Running them concurrently would execute the same ops twice (risk of
+    // a double-add on the server).
+    await reconcilePendingCartOps();
     await Future.wait<void>([
       kickSync(),
       syncCatalogSoon(),
-      if (isLoggedIn && guestCart.isNotEmpty) _mergeGuestCartAfterLogin(),
+      if (isLoggedIn && visibleGuestCart.isNotEmpty) _mergeGuestCartAfterLogin(),
     ]);
   }
 
@@ -1123,8 +1451,15 @@ class AppController extends ChangeNotifier {
     for (final p in cartProducts) {
       add(J.sellerId(p) ?? p['seller_id']);
     }
-    for (final p in guestCart) {
-      add(p['seller_id'] ?? J.sellerId(p));
+    // Guest pending lines count only when this session itself is the guest:
+    // for a logged-in customer the folded copies in cartProducts carry the
+    // seller, while another account's parked lines must not widen the
+    // one-seller/multi-seller limits of THIS cart.
+    if (!isLoggedIn) {
+      for (final p in guestCart) {
+        if (!_guestLineVisibleHere(p)) continue;
+        add(p['seller_id'] ?? J.sellerId(p));
+      }
     }
     for (final group in sellerGroups) {
       add(group['seller_id'] ?? group['sellerId'] ?? group['id']);
@@ -1144,8 +1479,15 @@ class AppController extends ChangeNotifier {
   int _qtyInCart(dynamic variantId) {
     if (variantId == null) return 0;
     final key = '$variantId';
-    final lines = isLoggedIn ? cartProducts : guestCart;
-    for (final item in lines) {
+    if (isLoggedIn) {
+      for (final item in cartProducts) {
+        if ('${item['product_variant_id'] ?? item['id']}' == key) {
+          return J.i(item['qty'] ?? item['quantity']);
+        }
+      }
+      return 0;
+    }
+    for (final item in visibleGuestCart) {
       if ('${item['product_variant_id'] ?? item['id']}' == key) {
         return J.i(item['qty'] ?? item['quantity']);
       }
@@ -1174,24 +1516,41 @@ class AppController extends ChangeNotifier {
       (e) => '${e['product_variant_id'] ?? e['id']}' == key,
     );
     if (qty <= 0) {
+      // Tombstone BEFORE the server read in the same mutation flow: the
+      // refresh executed right after this call must drop any server echo of
+      // this row. Without this the list shows the deleted line again.
+      _tombstoneCartRow(variantId);
       if (i >= 0) lines.removeAt(i);
-    } else if (i >= 0) {
-      lines[i] = {...lines[i], 'qty': qty};
     } else {
-      lines.add({
-        // ignore: use_null_aware_elements
-        if (productId != null) 'product_id': productId,
-        'product_variant_id': variantId,
-        'qty': qty,
-        // ignore: use_null_aware_elements
-        if (sellerId != null) 'seller_id': sellerId,
-        // Display + totals read `price`; keep both keys so optimistic lines
-        // never flash as 0 before the server confirms them.
-        // ignore: use_null_aware_elements
-        if (productPrice != null) 'price': productPrice,
-        // ignore: use_null_aware_elements
-        if (productPrice != null) 'productPrice': productPrice,
-      });
+      // The user re-added this variant — the delete tombstone must not
+      // suppress the freshly re-added row.
+      _deletedCartRows.remove(_tombstoneKey(key));
+      if (i >= 0) {
+        lines[i] = {...lines[i], 'qty': qty};
+      } else {
+        lines.add({
+          // ignore: use_null_aware_elements
+          if (productId != null) 'product_id': productId,
+          'product_variant_id': variantId,
+          'qty': qty,
+          // ignore: use_null_aware_elements
+          if (sellerId != null) 'seller_id': sellerId,
+          // Display + totals read `price`; keep both keys so optimistic lines
+          // never flash as 0 before the server confirms them.
+          // ignore: use_null_aware_elements
+          if (productPrice != null) 'price': productPrice,
+          // ignore: use_null_aware_elements
+          if (productPrice != null) 'productPrice': productPrice,
+        });
+      }
+    }
+    // Badge counts and the cart footer total read from cartSubTotal, so an
+    // optimistic mutation must recompute it IMMEDIATELY — otherwise the UI
+    // shows a stale total until the server responds (or forever when offline
+    // with no server answer). This is part of the deletion/add invariants,
+    // not cosmetic.
+    if (isLoggedIn) {
+      _recomputeCartSubTotal();
     }
     notifyListeners();
   }
@@ -1205,17 +1564,92 @@ class AppController extends ChangeNotifier {
     return existing.length >= maxSellersPerCheckout;
   }
 
-  /// Drops a locally listed cart line that the server claims does not exist
-  /// (see [removeCartLine] convergent removal). Strictly id-keyed and a
-  /// no-op for null/empty ids, so it can never wipe an unrelated line.
-  void _dropPhantomCartLine(dynamic variantId) {
+  /// Drops a pending offline guest-merge intent for a variant (local guest
+  /// lines only; server state untouched). Used when any authoritative server
+  /// operation supersedes the queued intent — e.g. the server removed the
+  /// line (delete) or the server now holds it with the user's chosen quantity
+  /// (add) — so a later non-idempotent replay can never overwrite newer
+  /// state or resurrect a deleted line.
+  ///
+  /// Scope-aware on purpose: lines parked for ANOTHER account on a shared
+  /// device are never dropped — this device's user cannot cancel their
+  /// neighbor's pending intent.
+  Future<void> _dropGuestPendingLine(dynamic variantId) async {
     if (variantId == null) return;
     final key = '$variantId';
     if (key.isEmpty || key == 'null') return;
+    final before = guestCart.length;
+    guestCart.removeWhere(
+      (e) =>
+          '${e['product_variant_id'] ?? e['id']}' == key &&
+          _guestLineVisibleHere(e),
+    );
+    if (guestCart.length != before) {
+      try {
+        await persistGuestCart();
+      } catch (_) {}
+    }
+  }
+
+  /// Drops a locally listed cart line that the server claims does not exist
+  /// (see [removeCartLine] convergent removal). Strictly id-keyed and a
+  /// no-op for null/empty ids, so it can never wipe an unrelated line.
+  ///
+  /// Also cancels the same variant's pending guest-merge intent: the server
+  /// Tombstones for cart variants just deleted by this client, kept for a
+  /// short TTL to bridge the server's read-after-write inconsistency window
+  /// after a confirmed delete. A server echo during that window must never
+  /// project the row back into the visible cart. Scoped per account so
+  /// tombstones recorded for account A never shadow account B's view.
+  static const Duration _deletedCartRowTtl = Duration(seconds: 20);
+  final Map<String, DateTime> _deletedCartRows = {};
+
+  String _tombstoneKey(String variantId) => '$accountScope:$variantId';
+
+  void _tombstoneCartRow(dynamic variantId) {
+    if (variantId == null) return;
+    final key = '$variantId';
+    if (key.isEmpty || key == 'null') return;
+    _deletedCartRows[_tombstoneKey(key)] = DateTime.now();
+  }
+
+  bool _isCartRowTombstoned(Map<String, dynamic> row) {
+    final key = '${row['product_variant_id'] ?? row['id']}';
+    final tsKey = _tombstoneKey(key);
+    final at = _deletedCartRows[tsKey];
+    if (at == null) return false;
+    if (DateTime.now().difference(at) > _deletedCartRowTtl) {
+      _deletedCartRows.remove(tsKey);
+      return false;
+    }
+    return true;
+  }
+
+  List<Map<String, dynamic>> _filterTombstoned(
+    List<Map<String, dynamic>> rows,
+  ) {
+    if (_deletedCartRows.isEmpty) return rows;
+    return rows.where((r) => !_isCartRowTombstoned(r)).toList();
+  }
+
+  /// confirmed the line is gone, so a queued offline merge for it must never
+  /// replay and resurrect the deleted line.
+  Future<void> _dropPhantomCartLine(dynamic variantId) async {
+    if (variantId == null) return;
+    final key = '$variantId';
+    if (key.isEmpty || key == 'null') return;
+    _tombstoneCartRow(variantId);
     final lines = isLoggedIn ? cartProducts : guestCart;
     final before = lines.length;
     lines.removeWhere((e) => '${e['product_variant_id'] ?? e['id']}' == key);
-    if (lines.length != before) notifyListeners();
+    var changed = lines.length != before;
+    final beforeGuest = guestCart.length;
+    await _dropGuestPendingLine(variantId);
+    if (guestCart.length != beforeGuest) changed = true;
+    // The server operation already converged for this variant: its pending
+    // offline set-qty intent is superseded, whatever it was.
+    await _dropPendingSetQtyOps(variantId);
+    if (changed) notifyListeners();
   }
 
   String storeNameOf(Map<String, dynamic>? product) {
@@ -1729,7 +2163,11 @@ class AppController extends ChangeNotifier {
     } catch (_) {}
   }
 
-  static const Duration _catalogSyncMinInterval = Duration(minutes: 30);
+  // A full catalog walk every 5 minutes of active browsing. The previous
+  // 30-minute interval meant new products could not appear for ~half an
+  // hour — enough to hurt the catalog as a reliable source of truth. Five
+  // minutes still bounds bandwidth/reconciler load.
+  static const Duration _catalogSyncMinInterval = Duration(minutes: 5);
   static const Duration _catalogRetryMinInterval = Duration(minutes: 1);
   static const String _kLastCatalogSyncSuccess = 'catalog_sync_success_at';
 
@@ -2503,20 +2941,62 @@ class AppController extends ChangeNotifier {
   @visibleForTesting
   Future<void> mergeGuestCartForTest() => _mergeGuestCartAfterLogin();
 
+  String _mergeAttemptsKey(String scope) => 'guest_merge_attempts::$scope';
+
+  int _mergeAttempts(String scope) =>
+      J.i(_prefs.getInt(_mergeAttemptsKey(scope)) ?? 0, 0);
+
+  Future<void> _bumpMergeAttempts(String scope) async {
+    try {
+      await _prefs.setInt(_mergeAttemptsKey(scope), _mergeAttempts(scope) + 1);
+    } catch (_) {}
+  }
+
+  Future<void> _clearMergeAttempts(String scope) async {
+    try {
+      await _prefs.remove(_mergeAttemptsKey(scope));
+    } catch (_) {}
+  }
+
+  /// bulkAddToCart is NOT idempotent — beyond a small number of replays for
+  /// the same pending set the client is quantifiably adding units the user
+  /// never bought. After the budget is spent the merge stops replaying; the
+  /// lines stay parked/folded for the user to review (delete to cancel)
+  /// instead of growing the cart on every single app resume.
+  static const int _mergeMaxAttempts = 5;
+
   Future<void> _mergeGuestCartAfterLoginInner() async {
-    if (!isLoggedIn || guestCart.isEmpty) return;
+    if (!isLoggedIn) return;
     final scope = accountScope;
-    final pending = guestCart
-        .map((item) => Map<String, dynamic>.from(item))
-        .toList(growable: false);
+    // Only this identity's pending lines are eligible for the merge.
+    // Lines stamped with another account's scope stay parked on this device
+    // for their owner instead of leaking into this account's cart.
+    final pending = _scopedPendingGuestLines();
+    if (pending.isEmpty) {
+      await _clearMergeAttempts(scope);
+      return;
+    }
 
     // Read first: a previous bulk call may have committed while its response
     // was lost. Matching final quantities prove the intent is already applied
     // and avoid a second non-idempotent submission.
-    final before = await refreshCart();
-    if (scope != accountScope || !before.ok) return;
+    final mergedKeys =
+        pending.map((item) => '${item['product_variant_id']}').toSet();
+    // NOTE: we intentionally do NOT return early when the cart read fails.
+    // A transport/server failure on the cart read must not discard the
+    // guest's pending lines — still attempt to merge them to the server.
+    await refreshCart();
+    if (scope != accountScope) return;
     if (_guestMergeMatches(pending, cartProducts)) {
-      await _clearMergedGuestCart();
+      await _clearMergeAttempts(scope);
+      await _clearMergedGuestCart(mergedKeys);
+      return;
+    }
+
+    if (_mergeAttempts(scope) >= _mergeMaxAttempts) {
+      // Budget exhausted: stop replaying blindly. Keep the pending lines
+      // folded/visible so the user can delete them to cancel the import.
+      _foldGuestCartIntoCartProducts();
       return;
     }
 
@@ -2528,25 +3008,128 @@ class AppController extends ChangeNotifier {
     );
     if (scope != accountScope) return;
     if (merged.ok) {
-      await _clearMergedGuestCart();
+      await _clearMergeAttempts(scope);
+      await _clearMergedGuestCart(mergedKeys);
+      // Confirm the server now reflects the merged lines.
+      await refreshCart();
       return;
     }
+    await _bumpMergeAttempts(scope);
+
+    // Merge failed (e.g. one_seller error, stock, max sellers). Keep the
+    // guest lines visible by folding them into cartProducts optimistically so
+    // they are not lost, and retry the merge in the background later.
+    // Stamp the still-pending lines with THIS account's scope first: on a
+    // shared device a later login of a DIFFERENT account must never inherit
+    // (or silently merge) them.
+    var stamped = false;
+    for (final item in guestCart) {
+      if (!_guestLineVisibleHere(item)) continue;
+      if ('${item['merge_scope'] ?? ''}' != scope) {
+        item['merge_scope'] = scope;
+        stamped = true;
+      }
+    }
+    if (stamped) {
+      try {
+        await persistGuestCart();
+      } catch (_) {}
+    }
+    _foldGuestCartIntoCartProducts();
+    await _refreshCartInner(checkout: 0);
+    // _refreshCartInner overwrites cartProducts from the server, so re-fold
+    // any guest lines that the server does not yet have to keep them visible.
+    _foldGuestCartIntoCartProducts();
 
     // Resolve an ambiguous timeout by reading the authoritative cart once.
     final after = await refreshCart();
     if (scope == accountScope &&
         after.ok &&
         _guestMergeMatches(pending, cartProducts)) {
-      await _clearMergedGuestCart();
+      await _clearMergeAttempts(scope);
+      await _clearMergedGuestCart(mergedKeys);
+      return;
     }
+    // The read above overwrites cartProducts from the server (empty), which
+    // also wiped the folded pending lines: fold them back so the locally
+    // held items stay visible until the merge can replay successfully or
+    // the user removes them — deleting a folded line now also cancels its
+    // pending entry, so this fold can never resurrect a deleted line.
+    _foldGuestCartIntoCartProducts();
+  }
+
+  /// Pending guest lines belonging to the current scope: unstamped lines
+  /// (anonymous pre-login intent) or ones stamped with this account.
+  List<Map<String, dynamic>> _scopedPendingGuestLines() => guestCart
+      .where(_guestLineVisibleHere)
+      .map((item) => Map<String, dynamic>.from(item))
+      .toList(growable: false);
+
+  /// Folds pending guest cart lines into [cartProducts] so they remain
+  /// visible after login even when the server merge cannot complete right now.
+  /// The lines stay in [guestCart] as well so a later merge attempt can still
+  /// push them to the server.
+  void _foldGuestCartIntoCartProducts() {
+    final visible = _scopedPendingGuestLines();
+    // Nothing to fold and nothing already folded: leave totals and listeners
+    // untouched (a plain refresh with no pending import must be a no-op).
+    final hadFoldedBefore =
+        cartProducts.any((p) => p['pending_guest'] == 1);
+    if (visible.isEmpty && !hadFoldedBefore) return;
+    final existing = <String, Map<String, dynamic>>{};
+    for (final p in cartProducts) {
+      existing['${p['product_variant_id'] ?? p['id']}'] = p;
+    }
+    for (final g in visible) {
+      final key = '${g['product_variant_id']}';
+      if (key.isEmpty || key == 'null') continue;
+      if (existing.containsKey(key)) continue;
+      cartProducts.add({
+        if (g['product_id'] != null) 'product_id': g['product_id'],
+        'product_variant_id': g['product_variant_id'],
+        'qty': J.i(g['qty'] ?? g['quantity'], 1),
+        if (g['seller_id'] != null) 'seller_id': g['seller_id'],
+        'name': g['name'] ?? '',
+        'image_url': g['image_url'] ?? g['image'] ?? '',
+        'price': J.d(
+          g['price'] ?? g['final_price'] ?? g['productPrice'] ?? g['sale_price'],
+        ),
+        if (g['variant_label'] != null && g['variant_label'].toString().isNotEmpty)
+          'variant_label': g['variant_label'],
+        // Folded by an unresolved offline merge: not on the server yet.
+        'pending_guest': 1,
+      });
+    }
+    _attachVariantLabels(cartProducts);
+    // Subtotal must describe the lines actually shown: server rows are priced
+    // in [cart], folded pending lines are not on the server yet — draw their
+    // revenue on top instead of showing a smaller total next to more lines.
+    var foldedTotal = 0.0;
+    for (final p in cartProducts) {
+      if (p['pending_guest'] == 1) {
+        foldedTotal +=
+            J.d(p['price']) * J.i(p['qty'] ?? p['quantity'], 1);
+      }
+    }
+    // Server rows are priced in the cart map; folded pending lines are not.
+    // When the server map is absent (offline snapshot restore) keep the
+    // last known total as the base instead of collapsing to zero.
+    final existingBase =
+        cart != null ? J.d(cart?['sub_total'] ?? cart?['total']) : cartSubTotal;
+    cartSubTotal = existingBase + foldedTotal;
+    notifyListeners();
   }
 
   bool _guestMergeMatches(
     List<Map<String, dynamic>> pending,
     List<Map<String, dynamic>> server,
   ) {
+    // Only SERVER-confirmed rows count; folded pending lines are not proof
+    // the server holds the intent (they would false-trigger "already applied"
+    // and silently drop the pending merge).
     final quantities = <String, int>{};
     for (final item in server) {
+      if (item['pending_guest'] == 1) continue;
       final id =
           '${item['product_variant_id'] ?? item['variant_id'] ?? item['id']}';
       quantities[id] = J.i(item['qty'] ?? item['quantity']);
@@ -2559,13 +3142,30 @@ class AppController extends ChangeNotifier {
     });
   }
 
-  Future<void> _clearMergedGuestCart() async {
-    guestCart = [];
-    guestCartTotal = 0;
-    await _prefs.remove('guest_cart');
-    try {
-      await _localCart?.clear();
-    } catch (_) {}
+  /// Clears the guest pending mirror after a merge succeeded. Only the
+  /// merged variant keys (and only this scope's visibility) are dropped, so
+  /// a freshly queued line or another account's parked intent is never lost.
+  Future<void> _clearMergedGuestCart([Set<String>? mergedVariantIds]) async {
+    if (mergedVariantIds == null) {
+      guestCart = [];
+    } else {
+      guestCart.removeWhere(
+        (g) =>
+            mergedVariantIds.contains('${g['product_variant_id']}') &&
+            _guestLineVisibleHere(g),
+      );
+    }
+    if (guestCart.isEmpty) {
+      guestCartTotal = 0;
+      await _prefs.remove('guest_cart');
+      try {
+        await _localCart?.clear();
+      } catch (_) {}
+    } else {
+      try {
+        await persistGuestCart();
+      } catch (_) {}
+    }
     notifyListeners();
   }
 
@@ -2619,6 +3219,19 @@ class AppController extends ChangeNotifier {
   bool _isNetworkResult(ApiResult r) =>
       r.classifiedError?.category == ApiErrorCategory.network;
 
+  /// "Server unreachable": network, 5xx, rate-limit, malformed — anything
+  /// where the backend did not give a business verdict. Callers treat these
+  /// as durably-queueable offline intents (retry later), as opposed to
+  /// business refusals (validation/notFound/status:0 with a message), which
+  /// represent a definitive server verdict about the payload.
+  bool _isUnavailableResult(ApiResult r) {
+    final c = r.classifiedError?.category;
+    return c == ApiErrorCategory.network ||
+        c == ApiErrorCategory.server ||
+        c == ApiErrorCategory.rateLimit ||
+        c == ApiErrorCategory.malformed;
+  }
+
   bool _isEmptyCartMessage(String message) {
     final m = message.toLowerCase();
     if (m.isEmpty) return false;
@@ -2634,26 +3247,35 @@ class AppController extends ChangeNotifier {
   }
 
   Future<ApiResult> refreshCart({int checkout = 0}) {
+    // Single-flight for refreshes: callers that find another in flight just
+    // await the same future instead of queueing behind the FIFO — that used
+    // to fire all N callers against the network sequentially instead of
+    // merging them into one.
+    final inFlight = _refreshInFlight;
+    if (inFlight != null) return inFlight;
     return _enqueueCart(() => _refreshCartInner(checkout: checkout));
   }
 
-  /// Coalesces concurrent refresh callers onto the single in-flight request
-  /// instead of firing N parallel `cart` GETs (was the main "slow cart"
-  /// complaint on stepper spam + pull-to-refresh overlap).
+  /// Singleton future for each cart refresh. Every caller that finds an
+  /// in-flight refresh waits for the same server response instead of getting
+  /// a synthetic "success-but-empty" pseudo-result — that path used to make
+  /// the checkout screen see `cart = {'coalesced': 1}` and render an
+  /// unresponsive empty form that the user thought was an internet problem.
+  Future<ApiResult>? _refreshInFlight;
+
   Future<ApiResult> _refreshCartInner({int checkout = 0}) async {
-    final mine = ++_cartGen;
     final ongoing = _refreshInFlight;
     if (ongoing != null) {
       try {
-        await ongoing;
-      } catch (_) {}
-      // A newer generation already refreshed: reuse current state.
-      if (mine < _cartGen) {
-        return ApiResult({'status': 1, 'data': [], 'coalesced': 1});
+        return await ongoing;
+      } catch (_) {
+        // If the shared request threw (should never happen — inner catches),
+        // fall through and try a fresh one.
       }
     }
+    final mine = ++_cartGen;
     final fut = _doRefreshCart(checkout: checkout, gen: mine);
-    _refreshInFlight = fut.then((_) {});
+    _refreshInFlight = fut;
     try {
       return await fut;
     } finally {
@@ -2669,6 +3291,12 @@ class AppController extends ChangeNotifier {
     if (point == null) {
       // No coordinates (no city yet): local cart is the truth — still
       // notify so badges/steppers reflect optimistic updates.
+      if (isLoggedIn && checkout == 0) {
+        if (_applyPendingCartSetQty(cartProducts)) {
+          _recomputeCartSubTotal();
+        }
+        _foldGuestCartIntoCartProducts();
+      }
       notifyListeners();
       return ApiResult({'status': 0});
     }
@@ -2682,9 +3310,24 @@ class AppController extends ChangeNotifier {
       if (scope != accountScope) return result;
       if (result.ok) {
         cart = result.dataMap;
-        cartProducts = J.maps(cart?['cart'] ?? cart?['items'] ?? result.data);
+        cartProducts = _filterTombstoned(
+          J.maps(cart?['cart'] ?? cart?['items'] ?? result.data),
+        );
         _attachVariantLabels(cartProducts);
         cartSubTotal = J.d(cart?['sub_total'] ?? cart?['total']);
+        if (_deletedCartRows.isNotEmpty) {
+          _recomputeCartSubTotal();
+        }
+        // Apply pending intents BEFORE persisting the snapshot — so what
+        // gets saved is exactly what the user sees and what will replay on
+        // the next reconnect, NOT a stale server echo with deleted lines.
+        if (checkout == 0) {
+          final applied = _applyPendingCartSetQty(cartProducts);
+          if (applied) _recomputeCartSubTotal();
+          if (!_clearingInFlight) {
+            _foldGuestCartIntoCartProducts();
+          }
+        }
         // Persist the confirmed snapshot so an offline restart still shows
         // the last server-confirmed lines (stale-badged, revalidated before
         // checkout — never treated as live stock/prices).
@@ -2736,14 +3379,17 @@ class AppController extends ChangeNotifier {
           cart = {'cart': <dynamic>[], 'sub_total': 0};
           cartProducts = [];
           cartSubTotal = 0;
+          final applied = _applyPendingCartSetQty(cartProducts);
+          if (applied) _recomputeCartSubTotal();
+          _foldGuestCartIntoCartProducts();
           try {
             await offline.removeDoc(
               OfflineCache.snapshotKey('cart::$accountScope'),
             );
           } catch (_) {}
-          notifyListeners();
           // Report the reachable empty cart as success: the UI must show the
           // empty state, not a misleading "connection failed" retry screen.
+          notifyListeners();
           return ApiResult({
             'status': 1,
             'message': result.message,
@@ -2752,10 +3398,10 @@ class AppController extends ChangeNotifier {
         }
       } else if (cartProducts.isEmpty) {
         // Request failed (transport/server error) with no live lines: restore
-        // the last server-confirmed snapshot for this account (scope-guarded).
-        // The UI badges it stale; checkout revalidates before any commit. The
-        // genuinely-empty business answer is handled in the branch above, so a
-        // line the user just deleted can never be resurrected from here.
+        // the last server-confirmed snapshot. Crucially, the tail
+        // `_applyPendingCartSetQty` below (qty<=0 intents filter rows out)
+        // removes any line whose deletion intent is still pending — so the
+        // deleted line is absent from the restored list as expected.
         try {
           final snap = offline.readDoc(
             OfflineCache.snapshotKey('cart::$accountScope'),
@@ -2764,17 +3410,38 @@ class AppController extends ChangeNotifier {
             final m = J.map(snap?.payload);
             final rows = J.maps(m['products']);
             if (rows.isNotEmpty) {
-              cartProducts = rows;
+              cartProducts = _filterTombstoned(rows);
               _attachVariantLabels(cartProducts);
               cartSubTotal = J.d(m['subTotal']);
+              if (_deletedCartRows.isNotEmpty) {
+                _recomputeCartSubTotal();
+              }
             }
           }
         } catch (_) {}
       }
+      if (checkout == 0) {
+        final applied = _applyPendingCartSetQty(cartProducts);
+        if (applied) {
+          // Pending offline intents win over stale server rows.
+          _recomputeCartSubTotal();
+        }
+        // Always rewrite so snapshot matches memory. The persistent layer is
+        // cheap (a few KB) and the user cares more about never seeing a row
+        // they deleted than a one-time write of a few bytes.
+        _persistCartSnapshot();
+        if (!_clearingInFlight) {
+          // Plain refreshes fold pending guest imports into cartProducts so
+          // they never disappear; during a full clear-all they must NOT be
+          // re-imported (that would undo the user's explicit clear).
+          _foldGuestCartIntoCartProducts();
+        }
+      }
       notifyListeners();
       return result;
     }
-    if (guestCart.isEmpty) {
+    final visibleNow = visibleGuestCart;
+    if (visibleNow.isEmpty) {
       guestCartTotal = 0;
       notifyListeners();
       return ApiResult({'status': 1, 'data': []});
@@ -2782,10 +3449,10 @@ class AppController extends ChangeNotifier {
     final result = await api.guestCart(
       latitude: point.latitude,
       longitude: point.longitude,
-      variantIds: guestCart
+      variantIds: visibleNow
           .map((item) => '${item['product_variant_id']}')
           .join(','),
-      quantities: guestCart.map((item) => '${item['qty']}').join(','),
+      quantities: visibleNow.map((item) => '${item['qty']}').join(','),
     );
     if (result.ok) {
       guestCartTotal = J.d(
@@ -2796,7 +3463,7 @@ class AppController extends ChangeNotifier {
         // Keep local quantities: the server prices the lines, but the
         // user's taps are the truth for qty until the server confirms.
         final localQty = <String, int>{};
-        for (final item in guestCart) {
+        for (final item in visibleNow) {
           localQty['${item['product_variant_id']}'] = J.i(
             item['qty'] ?? item['quantity'],
           );
@@ -2809,7 +3476,10 @@ class AppController extends ChangeNotifier {
             p['qty'] = keep;
           }
         }
-        guestCart = priced;
+        // Foreign-stamped pending lines for other accounts ride along
+        // untouched; server pricing replaces only this scope's lines.
+        final foreign = guestCart.where((l) => !_guestLineVisibleHere(l));
+        guestCart = [...foreign, ...priced];
         _attachVariantLabels(guestCart);
       }
     }
@@ -2825,6 +3495,24 @@ class AppController extends ChangeNotifier {
     }
     return coords;
   }
+
+  /// True when the library-backed monitor sees the device as online. Wired
+  /// in bootstrap; flips live as connectivity changes (a Wi-Fi toggle triggers
+  /// an immediate probe through the connectivity_plus trigger stream).
+  bool get isOnline => connectivity.isOnline;
+
+  /// Unified offline signal: the device-level probe says "no internet", OR
+  /// the last server call failed with a network class (Wi-Fi without
+  /// internet, backend unreachable, etc.). Screens use this to prefer cached
+  /// paint over an error state — never for authorization-level decisions
+  /// (those stay server-authoritative).
+  bool get looksOffline => !isOnline || api.likelyOffline;
+
+  /// Test hook: flips the connectivity flag synchronously (no probe, no
+  /// timers). Lets widget tests exercise online/offline rendering
+  /// deterministically.
+  @visibleForTesting
+  void overrideConnectivityForTest(bool value) => connectivity.overrideForTest(value);
 
   /// Authoritative reachability probe for online-only mutations. Always
   /// probes (no success-window shortcut: a recent success must never green-
@@ -2926,9 +3614,23 @@ class AppController extends ChangeNotifier {
         snapshot = List<Map<String, dynamic>>.from(cartProducts);
         cartProducts = [];
         notifyListeners();
-        try {
-          await api.clearCart();
-        } catch (_) {}
+        // An ignored clear failure would silently leave another seller's
+        // lines on the server — the "replace seller" button would produce a
+        // mixed cart. Restore the visible snapshot and abort instead.
+        final cleared = await api.clearCart();
+        if (cleared.ok) {
+          // The whole server cart was wiped: pending offline intents from
+          // the old cart must not resurrect it via the next refresh.
+          await _dropAllPendingSetQtyOps();
+        } else {
+          cartProducts = snapshot;
+          notifyListeners();
+          return _isNetworkResult(cleared)
+              ? kRequiresInternet
+              : (cleared.message.isEmpty
+                    ? t('something_went_wrong')
+                    : cleared.message);
+        }
       } else {
         snapshot = List<Map<String, dynamic>>.from(cartProducts);
       }
@@ -2952,19 +3654,47 @@ class AppController extends ChangeNotifier {
           qty: qty,
         );
       } catch (_) {
-        // Logged-in cart mutations require the server: a local-only line would
-        // be silently erased by the next authoritative refresh. Revert the
-        // optimistic change and ask for a connection instead.
-        cartProducts = snapshot;
+        // Could not reach the server: keep the change locally AND durably —
+        // the outbox replays the absolute quantity once connectivity returns.
+        // (Before: the optimistic change was reverted and LOST on the next
+        // app launch while the user had no idea anything was dropped.)
+        final queued = await _enqueueCartSetQty(
+          productId: productId,
+          variantId: variantId,
+          qty: qty,
+          variantLabel: variantLabel.trim().isEmpty ? null : variantLabel.trim(),
+          price: productPrice,
+          sellerId: sellerId,
+          storeName: storeName,
+          productName: null,
+        );
+        if (!queued) {
+          cartProducts = snapshot;
+          notifyListeners();
+          return looksOffline
+              ? kRequiresInternet
+              : t('something_went_wrong');
+        }
         notifyListeners();
-        return api.likelyOffline
-            ? kRequiresInternet
-            : t('something_went_wrong');
+        return null;
       }
-      if (_isNetworkResult(result)) {
-        cartProducts = snapshot;
+      if (_isUnavailableResult(result)) {
+        final queued = await _enqueueCartSetQty(
+          productId: productId,
+          variantId: variantId,
+          qty: qty,
+          variantLabel: variantLabel.trim().isEmpty ? null : variantLabel.trim(),
+          price: productPrice,
+          sellerId: sellerId,
+          storeName: storeName,
+        );
+        if (!queued) {
+          cartProducts = snapshot;
+          notifyListeners();
+          return kRequiresInternet;
+        }
         notifyListeners();
-        return kRequiresInternet;
+        return null;
       }
       if (result.oneSellerError == 1) {
         await _refreshCartInner(checkout: 0);
@@ -2981,15 +3711,24 @@ class AppController extends ChangeNotifier {
       }
       await _refreshCartInner(checkout: 0);
       await _invalidateCheckoutSession();
+      // The server now holds this variant with the user's chosen quantity:
+      // any pending offline guest intent for it is stale, and a later
+      // non-idempotent merge replay would overwrite the newer server state.
+      await _dropGuestPendingLine(variantId);
+      // The same applies to a pending offline set-qty intent: the server
+      // already agrees on the newest quantity.
+      await _dropPendingSetQtyOps(variantId);
       return null;
     }
     // Guest lines are persisted locally and accepted even when offline; server
     // pricing is reconciled on the next successful refresh. Only the final
     // checkout is rejected offline.
     if (replaceSeller) {
-      guestCart = [];
-    } else if (guestCart.isNotEmpty && sellerId != null && oneSellerCart) {
-      final current = guestCart.first['seller_id'];
+      // Clearing "the guest cart" cancels THIS identity's pending intent;
+      // lines parked for another account stay untouched.
+      guestCart = guestCart.where((l) => !_guestLineVisibleHere(l)).toList();
+    } else if (visibleGuestCart.isNotEmpty && sellerId != null && oneSellerCart) {
+      final current = visibleGuestCart.first['seller_id'];
       if (current != null &&
           '$current'.isNotEmpty &&
           '$current' != '$sellerId') {
@@ -2997,7 +3736,9 @@ class AppController extends ChangeNotifier {
       }
     }
     final existingIndex = guestCart.indexWhere(
-      (item) => '${item['product_variant_id']}' == '$variantId',
+      (item) =>
+          '${item['product_variant_id']}' == '$variantId' &&
+          _guestLineVisibleHere(item),
     );
     if (variantLabel.trim().isNotEmpty) {
       await rememberVariantLabel(variantId, variantLabel);
@@ -3064,41 +3805,88 @@ class AppController extends ChangeNotifier {
           variantId: variantId,
         );
       } catch (_) {
-        cartProducts = snapshot;
+        // Not reachable: durably queue the removal instead of reverting.
+        // (Before: the line reappeared on the next refresh and the app
+        // claims the item was never deleted.)
+        final queued = await _enqueueCartSetQty(
+          productId: productId,
+          variantId: variantId,
+          qty: 0,
+        );
+        if (!queued) {
+          cartProducts = snapshot;
+          notifyListeners();
+          return looksOffline
+              ? kRequiresInternet
+              : t('something_went_wrong');
+        }
         notifyListeners();
-        return api.likelyOffline
-            ? kRequiresInternet
-            : t('something_went_wrong');
+        return null;
       }
-      if (_isNetworkResult(result)) {
-        cartProducts = snapshot;
+      if (_isUnavailableResult(result)) {
+        final queued = await _enqueueCartSetQty(
+          productId: productId,
+          variantId: variantId,
+          qty: 0,
+        );
+        if (!queued) {
+          cartProducts = snapshot;
+          notifyListeners();
+          return kRequiresInternet;
+        }
         notifyListeners();
-        return kRequiresInternet;
+        return null;
       }
       if (!result.ok) {
         if (_isAlreadyRemoved(result.message)) {
+          // Server truth: the row is gone and must NOT reappear — keep the
+          // tombstone and converge the list.
           await _refreshCartInner(checkout: 0);
           // The server claims this id does not exist: make sure a
           // resurrected phantom (same id echoed back by refresh) never
-          // stays visible and undeletable.
-          _dropPhantomCartLine(variantId);
+          // stays visible and undeletable. This also cancels the same
+          // variant's pending guest-merge intent, so the deleted line
+          // can never come back through a later offline merge/resume.
+          await _dropPhantomCartLine(variantId);
           await _invalidateCheckoutSession();
           return null;
         }
+        // Business refusal or unrecognized rejection — the server still owns
+        // the row. Release the tombstone so refresh restores server truth
+        // (otherwise the line stays invisible while the server still has it).
+        _deletedCartRows.remove(_tombstoneKey('$variantId'));
         await _refreshCartInner(checkout: 0);
+        // The refresh shows the variant gone but the refusal message was not
+        // one of the recognized "not found" phrasings. Do not hide the server's
+        // answer — but DO cancel the pending guest intent: this line was
+        // deleted on purpose and must never merge back (stuck-item bug).
+        final stillThere = cartProducts.any(
+          (e) => '${e['product_variant_id'] ?? e['id']}' == '$variantId',
+        );
+        if (!stillThere) {
+          await _dropPhantomCartLine(variantId);
+        }
         await _invalidateCheckoutSession();
         return result.message.isEmpty
             ? t('something_went_wrong')
             : result.message;
       }
       await _refreshCartInner(checkout: 0);
+      // The server removed the line; cancel any pending guest-merge intent
+      // for it too. Otherwise the phantom re-merges on login/app-resume and
+      // the just-deleted line reappears (the reported stuck-item bug).
+      await _dropPhantomCartLine(variantId);
       await _invalidateCheckoutSession();
       return null;
     }
     // Guest removal is also accepted offline: update the local cart and
-    // reconcile with the server on the next successful refresh.
+    // reconcile with the server on the next successful refresh. Only this
+    // session's visible lines are dropped; another account's parked line
+    // for the same variant (shared device) is kept.
     guestCart.removeWhere(
-      (item) => '${item['product_variant_id']}' == '$variantId',
+      (item) =>
+          '${item['product_variant_id']}' == '$variantId' &&
+          _guestLineVisibleHere(item),
     );
     await persistGuestCart();
     notifyListeners();
@@ -3111,39 +3899,84 @@ class AppController extends ChangeNotifier {
     return _enqueueCart(() async {
       if (isLoggedIn) {
         // Logged-in clear attempts the server call and restores the snapshot
-        // on failure. The guest cart belongs to a different identity and must
-        // never be touched from this branch.
+        // on failure. Only THIS identity's guest pending items (unstamped or
+        // stamped with the current account) are cleared; lines parked for
+        // another account on this device must never be touched.
         final snapshot = List<Map<String, dynamic>>.from(cartProducts);
+        final snapshotCart = cart;
+        final snapshotSubTotal = cartSubTotal;
+        // Tombstone everything being cleared (read-after-write bridge).
+        for (final row in snapshot) {
+          _tombstoneCartRow(row['product_variant_id'] ?? row['id']);
+        }
         cartProducts = [];
         cartSubTotal = 0;
+        _clearingInFlight = true;
         notifyListeners();
         try {
           final res = await api.clearCart();
-          if (_isNetworkResult(res)) {
+          if (!res.ok) {
+            // Network OR business refusal: restore the visible state — the
+            // cart was never cleared server-side, so a "cleared" UI would lie.
             cartProducts = snapshot;
+            cartSubTotal = snapshotSubTotal;
+            cart = snapshotCart;
+            _clearingInFlight = false;
             notifyListeners();
             return;
           }
         } catch (_) {
           cartProducts = snapshot;
+          cartSubTotal = snapshotSubTotal;
+          cart = snapshotCart;
+          _clearingInFlight = false;
           notifyListeners();
           return;
         }
+        // Whole cart cleared: any pending offline cart intents (e.g. offline
+        // adds queued while the device was unreachable) must not resurrect it.
+        await _dropAllPendingSetQtyOps();
       } else {
-        // Guest cart is entirely local: clearing works offline too.
-        guestCart = [];
-        guestCartTotal = 0;
-        try {
-          await _prefs.remove('guest_cart');
-        } catch (_) {}
-        try {
-          await _localCart?.clear();
-        } catch (_) {}
-        notifyListeners();
+        // Guest "clear cart" cancels THIS identity's pending intent; lines
+        // parked for another account on this device stay untouched.
+        final parked =
+            guestCart.where((l) => !_guestLineVisibleHere(l)).toList();
+        if (parked.isEmpty) {
+          // Tombstone everything being cleared (read-after-write bridge).
+          for (final row in guestCart) {
+            _tombstoneCartRow(row['product_variant_id'] ?? row['id']);
+          }
+          guestCart = [];
+          guestCartTotal = 0;
+          try {
+            await _prefs.remove('guest_cart');
+          } catch (_) {}
+          try {
+            await _localCart?.clear();
+          } catch (_) {}
+          notifyListeners();
+        } else {
+          guestCart = parked;
+          await persistGuestCart();
+        }
         await _invalidateCheckoutSession();
         return;
       }
+      // Success: also drop pending import lines stamped with THIS account's
+      // scope (a previous failed merge of this same identity's offline cart
+      // — the same class of stuck phantom as the per-line delete). Lines
+      // stamped for another account, and UNSTAMPED lines (which traditionally
+      // belong to the anonymous device session — keeping that contract), are
+      // left in place.
+      final before = guestCart.length;
+      guestCart.removeWhere((l) => '${l['merge_scope'] ?? ''}' == accountScope);
+      if (guestCart.length != before) {
+        try {
+          await persistGuestCart();
+        } catch (_) {}
+      }
       await _refreshCartInner(checkout: 0);
+      _clearingInFlight = false;
       await _invalidateCheckoutSession();
     });
   }
@@ -3317,6 +4150,35 @@ class AppController extends ChangeNotifier {
           // bulkAddToCart is not idempotent, so guest-cart merge is never
           // replayed automatically. Drain any legacy queued merges.
           return true;
+        case PendingOpType.cartSetQty:
+          final pid = op.payload['product_id'];
+          final vid =
+              op.payload['product_variant_id'] ?? op.payload['variant_id'];
+          final qty = J.i(op.payload['qty'], 1);
+          if (pid == null || vid == null) return true;
+          if (qty > 0) {
+            // User re-added or bumped this variant: drop any delete tombstone.
+            _deletedCartRows.remove(_tombstoneKey('$vid'));
+          }
+          if (qty <= 0) {
+            // Deletion intent (idempotent remove).
+            final r = await api.removeFromCart(productId: pid, variantId: vid);
+            if (r.ok) return true;
+            if (_isAlreadyRemoved(r.message)) return true;
+            if (_isPermanent(r.classifiedError)) return true;
+            return false;
+          }
+          // Absolute quantity intent — replaying is idempotent on the
+          // server contract of `cart/add` (set, not add).
+          final r = await api.addToCart(
+            productId: pid,
+            variantId: vid,
+            qty: qty,
+          );
+          if (r.ok) return true;
+          if (r.oneSellerError == 1) return true; // business refusal
+          if (_isPermanent(r.classifiedError)) return true;
+          return false;
       }
     } catch (_) {
       return false;

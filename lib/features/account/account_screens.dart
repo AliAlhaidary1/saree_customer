@@ -186,6 +186,12 @@ class AccountScreen extends StatelessWidget {
         ),
         _tile(
           context,
+          Icons.notifications_none,
+          app.t('notif_preferences_title'),
+          '/notification_preferences',
+        ),
+        _tile(
+          context,
           Icons.lock_outline,
           app.t('change_password'),
           '/change-password',
@@ -555,8 +561,10 @@ class _OrdersScreenState extends State<OrdersScreen>
     final scope = appController.accountScope;
     if (!more && mounted) setState(() => loading = true);
 
-    // Paint cached account-scoped list before network.
-    if (!more && active.isEmpty) {
+    // Paint cached account-scoped list before network when offline only.
+    // Online: network is the source of truth; the local cache is offline
+    // fallback — painting it first would flash the user stale rows.
+    if (!more && active.isEmpty && appController.looksOffline) {
       final cached = appController.readCachedOrders();
       if (cached.active.isNotEmpty || cached.previous.isNotEmpty) {
         setState(() {
@@ -2982,12 +2990,14 @@ class _WishlistScreenState extends State<WishlistScreen> {
     }
     final scope = appController.accountScope;
     await appController.restoreCachedFavorites();
-    final cached = appController.readCachedWishlist();
-    if (cached.isNotEmpty && mounted) {
-      setState(() {
-        items = cached;
-        loading = false;
-      });
+    if (appController.looksOffline) {
+      final cached = appController.readCachedWishlist();
+      if (cached.isNotEmpty && mounted) {
+        setState(() {
+          items = cached;
+          loading = false;
+        });
+      }
     }
     final point = appController.coords ?? (latitude: 0.0, longitude: 0.0);
     final result = await appController.api.favorites(

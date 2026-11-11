@@ -1,4 +1,4 @@
-# Offline Catalog Migration & Implementation Plan — SareeMart Customer App
+# Offline Catalog Migration & Implementation Plan — Sarea Mart Customer App
 
 **Status: REVISED PROPOSAL (Rev 2) — awaiting approval. No storage-engine
 change has been made by this document.**

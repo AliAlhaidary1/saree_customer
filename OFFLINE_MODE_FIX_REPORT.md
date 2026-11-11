@@ -1,4 +1,4 @@
-# Offline-First Architecture Report — SareeMart Customer App
+# Offline-First Architecture Report — Sarea Mart Customer App
 
 ## A. Executive Summary
 

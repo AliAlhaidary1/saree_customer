@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/app_theme.dart';
 
 /// شاشة بداية واحدة فقط — خلفية كحلية سادة (نفس لون الـ Native)
-/// أنيميشن بسيط وسريع: خطوط سرعة + ومضة برق + ظهور اسم سريع MART.
+/// أنيميشن بسيط وسريع: خطوط سرعة + ومضة برق + ظهور اسم سريع مارت.
 class BrandSplashScreen extends StatefulWidget {
   const BrandSplashScreen({super.key, this.onComplete});
 
@@ -29,7 +29,7 @@ class _BrandSplashScreenState extends State<BrandSplashScreen>
     super.initState();
     _c = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
+      duration: const Duration(milliseconds: 700),
     );
 
     _lines = Tween<double>(begin: 0.0, end: 1.0).animate(
